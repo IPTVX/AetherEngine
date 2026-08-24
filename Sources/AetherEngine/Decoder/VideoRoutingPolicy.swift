@@ -1,4 +1,4 @@
-import Libavcodec
+import AetherLibavcodec
 
 /// Pure codec-and-field-order routing decision extracted from AetherEngine.load's dispatch so it is
 /// unit-testable. Native carries HEVC, H.264 and HW-decodable AV1; every other video codec is
