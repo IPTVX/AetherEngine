@@ -1,8 +1,8 @@
 import AVFoundation
 import Foundation
-import Libavformat
-import Libavcodec
-import Libavutil
+import AetherLibavformat
+import AetherLibavcodec
+import AetherLibavutil
 
 /// HLS-fMP4 loopback session: libavformat `hls` muxer fed by `Demuxer`, fragments
 /// redirected into `SegmentCache` via custom `io_open`/`io_close2`, served to

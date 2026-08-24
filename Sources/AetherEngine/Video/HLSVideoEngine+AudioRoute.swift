@@ -1,7 +1,7 @@
 import Foundation
-import Libavformat
-import Libavcodec
-import Libavutil
+import AetherLibavformat
+import AetherLibavcodec
+import AetherLibavutil
 
 extension HLSVideoEngine {
 
