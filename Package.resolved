@@ -1,5 +1,5 @@
 {
-  "originHash" : "897b192bbf3d666208257096a888cb373809d2a25634965d32976d2079632052",
+  "originHash" : "0367d1f11817a6b38c8304618b6df35a463629bc7f8ed206b9d8133fa2fb06c6",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -15,7 +15,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/IPTVX/LibDovi",
       "state" : {
-        "revision" : "4e3dda3d7f9b8b4ea79bb662ec7aab66794b6762",
+        "revision" : "ff17c07e38345a0d895ecfae8090958f995f428b",
         "version" : "2.0.0-iptvx"
       }
     },
