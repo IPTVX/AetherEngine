@@ -6,7 +6,7 @@ let package = Package(
     name: "AetherEngine",
     platforms: [
         .iOS(.v16),
-        .tvOS(.v17),
+        .tvOS(.v16),
         .macOS(.v14),
         .visionOS(.v1),
     ],
