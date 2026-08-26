@@ -6,7 +6,7 @@ let package = Package(
     name: "AetherEngine",
     platforms: [
         .iOS(.v16),
-        .tvOS(.v17),
+        .tvOS(.v16),
         .macOS(.v14),
         .visionOS(.v1),
     ],
@@ -38,7 +38,7 @@ let package = Package(
         // rebuilds still reach existing tags, which is where a pure rebuild
         // belongs; anything that adds slices or enables a component is a minor
         // and reaches consumers through an engine release.
-        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", .upToNextMinor(from: "2.4.3")),  // 2.4.3: the legacy Microsoft video decoders (msmpeg4v1/v2/v3, wmv1/wmv2/wmv3; FFmpegBuild#3); 2.4.2: pgssubdec missing-palette recovery, replaces the 2.1.1 Epoch-Continue retain (#142); 2.4.1: qtrle decoder; 2.4.0: visionOS (xros) device + simulator slices; 2.3.0: webvtt demuxer (standalone .vtt sidecars, plus the cue settings as packet side data); 2.2.0: matroska TTS warn-only per RFC 9559 (#145 rework); 2.1.3: sup demuxer (raw PGS sidecars); 2.1.2: matroska TrackTimestampScale clamp (#145, dropped in 2.2.0); 2.1.1: pgssubdec Epoch-Continue retain (#142); 2.1.0: yadif_videotoolbox + hwupload (Metal GPU deinterlace); 2.0.0: dynamic frameworks (LGPL), zvbi GPL excision
+        .package(url: "https://github.com/IPTVX/FFmpegBuild", exact: "2.4.3-iptvx"),  // IPTVX namespace-only rebuild of public FFmpegBuild 2.4.3.
         // Pure-Swift SMB2 client (MIT) that speaks the protocol over
         // NWConnection. Replaces AMSMB2/libsmb2, which EPERMs on tvOS/iOS.
         // Pinned to the 0.3.x minor: SMBClient is pre-1.0 with an actively
@@ -51,13 +51,13 @@ let package = Package(
         // worked example: 1.1.0 shipped a tvOS floor raise as a minor, SwiftPM
         // floated every `from: "1.0.x"` consumer onto it and then failed on the
         // floor instead of backing off, so all of 5.x stopped resolving.
-        .package(url: "https://github.com/superuser404notfound/LibDovi", .upToNextMinor(from: "2.0.0")),  // 2.0.0: visionOS (xros) device + simulator slices, declared tvOS floor corrected to 17.0 (was published as 1.1.0, withdrawn: a floor raise is breaking and broke every 5.x pin that floated onto it); 1.0.2: iOS slices + x86_64 (Intel Macs)
+        .package(url: "https://github.com/IPTVX/LibDovi", exact: "2.0.0-iptvx"),  // IPTVX rebuild of public LibDovi 2.0.0 with iOS and tvOS 16 deployment floors.
     ],
     targets: [
         .target(
             name: "AetherEngine",
             dependencies: [
-                .product(name: "FFmpegBuild", package: "FFmpegBuild"),
+                .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
             ],
             linkerSettings: [
