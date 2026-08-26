@@ -1,5 +1,5 @@
 import XCTest
-import Libavcodec
+import AetherLibavcodec
 @testable import AetherEngine
 
 /// The documentation quotes numbers. "32 entries", "six hours", "a quarter of the tmp volume's free

@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
-import Libavformat
-import Libavcodec
-import Libavutil
+import AetherLibavformat
+import AetherLibavcodec
+import AetherLibavutil
 
 /// Long-lived fragmented-MP4 muxer for one playback session. ONE AVFormatContext (mp4 muxer,
 /// NOT hls wrapper) with movflags +empty_moov+default_base_moof+frag_custom+delay_moov.
