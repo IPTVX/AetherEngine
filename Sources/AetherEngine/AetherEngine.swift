@@ -5,9 +5,9 @@ import CoreMedia
 import CoreVideo
 import AVFoundation
 import Combine
-import Libavformat
-import Libavcodec
-import Libavutil
+import AetherLibavformat
+import AetherLibavcodec
+import AetherLibavutil
 
 #if canImport(UIKit)
 import UIKit
