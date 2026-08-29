@@ -20,6 +20,8 @@ extension AetherEngine {
     func applyNativeHostClockTick(_ value: Double) {
         // nativeClockSeconds preserves the raw AVPlayer clock for onPlaylistShiftChanged to re-derive against.
         nativeClockSeconds = value
+        // AE#446 round 4: before anything folds, establish which axis this item's clock is even on.
+        measureLiveItemAxisOffset()
         // Newest seam at or before the raw clock wins: activates seams on forward play, re-applies pre-seam shift on backward DVR seeks.
         if let active = presentationAxis.shiftSeconds(atItemSeconds: value) {
             playlistShiftSeconds = active
@@ -28,12 +30,13 @@ extension AetherEngine {
             // AE#105: fold the disc's clip-0 STC base back out so the published playhead sits on the same
             // 0-based axis as the MPLS duration (origin 0 for normal/live -> no-op).
             clock.currentTime = PresentationAxis.display(
-                sourcePTS: value + playlistShiftSeconds,
+                sourcePTS: value + playlistShiftSeconds + liveItemAxisOffsetSeconds,
                 origin: displayOrigin(forShift: playlistShiftSeconds))
         }
         // Live edge must fold with the same playlistShiftSeconds as the playhead; opposite sign would make behindLiveSeconds meaningless.
         if isLive {
-            publishLiveWindow(edgeSessionTime: (nativeHost?.seekableEnd ?? 0) + playlistShiftSeconds)
+            publishLiveWindow(edgeSessionTime: (nativeHost?.seekableEnd ?? 0) + playlistShiftSeconds
+                              + liveItemAxisOffsetSeconds)
         }
     }
 
@@ -221,10 +224,10 @@ extension AetherEngine {
                 // #127: replay the latest host seek that arrived while the item was pre-ready.
                 // #178: not while still .loading (autostart paths hold .loading past readiness);
                 // replaying now would just re-stash. The state didSet resolves that case.
-                if ready, self.state != .loading, let pending = self.pendingPreReadySeekSeconds {
-                    self.pendingPreReadySeekSeconds = nil
-                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending))s (#127)", category: .engine)
-                    Task { @MainActor in await self.seek(to: pending) }
+                if ready, self.state != .loading, let pending = self.pendingPreReadySeek {
+                    self.pendingPreReadySeek = nil
+                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending.seconds))s (#127)", category: .engine)
+                    Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin) }
                 }
             }
             .store(in: &cancellables)
@@ -234,7 +237,15 @@ extension AetherEngine {
             .store(in: &cancellables)
         didReachEnd
             .filter { $0 }
-            .sink { [weak self] _ in self?.state = .ended }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                // AE#446: a live window served as a finished asset (its source stopped delivering while
+                // the viewer still had resident runway) reaches an end that is not the end of anything.
+                // `.ended` is terminal (#63/#164), so forwarding it here would turn a source hiccup into
+                // a dead session for the rest of the tune.
+                if self.handleLiveOutageWindowExhausted() { return }
+                self.state = .ended
+            }
             .store(in: &cancellables)
     }
 
@@ -424,23 +435,24 @@ extension AetherEngine {
                   perFrameHDR: true,
                   // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
                   skipInitialSeek: startPosition == nil,
-                  forwardBufferDuration: 0,
-                  // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
-                  // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
-                  surfaceEndFailures: true,
-                  httpHeaders: options.httpHeaders,
-                  // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting it
-                  // back would ping-pong), and hosts can opt out via LoadOptions.
-                  armIngestFallback: RemoteHLSIngestFallback.shouldArm(
-                      isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
-                  // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
-                  // origin that stops answering; it does not cover one that answers everything while
-                  // AVFoundation builds no track, where nothing terminal is ever published.
-                  readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
-                  isLive: options.isLive,
-                  // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
-                  // owns the moment it is told to stop waiting.
-                  liveJoinStartsImmediately: options.liveJoinStartsImmediately)
+                  contract: .init(
+                      isLive: options.isLive,
+                      // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
+                      // owns the moment it is told to stop waiting.
+                      liveJoinStartsImmediately: options.liveJoinStartsImmediately,
+                      forwardBufferDuration: 0,
+                      // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
+                      // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
+                      surfaceEndFailures: true,
+                      httpHeaders: options.httpHeaders,
+                      // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting
+                      // it back would ping-pong), and hosts can opt out via LoadOptions.
+                      armIngestFallback: RemoteHLSIngestFallback.shouldArm(
+                          isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
+                      // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
+                      // origin that stops answering; it does not cover one that answers everything while
+                      // AVFoundation builds no track, where nothing terminal is ever published.
+                      readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds))
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
         // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
@@ -584,7 +596,20 @@ extension AetherEngine {
         } else {
             liveCadenceObservation = nil
         }
-        let initialTargetDurationFloor = liveIngest?.upstreamTargetDuration
+        // AE#447: the floor is measured (arrival cadence + the longest segment the upstream really
+        // served), the advert rides along for the seal log only. Both weak, same reason as above.
+        let liveClosedCadenceObservation: (@Sendable () -> Double?)?
+        let liveUpstreamSegmentDurationObservation: (@Sendable () -> Double?)?
+        if let liveIngest {
+            liveClosedCadenceObservation = { [weak liveIngest] in liveIngest?.closedLiveCadenceSeconds }
+            liveUpstreamSegmentDurationObservation = { [weak liveIngest] in
+                liveIngest?.upstreamSegmentDurationSeconds
+            }
+        } else {
+            liveClosedCadenceObservation = nil
+            liveUpstreamSegmentDurationObservation = nil
+        }
+        let upstreamSelfReportedTargetDuration = liveIngest?.upstreamTargetDuration
         // #199: in-engine reopen transport for live ingest sessions. Only HLSLiveIngestReader main
         // readers are reconstructible blind (immutable URL + headers, hint always "mpegts"); the
         // demuxed-audio shape is excluded because a reopen would also have to rebuild the side audio
@@ -615,7 +640,9 @@ extension AetherEngine {
             liveJoinProfile: loadedOptions.liveJoinProfile,
             blockingReloadOverride: loadedOptions.liveBlockingReload,
             liveCadenceObservation: liveCadenceObservation,
-            initialTargetDurationFloor: initialTargetDurationFloor,
+            liveClosedCadenceObservation: liveClosedCadenceObservation,
+            liveUpstreamSegmentDurationObservation: liveUpstreamSegmentDurationObservation,
+            upstreamSelfReportedTargetDuration: upstreamSelfReportedTargetDuration,
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
             customSourceReopenFactory: ingestReopenFactory,
@@ -686,6 +713,13 @@ extension AetherEngine {
                     + "avBufAhead=\(String(format: "%.2f", avBufAhead))s",
                     category: .session
                 )
+                // AE#418 round 3: a fetch is not a placement. The composition assumed AVPlayer's
+                // timeline was carrying the last axis this side published; the item's own loaded
+                // ranges say whether it was. Live rebases the whole timeline at a program boundary
+                // and nothing older comes back on screen, so it composes nothing and checks nothing.
+                if !self.isLive {
+                    self.verifyPlacementAgainstLoadedRanges(session: session)
+                }
             }
         }
         session.onSeekStateChanged = { [weak self] inFlight, playlistTime in
@@ -780,6 +814,8 @@ extension AetherEngine {
                     "[AetherEngine] onLiveSourceReset → publishing liveSourceReset to host",
                     category: .session
                 )
+                // AE#446 round 3: a #446 outage hold is waiting on this read; it has to stop saying so.
+                self.noteLiveSourceGivenUp()
                 self.liveSourceReset.send()
             }
         }
@@ -1265,10 +1301,19 @@ extension AetherEngine {
                                                   segmentsAtStall: segmentsAtStall,
                                                   segmentsNow: segmentsNow) {
                         let seg = segmentsNow.map(String.init) ?? "?"
+                        // AE#443: "nothing finalized" has two causes and they point in opposite
+                        // directions. A starved producer is waiting on its origin; a PARKED one is
+                        // being held by this engine and is not even reading, so naming the source
+                        // sends the reader to the wrong logs (it sent the reporter of #443 to his
+                        // server three times).
+                        let parked = self.nativeVideoSession?.liveProducerParkedSnapshot == true
                         EngineLog.emit(
                             "[AetherEngine] #65 stage-2 skipped: no segment finalized since the "
-                            + "stall (producer still at seg\(seg)); the producer is starved, not "
-                            + "the consumer; publishing liveSourceReset to host",
+                            + "stall (producer still at seg\(seg)); the producer is "
+                            + (parked ? "PARKED by this engine (live headroom cap), not starved by "
+                                      + "its origin; see the HLSSegmentProducer park line"
+                                      : "starved, not the consumer")
+                            + "; publishing liveSourceReset to host",
                             category: .engine)
                         self.liveSourceReset.send()
                         return
@@ -1371,7 +1416,7 @@ extension AetherEngine {
         // way (HLSVideoEngine drops the resume anchor for a sequential origin), so leaving the
         // item on the EVENT edge default would start it mid-archive with no way back.
         if !isLive, loadedOptions.sequentialOrigin {
-            pendingPreReadySeekSeconds = 0.0
+            pendingPreReadySeek = PendingPreReadySeek(seconds: 0.0, origin: .host)
         }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
         // and recovery reloads keep their own contracts.
@@ -1388,9 +1433,10 @@ extension AetherEngine {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
                   inPlaceSwap: inPlaceHandover,
-                  isLive: isLive,
-                  // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
-                  liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately)
+                  contract: .init(
+                      isLive: isLive,
+                      // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
+                      liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately))
         forceNativeLegibleDeselectedUntilHostSelects()
     }
 

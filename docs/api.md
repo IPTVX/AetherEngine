@@ -167,7 +167,7 @@ let player = try AetherEngine()
 
 | Symbol | What it is |
 | --- | --- |
-| `AetherEngine()` | `public init() throws`, `@MainActor`, an `ObservableObject`. One engine per playback surface. The audio-session category is declared off-main and never activated here, because AVKit activates per playback and that is what lets tvOS negotiate the HDMI route (#24). |
+| `AetherEngine()` | `public init() throws`, `@MainActor`, an `ObservableObject`. One engine per playback surface, and several against one origin cost that origin one long-lived request each (see `maxConcurrentSourceRequests`). The audio-session category is declared off-main and never activated here, because AVKit activates per playback and that is what lets tvOS negotiate the HDMI route (#24). |
 | `AetherPlayerSurface(engine:)` | SwiftUI view. Drop it in the tree; it mounts and binds an `AetherPlayerView` for you. |
 | `AetherPlayerView` | UIKit / AppKit view (`PlatformBaseView` is `UIView` or `NSView`). Hosts the engine's layer. |
 | `bind(view:)` | Attach a view. The engine swaps the hosted `CALayer` per session (`AVPlayerLayer` or `AVSampleBufferDisplayLayer`), so a bound host needs no per-route branch. |
@@ -192,7 +192,7 @@ try await player.reloadAtCurrentPosition()
 | `AetherEngine.probeDetectingAtmos(url:options:atmosDetection:)` | `probe` plus a bounded decode pass that authoritatively resolves E-AC-3 JOC for an Atmos badge. Strictly more expensive; never on the playback-start path. Decode-side failures degrade to "not confirmed" rather than throwing. |
 | `AetherEngine.externalSubtitleTrackIDBase` | `100_000`. Synthetic ids of external subtitle tracks start here. |
 
-`IOReader` is the custom-source protocol: `read`, `seek`, `close` are required; `cancel()`, `makeIndependentReader()` and `discImageProbeEnabled` have defaults that unlock teardown-unblocking, embedded subtitles plus scrub stills, and ISO/UDF probing respectively. Full contract in [formats.md](formats.md).
+`IOReader` is the custom-source protocol: `read`, `seek`, `close` are required; `cancel()`, `makeIndependentReader()` and `discImageProbeEnabled` have defaults that unlock teardown-unblocking, embedded subtitles plus scrub stills, and ISO/UDF probing respectively. Calls arrive on the engine's demux thread, each inside an autorelease pool the engine opens, so a reader built on `FileHandle` or `NSData` does not strand one autoreleased object per read for the length of a session. Full contract in [formats.md](formats.md).
 
 ## Transport
 
@@ -341,10 +341,35 @@ before the rate rolls, and honestly so: one is intent and the other is a picture
 `.loading` for the whole hold and turns `.playing` on the roll.
 
 **`liveJoinStartsImmediately` cuts the hold short**, once per load, on a live session, over a buffer
-AVPlayer reports as non-empty. It is the other half of the trade `.fastZap` already prices: playback
-begins on a thinner cushion, so a source that hiccups just after the join rebuffers where it would
-otherwise have started later and played through. Every later hold in the session keeps AVPlayer's own
-policy, so a mid-stream rebuffer is untouched.
+AVPlayer reports as non-empty and that carries at least 1.5 s ahead of the playhead. It is the other half
+of the trade `.fastZap` already prices: playback begins on a thinner cushion, so a source that hiccups
+just after the join rebuffers where it would otherwise have started later and played through. Every later
+hold in the session keeps AVPlayer's own policy, so a mid-stream rebuffer is untouched.
+
+**It is on by default since 6.55.0**, on a device A/B rather than an argument. Two runs of ten channel
+changes on the reported stack, control then lever:
+
+| | control | lever |
+|---|---|---|
+| press to moving picture, warm | 6.4 / 6.5 / 7.2 s | 4.3 / 4.8 / 5.1 / 5.6 s |
+| press to first PICTURE | 3.4-3.9 s | 3.4-3.9 s |
+| stalls / dropped frames | 0 / 0 | 0 / 0 |
+| cold joins | ~6.5 s | ~6.5 s |
+
+First picture is unchanged, so what the lever removes is exactly the frozen tail and nothing else, and
+the cold case is untouched because the guards keep it out of a starved join. Set it `false` to keep
+AVPlayer's own policy for the join.
+
+**Why a depth and not just the empty flag.** `isPlaybackBufferEmpty` is the precondition `AVPlayer.h`
+documents, not a measure of safety: one served fragment reads `false` exactly as a four-second cushion
+does. Sampling the buffer across every hold in the control run above read non-empty with **3.7 to 4.9 s**
+ahead of the playhead for the hold's whole duration, which says the hold on that stack is always AVPlayer
+waiting on its own rate estimate and never starvation at the edge. That is why cutting it short cost
+nothing there, and it is also why the guard reads the depth: behind the same `false`, a genuinely starved
+join holds a fraction of a second, and starting there would trade a still picture for an immediate stall.
+The depth is the contiguous span ahead of the playhead, so an island past a gap does not count. When the
+floor is not met the engine says so once per load (`leaving the stall-avoidance wait alone (buffer ahead
+...s, ...)`), which is what separates the two mechanisms in a report after the fact.
 
 ### The rewind depth a live session really has
 
@@ -431,7 +456,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. |
 | `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to the source GOP so an IPTV join costs seconds instead of a full holdback. |
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
-| `liveJoinStartsImmediately` | false | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is already non-empty. The join tail no host can otherwise reach; see the live-join section. |
+| `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is non-empty and at least 1.5 s deep. The join tail no host can otherwise reach; default since 6.55.0 on a device A/B, see the live-join section. |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto derives eligibility from observed upstream cadence, which is what keeps a bursty relay off a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Pair with `isLive: true`. |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 401/403 bypass refusal recovery. Setting it false turns both off. |
@@ -457,7 +482,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `forwardBufferSegments` | nil (10, about 40 s) | How far the producer may race ahead and how much the cache keeps resident. Clamped to 4...2700; past the historical 150 the real bound is the session's disk budget, so a "buffer without limit" option can pass `Int.max`. Ignored on `nativeRemoteHLS`. |
 | `sequentialOrigin` | false | Declare an origin that fabricates range answers: one long-lived unranged GET, no ranged probes, non-seekable pb. **Seeking is unavailable**; re-request the archive at a shifted start instead. |
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required alongside `sequentialOrigin` on VOD, where the tail read is gone. |
-| `maxConcurrentSourceRequests` | nil | Most requests the reader may have open against this origin at once, across every path it fetches on (pump ranges, detour blocks, size probes, tail prefetch, subtitle side reader). nil counts without capping and lowers the ceiling on its own after a 429/503/509. Set it when the provider states a limit; `1` also switches off the speculative parallel paths, which exist only to overlap with the pump. Counts **requests**, not TCP connections, because over HTTP/2 a session multiplexes every request onto one connection while the origin still counts each one (AE#377). |
+| `maxConcurrentSourceRequests` | nil | Most requests the reader may have open against this origin at once, across every path it fetches on (pump ranges, detour blocks, size probes, tail prefetch, subtitle side reader). nil counts without capping and lowers the ceiling on its own after a 429/503/509. Set it when the provider states a limit; `1` also switches off the speculative parallel paths, which exist only to overlap with the pump. Counts **requests**, not TCP connections, because over HTTP/2 a session multiplexes every request onto one connection while the origin still counts each one (AE#377). It is also the only ceiling: several engines playing from one origin are bounded by this value and by what the origin refuses, not by a transport pool underneath it (AE#450). |
 | `autoplay` | true | False mounts paused: the load skips the terminal `play()` and settles at `.paused` for a host that resumes later. |
 
 ## Value types
@@ -486,9 +511,9 @@ All flags default to safe values; the table is the full set. Depth for the media
 
 Public for the CLI, the test suite, or a diagnostic overlay, and outside the shape this reference documents. They stay source-compatible under semver like everything else, but nothing here should carry playback logic:
 
-- **Test hooks**: `setForceSoftwarePathForTesting`, `setSourceThrottleKbpsForTesting`, `setSoftwareBackgroundAudioOnlyForTesting`, `softwareVideoFramesEnqueuedForTesting`, `setLargeAllocationCensusEnabled`.
+- **Test hooks**: `setForceSoftwarePathForTesting`, `setSourceThrottleKbpsForTesting`, `setSoftwareBackgroundAudioOnlyForTesting`, `softwareVideoFramesEnqueuedForTesting`, `setLargeAllocationCensusEnabled`, `forceStalledConsumerReloadForTesting`.
 - **`playbackBackend`**: the internal rendering backend, exposed read-only for overlays. Hosts must not branch on it; `videoRoute` is the surface that answers the same question honestly.
 - **`HLSVideoEngine`** and its `DiagnosticStats`: the loopback session's own machinery, public because `aetherctl` drives it directly.
 - **`DiscInspector` / `DiscInspection`**, `DoviRpuConverter` and its probe, `AudioTapProbe`, `SoftwareDecodeProbeResult`, `A53SEIParser`: repro and inspection surfaces behind `aetherctl` subcommands.
-- **`HLSLiveIngestReader`'s internals** (`terminalError`, `upstreamTargetDuration`, `observedLiveCadenceSeconds`, `companionAudioReader`): fixture and diagnostic reads.
+- **`HLSLiveIngestReader`'s internals** (`terminalError`, `upstreamTargetDuration`, `observedLiveCadenceSeconds`, `closedLiveCadenceSeconds`, `upstreamSegmentDurationSeconds`, `companionAudioReader`): fixture and diagnostic reads. The last two are the closed evidence the served TARGETDURATION is sealed from (AE#447); `upstreamTargetDuration` is the upstream's own claim, reported in the seal line and derived from nowhere.
 - **`SubtitleChannel`**: the primary / secondary selector on the engine's internal subtitle routing. No public signature takes one; a host picks the channel by calling the primary or the secondary method.

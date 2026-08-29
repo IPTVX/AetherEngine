@@ -29,6 +29,13 @@
 # would make: about +0.017 (one frame at 24 fps) when the engine describes the axis correctly, and
 # -8.983 for each of the three under 6.43.0.
 #
+# AE#418 round 3 uses the same three arms as a CONTROL. The axis is no longer predicted: the engine
+# reads `AVPlayerItem.loadedTimeRanges` after each seam and measures where AVPlayer put the segment,
+# so every arm above must print `#418 segN placement confirmed` and none of them may print
+# `#418 segN placed on base ...`. The correcting case needs a fetch AVPlayer discards before using
+# it, which needs a device slow enough to lag its own seek burst; it lives in the unit tests instead
+# (`Issue418PlacementReconcileTests`, built from the reporter's numbers).
+#
 # For magnitudes this fixture cannot reach, engineer the droughts: a key 3 s below a boundary gives
 # -3, 5 s gives -5, and a key under a second below one gives an axis AVPlayer THROWS AWAY at the
 # next seek (measured: -0.500 and -0.875 snap to 0, -1.000 and above survive).

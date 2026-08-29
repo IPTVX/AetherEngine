@@ -57,6 +57,41 @@ struct Issue444LiveResumePolicyTests {
         #expect(action(window: 30, behind: 100, lowerBound: nil, edge: 400) == .seek(to: 405))
     }
 
+    // MARK: - AE#441 follow-up: the trigger reads the same bound as the landing
+
+    /// The regime the AE#441 retest confirmed on a real rewind strip: retention short of the window for
+    /// the session's life (window 420 s, advertised depth ~405 s). A resume between the two used to find
+    /// no clamp at all, because the trigger was window arithmetic while the landing had already moved to
+    /// the cache's floor.
+    @Test("retention short of the window still clamps a position the cache dropped")
+    func retentionShortfallIsRecovered() {
+        // edge 480, floor 75 -> 405 s of real depth in a 420 s window. A playhead 410 s behind sits
+        // 5 s BELOW the floor; window arithmetic alone (410 > 415) said nothing was wrong.
+        #expect(action(window: 420, behind: 410, lowerBound: 75, edge: 480) == .seek(to: 80))
+    }
+
+    /// The same session one second shallower is genuinely inside what the cache holds, and must be left
+    /// where it is.
+    @Test("a position the cache still holds is left alone in the same regime")
+    func retentionShortfallLeavesHeldPositionsAlone() {
+        #expect(action(window: 420, behind: 395, lowerBound: 75, edge: 480) == .none)
+    }
+
+    /// Where retention matches the window the two formulations are the same statement, so the boundary
+    /// may not move.
+    @Test("a full window clamps at exactly the same boundary as before")
+    func fullWindowBoundaryIsUnchanged() {
+        #expect(action(window: 60, behind: 55, lowerBound: 140, edge: 200) == .none)
+        #expect(action(window: 60, behind: 56, lowerBound: 140, edge: 200) == .seek(to: 145))
+    }
+
+    /// Before the window fills, the floor is the session's own start, not an eviction frontier. Nothing
+    /// is coming to take that position, so a resume near it must not be shoved forward by the margin.
+    @Test("a young session is not clamped against its own start")
+    func youngSessionKeepsItsPosition() {
+        #expect(action(window: 1800, behind: 105, lowerBound: 1.45, edge: 108) == .none)
+    }
+
     // MARK: - Host-owned
 
     @Test("a host that owns resume gets no implicit seek, in either shape")

@@ -718,6 +718,7 @@ extension HLSVideoEngine {
             }
             producer = newProd
             restartLock.unlock()
+            retireProducer(failed)   // AE#443: the session's totals outlive the producer that held them
             newProd.start()
             EngineLog.emit(
                 "[HLSVideoEngine] live producer rebuilt in place: continuing at seg\(nextIndex) "
@@ -1014,6 +1015,11 @@ extension HLSVideoEngine {
             let oldReader = reopenCustomReader
             if freshReader != nil { reopenCustomReader = freshReader }
             restartLock.unlock()
+            // AE#443: the swap is final only here; the catch below puts `oldDem` back, and folding it
+            // there would count the same reader's bytes twice. A reopen replaces the reader and the
+            // producer, not the session's totals.
+            retireProducer(failedProducer)
+            retireDemuxer(oldDem)
             oldDem?.close()
             if freshReader != nil { oldReader?.close() }
             newProd.start()

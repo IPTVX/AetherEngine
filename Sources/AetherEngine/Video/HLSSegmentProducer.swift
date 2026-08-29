@@ -196,6 +196,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Fires synchronously on the pump thread per finalized live segment (index, duration, startSeconds, discontinuous).
     var onLiveSegmentFinalized: (@Sendable (Int, Double, Double, Bool) -> Void)?
 
+    /// AE#443: the resident segment count the live runaway park may use, from the session that owns the
+    /// window (`VideoSegmentProvider.liveResidentParkCap`). Unset leaves the static floor, which is the
+    /// pre-#443 behaviour.
+    var liveResidentCapProvider: (@Sendable () -> Int)?
+
     /// Sequential-VOD twin of `onLiveSegmentFinalized` (index, real duration in seconds): feeds
     /// the append playlist whose EXTINF must match the media actually muxed. Set only for
     /// sequential-origin sessions; nil keeps the historical VOD behavior byte-identical.
@@ -382,6 +387,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// `audioMoovPrimeUnobtainable`.
     var audioBridgeFeedStats: AudioBridge.FeedStats? { audioConfig?.bridge?.feedStats }
     private var currentMuxer: MP4SegmentMuxer?
+    /// AE#443: totals folded off muxers this producer has ROTATED away. A rotation (program switch, ad
+    /// pod, a rebuilt muxer after a failure) hands the session a fresh `ByteCounter`, so a read of the
+    /// current muxer alone drops everything the previous ones emitted, and the "lifetime" it is read as
+    /// silently means "since the last rotation". Guarded by `stateLock` with `currentMuxer` itself.
+    private var retiredMuxerBytes: Int = 0
+    private var retiredMuxerFragmentCuts: Int = 0
     private var currentMuxerSegmentIndex: Int = .min
 
     /// Latched once first muxer emits ftyp+moov bytes; subsequent muxers' init bytes are discarded.
@@ -536,6 +547,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// properties; the watchdog object itself is the only thing the timer touches.
     private var noCutWatchdog: NoCutStallWatchdog?
     private var noCutWatchdogTimer: DispatchSourceTimer?
+
+    /// AE#443: is the live pump inside the runaway headroom park right now?
+    ///
+    /// The park looks exactly like a dead source from every consumer-side vantage point, and two
+    /// separate diagnostics said so for three rounds of #443 ("the producer is starved, not the
+    /// consumer", "source stopped delivering"). A held pump is not a starved one, and the difference
+    /// is only knowable here. Its own lock: written on the pump thread, read from the stall ladder.
+    private let parkStateLock = NSLock()
+    private var _liveHeadroomParked = false
+    var isLiveHeadroomParked: Bool {
+        parkStateLock.lock()
+        defer { parkStateLock.unlock() }
+        return _liveHeadroomParked
+    }
+    private func setLiveHeadroomParked(_ parked: Bool) {
+        parkStateLock.lock()
+        _liveHeadroomParked = parked
+        parkStateLock.unlock()
+    }
     private let noCutWatchdogQueue = DispatchQueue(label: "aether.nocut.watchdog", qos: .userInitiated)
     /// Tick of the lifted watchdog: fine against both windows (10 s wedge, 35 s starvation) and
     /// cheap, one lock and a subtraction unless it has something to say. A private queue rather
@@ -569,11 +599,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// and loops. Hold and re-arm instead, bounded by `liveSlowDeliveryMaxHolds`. A genuine SSAI wedge
     /// reads at full rate with frozen video PTS and still exits immediately; the source-starvation
     /// classification is untouched (its 35 s window with barely-advancing PTS is a dead source).
+    ///
+    /// AE#446 round 3: `servingOutageRunway` is the one case where a dead source must not be given up
+    /// on. The session has already diagnosed the outage, closed its window with ENDLIST, and is
+    /// feeding the consumer segments it holds; the exit tears down the read that is the only thing
+    /// able to notice the source coming back, and takes a playing session with it. Measured on the
+    /// harness with a 76 s outage: the read was aborted 35 s in while 46 s of runway were still
+    /// playing, so the source delivering again at +76 s was never seen and the session held its last
+    /// frame for the rest of the run. Bounded by the same hold budget, so a consumer that stops
+    /// fetching with runway still listed cannot keep a dead source open for the whole session.
     static func noCutStallAction(
         stalledFor: TimeInterval,
         readRate: Double,
         videoPtsAdvanceSeconds: Double,
-        consecutiveHolds: Int
+        consecutiveHolds: Int,
+        servingOutageRunway: Bool = false
     ) -> NoCutStallAction {
         let isWedge = readRate >= liveWedgeProgressRateThreshold
         let timeout = isWedge ? liveSegmentStallTimeoutSeconds : liveSourceStarvationTimeoutSeconds
@@ -581,6 +621,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if isWedge,
            videoPtsAdvanceSeconds >= liveSlowDeliveryPtsAdvanceSeconds,
            consecutiveHolds < liveSlowDeliveryMaxHolds {
+            return .holdForSlowDelivery
+        }
+        // A wedge is a cutter that cannot cut what it is being given, which waiting does not fix; the
+        // runway deferral is for a source that is not giving it anything.
+        if !isWedge, servingOutageRunway, consecutiveHolds < liveSlowDeliveryMaxHolds {
             return .holdForSlowDelivery
         }
         return .exitForRetune
@@ -689,11 +734,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// safe (see BackpressureWedgeDetector.fastBreakThresholdSeconds).
     private static let backpressureWedgeFastBreakThresholdSeconds = 5
 
-    /// Live disk runaway cap for awaitLiveWindowHeadroom. In healthy play resident count tracks the
-    /// sliding window (~windowSegmentCount plus a few in flight) because every playlist build slides
-    /// evictBelow. It can only approach this cap when the consumer stopped polling entirely (dead
-    /// item), at which point the engine's stall watchdogs reload the item within ~12 s, so a park
-    /// here is diagnostic, never steady state. ~6 min of 2 s GOP segments.
+    /// Live disk runaway FLOOR for awaitLiveWindowHeadroom, for a session that cannot state its own
+    /// window (`liveResidentCapProvider` unset). The live cap is `max(this, provider())`, and the
+    /// provider's value is the sliding window plus slack, so the park always sits ABOVE the window.
+    ///
+    /// AE#443: this used to be the cap itself, and the claim above it was that a session could only
+    /// approach it with a dead consumer. That was false for any window deeper than 180 segments: the
+    /// playlist does not start sliding until `windowSegmentCount` segments exist, so the cache fills to
+    /// the cap first and the pump parks there for the rest of the session. Measured on the loopback
+    /// fixture at an 1800 s window and a 1 s cadence, an edge session with no seek at all: park at
+    /// resident=180 after 179 s, never released, the edge frozen from that second on. The reporter of
+    /// #443 measured the same shape against Jellyfin at a 3.9 s cadence, and 180 x 3.9 s is where his
+    /// session froze, three campaigns running.
     private static let liveResidentSegmentCap = 180
 
     static func qosName(_ c: qos_class_t) -> String {
@@ -994,13 +1046,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var muxerLifetimeFragmentBytes: Int {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return currentMuxer?.lifetimeFragmentBytesEmitted ?? 0
+        return retiredMuxerBytes + (currentMuxer?.lifetimeFragmentBytesEmitted ?? 0)
     }
 
     var muxerFragmentCuts: Int {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return currentMuxer?.fragmentCutCount ?? 0
+        return retiredMuxerFragmentCuts + (currentMuxer?.fragmentCutCount ?? 0)
+    }
+
+    /// The only way `currentMuxer` changes. Folds the outgoing muxer's totals in first, so every
+    /// rotation site inherits the accounting instead of having to remember it (AE#443).
+    private func installMuxer(_ new: MP4SegmentMuxer?) {
+        stateLock.lock()
+        if let outgoing = currentMuxer {
+            retiredMuxerBytes &+= outgoing.lifetimeFragmentBytesEmitted
+            retiredMuxerFragmentCuts &+= outgoing.fragmentCutCount
+        }
+        currentMuxer = new
+        stateLock.unlock()
     }
 
     private let finishCondition = NSCondition()
@@ -1096,6 +1160,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// backpressure wedge detector's fast path (park + flat clock + frozen fetch target -> single-digit
     /// detection instead of the 24 s counter). nil (tests, live) keeps the fast path inert.
     var playbackPositionProvider: (@Sendable () -> Double?)?
+
+    /// AE#446 round 3: reads whether the session is serving a window it closed with ENDLIST because
+    /// the source stopped delivering, with segments the consumer has not reached yet. While that is
+    /// true the no-cut watchdog's starvation exit would tear down a session that is still handing out
+    /// pictures, and with it the only read able to notice the source coming back. nil = false, which
+    /// is the historical behaviour for tests and every non-live path.
+    var outageRunwayProvider: (@Sendable () -> Bool)?
 
     /// #35/#93 startup guard: reads whether AVPlayer has ever presented a frame this item (its
     /// `timeControlStatus` reached `.playing` at least once), off the main actor. nil = assume started
@@ -1679,8 +1750,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// reach only because reaching `liveResidentSegmentCap` takes a consumer that is already dead, and
     /// the engine's 12 s stall watchdogs reload the item (and thus issue a fresh GET) long before then.
     /// Lowering the cap toward the steady-state window would put that deadlock back within reach.
+    /// AE#443: the resident count this pump refuses to pass. The session states it (window plus
+    /// slack); the static floor only covers a session that cannot.
+    private func liveResidentCap() -> Int {
+        max(Self.liveResidentSegmentCap, liveResidentCapProvider?() ?? 0)
+    }
+
     private func awaitLiveWindowHeadroom(head: Int) -> Bool {
-        if cache.count < Self.liveResidentSegmentCap { return true }
+        if cache.count < liveResidentCap() { return true }
         // #240: a parked pump is not using the link.
         sideReaderLinkGate?.videoFetchEnded()
         defer { sideReaderLinkGate?.videoFetchBegan() }
@@ -1689,9 +1766,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // as a source that stopped delivering. The window re-anchors when the park releases.
         noCutWatchdog?.setReading(false, at: Date())
         defer { noCutWatchdog?.setReading(true, at: Date()) }
+        // AE#443: so the stall ladder can name the pump instead of the source.
+        setLiveHeadroomParked(true)
+        defer { setLiveHeadroomParked(false) }
         var parked = 0
         while !checkShouldStop() {
-            if cache.count < Self.liveResidentSegmentCap {
+            // AE#443: re-read per second rather than latching the entry value. The window is sized
+            // from the observed cadence and segment size, so it moves while a park holds, and a park
+            // that outlived its own reason would keep the origin undrained for nothing.
+            let cap = liveResidentCap()
+            if cache.count < cap {
                 EngineLog.emit(
                     "[HLSSegmentProducer] live headroom released head=\(head) after=\(parked)s "
                     + "resident=\(cache.count)",
@@ -1702,7 +1786,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if parked % 10 == 0 {
                 EngineLog.emit(
                     "[HLSSegmentProducer] live headroom PARK head=\(head) resident=\(cache.count) "
-                    + "cap=\(Self.liveResidentSegmentCap) parked=\(parked)s (playlist polls stopped?)",
+                    + "cap=\(cap) parked=\(parked)s (playlist polls stopped?). AE#443: this pump is "
+                    + "not reading while it is parked, so the origin is not being drained either; a "
+                    + "single-connection live source dies behind a long park",
                     category: .session
                 )
             }
@@ -1898,10 +1984,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                 }
             )
-            // Write under stateLock: telemetry getters read currentMuxer under the same lock.
-            stateLock.lock()
-            self.currentMuxer = muxer
-            stateLock.unlock()
+            // Write through installMuxer: telemetry getters read currentMuxer under stateLock, and the
+            // outgoing muxer's totals have to be folded before the reference goes.
+            self.installMuxer(muxer)
             self.currentMuxerSegmentIndex = initialSegmentIndex
             return muxer
         } catch {
@@ -2346,9 +2431,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         }
-        stateLock.lock()
-        currentMuxer = nil
-        stateLock.unlock()
+        installMuxer(nil)
         currentMuxerSegmentIndex = .min
     }
 
@@ -2364,9 +2447,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         }
-        stateLock.lock()
-        currentMuxer = nil
-        stateLock.unlock()
+        installMuxer(nil)
         currentMuxerSegmentIndex = .min
     }
 
@@ -2594,8 +2675,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// The abort costs nothing this exit was going to keep: `.segmentStall` delegates to a host
     /// retune, which tears the demuxer down.
     private func tickNoCutWatchdog(_ watchdog: NoCutStallWatchdog) {
-        guard let decision = watchdog.evaluate(now: Date()) else { return }
+        guard let decision = watchdog.evaluate(
+            now: Date(), servingOutageRunway: outageRunwayProvider?() ?? false) else { return }
         switch decision {
+        case .holdForOutageRunway(let w):
+            EngineLog.emit(
+                "[HLSSegmentProducer] #446 outage hold "
+                + "\(w.consecutiveHolds)/\(Self.liveSlowDeliveryMaxHolds): nothing cut for "
+                + "\(Int(w.stalledFor))s (rate=\(String(format: "%.1f", w.readRate))pkt/s), and the "
+                + "closed window is still feeding the consumer; keeping the source read so the source "
+                + "coming back can still be seen",
+                category: .session
+            )
         case .holdForSlowDelivery(let w):
             EngineLog.emit(
                 "[HLSSegmentProducer] slow live delivery hold "

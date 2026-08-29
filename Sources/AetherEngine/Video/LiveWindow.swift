@@ -25,17 +25,25 @@ struct LiveWindow: Equatable {
 
     static let edgeTolerance: Double = 2.0
 
-    var seekableRange: ClosedRange<Double>? {
+    var seekableRange: ClosedRange<Double>? { seekableRange(edge: edgeTime) }
+
+    /// AE#446 round 3: the same range against an edge sampled NOW rather than the running maximum
+    /// `noteEdge` keeps. `edgeTime` folds every tick of the session into one number, and an item swap
+    /// or a timeline rebase re-anchors the axis under it, so a caller holding a fresh sample of the
+    /// item's own clock has a better edge than this window does. The monotonic maximum stays what the
+    /// session PUBLISHES; it is not what a seek should be measured against.
+    func seekableRange(edge: Double) -> ClosedRange<Double>? {
         guard let w = windowSeconds else { return nil }
         // The intersection of what the session is willing to keep and what it actually holds. The
-        // clamp against `edgeTime` is not defensive dressing: a floor read from the cache while the
+        // clamp against the edge is not defensive dressing: a floor read from the cache while the
         // edge is still catching up can exceed it for a tick, and a reversed ClosedRange traps.
-        let policy = Swift.max(0, edgeTime - w)
+        let policy = Swift.max(0, edge - w)
         let honest = Swift.max(policy, residentFloorSeconds ?? 0)
-        return Swift.min(honest, edgeTime)...edgeTime
+        return Swift.min(honest, edge)...edge
     }
-    func clamp(_ t: Double) -> Double {
-        guard let r = seekableRange else { return edgeTime }
+    func clamp(_ t: Double) -> Double { clamp(t, edge: edgeTime) }
+    func clamp(_ t: Double, edge: Double) -> Double {
+        guard let r = seekableRange(edge: edge) else { return edge }
         return Swift.min(Swift.max(t, r.lowerBound), r.upperBound)
     }
     var behindLiveSeconds: Double { Swift.max(0, edgeTime - playhead) }

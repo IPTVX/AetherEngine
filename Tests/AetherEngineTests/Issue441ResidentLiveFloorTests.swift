@@ -112,3 +112,68 @@ struct Issue441ResidentLiveFloorTests {
         #expect(cache.highestResidentIndex == nil)
     }
 }
+
+/// AE#441 round 3: the retest read `live window slid past the consumer` four times in the 48 s after a
+/// deep rewound landing, every one of them `firstVisible == consumerTarget + 1`, with no stall and no
+/// cache miss behind any of them. Reproduced on the harness (`live --rewind-hold`, 220 s, window 60 s):
+/// four latched lines, gap 1 on all four. So the line was reading the LAST fetch when the cost is
+/// decided by the NEXT one, and the slide that reaches the fetch point was also unlinking the segment
+/// under the serve.
+@Suite("AE#441 round 3 a window slide is measured against the consumer's next fetch")
+struct Issue441ConsumerFetchPointTests {
+
+    // MARK: - The discriminator
+
+    /// The sawtooth on the fetch axis. A viewer parked at the floor sits one segment below the new
+    /// first-visible index for part of every slide; the index it asks for next is that very segment.
+    @Test("one segment behind the window is the parked viewer's ordinary position, not a defect")
+    func oneSegmentBehindIsNotADefect() {
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 5, consumerTarget: 4) == false)
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 33, consumerTarget: 32) == false)
+    }
+
+    /// Two segments behind is the real thing: `consumerTarget + 1` has already been deleted, so the
+    /// consumer's next request is a miss whatever the playlist says.
+    @Test("two segments behind means the next fetch is already deleted")
+    func twoSegmentsBehindIsTheDefect() {
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 6, consumerTarget: 4))
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 40, consumerTarget: 11))
+    }
+
+    /// A consumer at or ahead of the window is the healthy steady state and was never a defect.
+    @Test("a consumer inside the window stays silent")
+    func consumerInsideTheWindow() {
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 5, consumerTarget: 5) == false)
+        #expect(VideoSegmentProvider.windowSlidPastConsumer(firstVisible: 5, consumerTarget: 12) == false)
+    }
+
+    // MARK: - The eviction floor
+
+    /// The case the retest exposed: the slide reaching `consumerTarget + 1` used to unlink the segment
+    /// whose URL a response was about to stat, which is a 404 for an index the playlist offered.
+    @Test("eviction stops at the segment being served")
+    func evictionSpareTheServedSegment() {
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 5, consumerTarget: 4) == 4)
+    }
+
+    /// A consumer already inside the window costs nothing: the floor is the playlist's own.
+    @Test("a consumer inside the window does not hold eviction back")
+    func consumerInsideDoesNotHoldBack() {
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 5, consumerTarget: 5) == 5)
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 5, consumerTarget: 40) == 5)
+    }
+
+    /// The other side of the bound. A consumer that stopped fetching entirely must not pin retention
+    /// behind it, so the floor never trails the window by more than the one served segment.
+    @Test("a stalled consumer cannot pin retention behind the window")
+    func stalledConsumerCannotPinRetention() {
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 40, consumerTarget: 4) == 39)
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 900, consumerTarget: 0) == 899)
+    }
+
+    /// Before the first fetch there is no point to protect.
+    @Test("no declared fetch point evicts to the window")
+    func noConsumerYet() {
+        #expect(VideoSegmentProvider.liveEvictionFloor(firstVisible: 12, consumerTarget: -1) == 12)
+    }
+}
