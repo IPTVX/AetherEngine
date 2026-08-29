@@ -22,6 +22,15 @@ enum SWClockAnchorPolicy {
         let sessionZeroSeconds: Double
     }
 
+    /// The coordinated startup action for a source whose audio preroll precedes video.
+    struct StartupAVSkewCorrection: Equatable {
+        /// The clock anchor that makes the first decodable video sample immediately presentable.
+        let clockResolution: Resolution
+
+        /// Audio samples before this source timestamp belong to preroll and must not be enqueued.
+        let discardAudioBeforeSeconds: Double
+    }
+
     static func resolve(initialSeconds: Double,
                         firstSampleSeconds: Double,
                         toleranceSeconds: Double = SWClockAnchorPolicy.toleranceSeconds) -> Resolution {
@@ -31,6 +40,47 @@ enum SWClockAnchorPolicy {
         }
         return Resolution(anchorSeconds: firstSampleSeconds,
                           sessionZeroSeconds: max(0, firstSampleSeconds - initialSeconds))
+    }
+
+    /// Resolves a startup correction when stale audio precedes the first video sample.
+    ///
+    /// Some forward-only MPEG-TS sources expose an audio timestamp several seconds before the
+    /// first decodable video timestamp. Anchoring the shared synchronizer to that audio sample
+    /// leaves the display layer waiting for the entire gap. Normal A/V lead-in is preserved by
+    /// correcting only gaps larger than `toleranceSeconds`.
+    static func startupAVSkewCorrection(
+        initialSeconds: Double,
+        firstAudioSampleSeconds: Double,
+        firstVideoSampleSeconds: Double,
+        toleranceSeconds: Double = SWClockAnchorPolicy.toleranceSeconds
+    ) -> StartupAVSkewCorrection? {
+        guard
+            firstAudioSampleSeconds.isFinite,
+            firstVideoSampleSeconds.isFinite,
+            firstVideoSampleSeconds - firstAudioSampleSeconds > toleranceSeconds
+        else {
+            return nil
+        }
+
+        return StartupAVSkewCorrection(
+            clockResolution: Resolution(
+                anchorSeconds: firstVideoSampleSeconds,
+                sessionZeroSeconds: max(0, firstVideoSampleSeconds - initialSeconds)
+            ),
+            discardAudioBeforeSeconds: firstVideoSampleSeconds
+        )
+    }
+
+    /// Returns whether an audio sample belongs to preroll before a corrected video anchor.
+    static func shouldDiscardStartupAudioSample(
+        sampleSeconds: Double,
+        discardBeforeSeconds: Double
+    ) -> Bool {
+        guard sampleSeconds.isFinite, discardBeforeSeconds.isFinite else {
+            return false
+        }
+
+        return sampleSeconds < discardBeforeSeconds
     }
 
     /// Whether a video packet parked on renderer back-pressure has to anchor the clock itself

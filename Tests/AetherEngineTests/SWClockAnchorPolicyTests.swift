@@ -70,4 +70,61 @@ struct SWClockAnchorPolicyTests {
         #expect(r.anchorSeconds == 10)
         #expect(r.sessionZeroSeconds == 0)
     }
+
+    @Test("large stale-audio lead advances startup to the first video sample")
+    func largeStartupAVSkew() throws {
+        let correction = try #require(
+            SWClockAnchorPolicy.startupAVSkewCorrection(
+                initialSeconds: 0,
+                firstAudioSampleSeconds: 32075.353,
+                firstVideoSampleSeconds: 32086.445
+            )
+        )
+
+        #expect(correction.clockResolution.anchorSeconds == 32086.445)
+        #expect(correction.clockResolution.sessionZeroSeconds == 32086.445)
+        #expect(correction.discardAudioBeforeSeconds == 32086.445)
+    }
+
+    @Test("normal audio lead preserves the original startup anchor")
+    func normalStartupAVSkew() {
+        let correction = SWClockAnchorPolicy.startupAVSkewCorrection(
+            initialSeconds: 0,
+            firstAudioSampleSeconds: 0.1,
+            firstVideoSampleSeconds: 0.8
+        )
+
+        #expect(correction == nil)
+    }
+
+    @Test("video-leading startup does not move the clock backwards")
+    func videoLeadsAudioAtStartup() {
+        let correction = SWClockAnchorPolicy.startupAVSkewCorrection(
+            initialSeconds: 0,
+            firstAudioSampleSeconds: 1.0,
+            firstVideoSampleSeconds: 0.2
+        )
+
+        #expect(correction == nil)
+    }
+
+    @Test("startup audio before the corrected video anchor is discarded")
+    func staleStartupAudioIsDiscarded() {
+        #expect(
+            SWClockAnchorPolicy.shouldDiscardStartupAudioSample(
+                sampleSeconds: 32086.400,
+                discardBeforeSeconds: 32086.445
+            )
+        )
+    }
+
+    @Test("startup audio at the corrected video anchor is retained")
+    func alignedStartupAudioIsRetained() {
+        #expect(
+            !SWClockAnchorPolicy.shouldDiscardStartupAudioSample(
+                sampleSeconds: 32086.445,
+                discardBeforeSeconds: 32086.445
+            )
+        )
+    }
 }

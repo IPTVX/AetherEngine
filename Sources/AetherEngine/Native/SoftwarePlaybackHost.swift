@@ -2,9 +2,9 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import Combine
-import Libavformat
-import Libavcodec
-import Libavutil
+import AetherLibavformat
+import AetherLibavcodec
+import AetherLibavutil
 
 /// Software-decode playback host (FFmpeg/dav1d pipeline): AV1 on Apple TV (no HW AV1 on tvOS), VP9.
 /// AVSampleBufferRenderSynchronizer is the master clock; display layer attached for A/V sync.
@@ -1734,7 +1734,8 @@ final class SoftwarePlaybackHost {
         resolution: SWClockAnchorPolicy.Resolution,
         initialClockTime: CMTime,
         rate: Float,
-        onClockAnchored: @Sendable (Double) -> Void
+        onClockAnchored: @Sendable (Double) -> Void,
+        reason: String = "first sample"
     ) {
         let anchorTime = resolution.anchorSeconds == initialClockTime.seconds
             ? initialClockTime
@@ -1742,7 +1743,7 @@ final class SoftwarePlaybackHost {
         aOut.seekClock(to: anchorTime, rate: rate)
         if resolution.anchorSeconds != initialClockTime.seconds {
             EngineLog.emit(
-                "[SWHost] clock re-anchored to first sample: anchor=\(String(format: "%.3f", resolution.anchorSeconds))s "
+                "[SWHost] clock re-anchored to \(reason): anchor=\(String(format: "%.3f", resolution.anchorSeconds))s "
                 + "(load anchor \(String(format: "%.3f", initialClockTime.seconds))s, "
                 + "sessionZero=\(String(format: "%.3f", resolution.sessionZeroSeconds))s)",
                 category: .swPlayback
@@ -1805,6 +1806,11 @@ final class SoftwarePlaybackHost {
         // the session unarmed forever. See the video-branch arming below.
         var audioPacketsSeen = 0
         var audioBuffersProduced = false
+        var firstAudioSampleSeconds = Double.nan
+        var firstVideoSampleSeconds = Double.nan
+        var didEvaluateInitialAVSkew = false
+        var discardAudioBeforeSeconds = Double.nan
+        let startupSeekGeneration = seekGeneration()
 
         // VOD audio decoupling (#107 family). The combined loop paced EVERYTHING on the video
         // renderer's ~10-frame queue, so interleaved audio could never build more than ~0.3 s
@@ -1980,6 +1986,77 @@ final class SoftwarePlaybackHost {
             markClockArmed()
         }
 
+        /// Records the first video timestamp used to distinguish normal audio lead from stale
+        /// MPEG-TS preroll.
+        func recordFirstVideoSample(_ videoPacket: UnsafeMutablePointer<AVPacket>) {
+            if !firstVideoSampleSeconds.isFinite,
+               videoPacket.pointee.pts != Int64.min,
+               videoTimeBaseSeconds > 0 {
+                firstVideoSampleSeconds = Double(videoPacket.pointee.pts) * videoTimeBaseSeconds
+            }
+        }
+
+        /// Flushes queued preroll, advances the shared clock to the first video timestamp, and
+        /// discards any remaining stale audio buffers until their source PTS catches up. The
+        /// one-shot and generation guards prevent a seek or later discontinuity from being
+        /// mistaken for startup skew.
+        func applyInitialAVSkewCorrectionIfNeeded(audioOutput: AudioOutput) {
+            guard
+                !didEvaluateInitialAVSkew,
+                firstAudioSampleSeconds.isFinite,
+                firstVideoSampleSeconds.isFinite
+            else {
+                return
+            }
+
+            didEvaluateInitialAVSkew = true
+            guard seekGeneration() == startupSeekGeneration else {
+                return
+            }
+            guard let correction = SWClockAnchorPolicy.startupAVSkewCorrection(
+                initialSeconds: initialClockTime.seconds,
+                firstAudioSampleSeconds: firstAudioSampleSeconds,
+                firstVideoSampleSeconds: firstVideoSampleSeconds
+            ) else {
+                return
+            }
+
+            discardAudioBeforeSeconds = correction.discardAudioBeforeSeconds
+            audioOutput.flush()
+            armClock(
+                audioOutput,
+                resolution: correction.clockResolution,
+                initialClockTime: initialClockTime,
+                rate: currentRate(),
+                onClockAnchored: onClockAnchored,
+                reason: "first video after stale audio"
+            )
+            markClockArmed()
+            EngineLog.emit(
+                "[SWHost] discarded startup audio preroll before "
+                + "\(String(format: "%.3f", correction.discardAudioBeforeSeconds))s",
+                category: .swPlayback
+            )
+        }
+
+        /// Returns whether a decoded audio buffer belongs to stale startup preroll.
+        func shouldDiscardStartupAudioBuffer(_ sampleBuffer: CMSampleBuffer) -> Bool {
+            if seekGeneration() != startupSeekGeneration {
+                discardAudioBeforeSeconds = .nan
+                return false
+            }
+
+            let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let shouldDiscard = SWClockAnchorPolicy.shouldDiscardStartupAudioSample(
+                sampleSeconds: presentationTime.isValid ? presentationTime.seconds : .nan,
+                discardBeforeSeconds: discardAudioBeforeSeconds
+            )
+            if !shouldDiscard, discardAudioBeforeSeconds.isFinite {
+                discardAudioBeforeSeconds = .nan
+            }
+            return shouldDiscard
+        }
+
         func demuxIteration() -> Bool {
             if !isPlaying() {
                 condition.lock()
@@ -2138,6 +2215,10 @@ final class SoftwarePlaybackHost {
                     av_packet_free_safe(packet)
                     return true
                 }
+                recordFirstVideoSample(packet)
+                if let aOut = audioOutput {
+                    applyInitialAVSkewCorrectionIfNeeded(audioOutput: aOut)
+                }
                 if decoupleAudio {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
@@ -2237,25 +2318,38 @@ final class SoftwarePlaybackHost {
                 audioPacketsSeen += 1
                 let buffers = aDec.decode(packet: packet)
                 if !buffers.isEmpty { audioBuffersProduced = true }
+                if !firstAudioSampleSeconds.isFinite, let firstBuffer = buffers.first {
+                    let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
+                    firstAudioSampleSeconds = firstPTS.isValid ? firstPTS.seconds : .nan
+                }
+                applyInitialAVSkewCorrectionIfNeeded(audioOutput: aOut)
+                let playableBuffers = buffers.filter { !shouldDiscardStartupAudioBuffer($0) }
                 let tapSink = audioTapSink()
-                for buf in buffers {
+                for buf in playableBuffers {
                     tapSink?(buf)   // #95: mirror before enqueue
                     aOut.enqueue(sampleBuffer: buf)
                 }
-                if decoupleAudio, let last = buffers.last {
+                if decoupleAudio, let last = playableBuffers.last {
                     let pts = CMSampleBufferGetPresentationTimeStamp(last)
                     if pts.isValid { lastEnqueuedAudioPtsSec = pts.seconds }
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
-                if !clockArmed(), !buffers.isEmpty {
+                if !clockArmed(), let firstBuffer = playableBuffers.first {
                     // #107: anchor at the buffer PTS when it deviates from the load anchor
                     // (mid-stream-joined source); aligned sources keep the anchor verbatim.
-                    let firstPts = CMSampleBufferGetPresentationTimeStamp(buffers[0])
+                    let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
                     let resolution = SWClockAnchorPolicy.resolve(
                         initialSeconds: initialClockTime.seconds,
-                        firstSampleSeconds: firstPts.isValid ? firstPts.seconds : Double.nan)
-                    armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                             rate: currentRate(), onClockAnchored: onClockAnchored)
+                        firstSampleSeconds: firstPTS.isValid ? firstPTS.seconds : .nan
+                    )
+                    armClock(
+                        aOut,
+                        resolution: resolution,
+                        initialClockTime: initialClockTime,
+                        rate: currentRate(),
+                        onClockAnchored: onClockAnchored,
+                        reason: "first sample"
+                    )
                     markClockArmed()
                 }
             } else if subtitleStreamIndices.contains(streamIdx), let sink = subtitleTapSink() {

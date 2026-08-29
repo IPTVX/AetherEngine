@@ -967,7 +967,7 @@ public struct SubtitleImage: @unchecked Sendable {
 // MARK: - Audio Utilities
 
 import CoreAudio
-import Libavutil
+import AetherLibavutil
 
 /// #401: this tag has to describe the channel order the RESAMPLER writes, or the renderer places
 /// the audio somewhere the decoder never put it. It is one buffer with two descriptions of it,

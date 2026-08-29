@@ -1,22 +1,22 @@
 {
-  "originHash" : "c296fd214b625786d054e17a86d27d18744506e32249474a0e9a5cf183077425",
+  "originHash" : "9c510a5a1257a9d50c41e38a4dbdf85012a10270159d94a135116ec0908a0249",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/FFmpegBuild",
+      "location" : "https://github.com/IPTVX/FFmpegBuild",
       "state" : {
-        "revision" : "9932819525e7197ae2a671206df72ac5f72f4457",
-        "version" : "2.5.0"
+        "revision" : "cf991e0d2a2e8b6d5689e5967a9afa10af9e54b7",
+        "version" : "2.5.0-iptvx"
       }
     },
     {
       "identity" : "libdovi",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/LibDovi",
+      "location" : "https://github.com/IPTVX/LibDovi",
       "state" : {
-        "revision" : "0d7cce1d6836a30d13a3a2326e50a153af53f014",
-        "version" : "2.1.0"
+        "revision" : "631c9d2c112dfcdd962a0c2909b6f0aa8a01cdd1",
+        "version" : "2.1.0-iptvx"
       }
     },
     {

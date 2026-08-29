@@ -422,10 +422,13 @@ final class SampleBufferRenderer: @unchecked Sendable {
             return
         }
         // HDR10+ attachment overrides any payload baked into the bitstream (VT may strip per-frame SEI on decode).
-        if let hdr10PlusData {
+        if
+            let hdr10PlusData,
+            let hdr10PlusKey = DynamicCoreMediaAttachmentKeys.hdr10PlusPerFrameData()
+        {
             CMSetAttachment(
                 sampleBuffer,
-                key: kCMSampleAttachmentKey_HDR10PlusPerFrameData,
+                key: hdr10PlusKey,
                 value: hdr10PlusData as CFData,
                 attachmentMode: CMAttachmentMode(kCMAttachmentMode_ShouldPropagate)
             )
