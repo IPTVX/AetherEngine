@@ -138,6 +138,35 @@ enum LiveEdgePolicy {
         Int(servedSeconds(seconds).rounded(.up))
     }
 
+    /// AE#454: the served `EXT-X-START:TIME-OFFSET` for a rejoin, or nil when this playlist cannot
+    /// carry the placement.
+    ///
+    /// The item's own timeline is the SUM OF THE PRINTED EXTINFs, not the producer's accumulated
+    /// output axis, so every term here is taken at the resolution the playlist serves. A target the
+    /// window has already evicted returns nil, and so does one within `3 x TARGETDURATION` of the end:
+    /// RFC 8216 4.3.5.2 says a positive offset should not sit inside the holdback, and a viewer that
+    /// close to the edge is one the ordinary edge join answers correctly anyway.
+    static func rejoinStartTimeOffset(
+        segmentIndex: Int,
+        secondsIntoSegment: Double,
+        firstVisible: Int,
+        visibleCount: Int,
+        targetDuration: Int,
+        segmentDuration: (Int) -> Double
+    ) -> Double? {
+        guard segmentIndex >= firstVisible, segmentIndex < visibleCount, firstVisible < visibleCount else {
+            return nil
+        }
+        var offset: Double = 0
+        for k in firstVisible..<segmentIndex { offset += servedSeconds(segmentDuration(k)) }
+        offset += servedSeconds(Swift.max(0, secondsIntoSegment))
+        var total: Double = 0
+        for k in firstVisible..<visibleCount { total += servedSeconds(segmentDuration(k)) }
+        let served = servedSeconds(offset)
+        guard served >= 0, served <= servedSeconds(total - 3.0 * Double(targetDuration)) else { return nil }
+        return served
+    }
+
     /// Served `#EXT-X-TARGETDURATION`, in whole seconds: `>= ceil(max EXTINF)` (HLS requirement), floored
     /// by `ceil(1.5 x cut target)` (widens AVPlayer's unchanged-playlist patience, anti -12888) and by
     /// what the observed cadence needs to stay inside that patience. `cutTargetSeconds` /
@@ -442,6 +471,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#446 round 2: once ENDLIST has been served it can never be withdrawn to the item that saw it,
     /// so the decision latches. See `liveOutageEndlist`.
     private var _liveOutageEndlistLatched = false
+    /// AE#454: where a rejoin wants the NEXT item to begin, addressed by CONTENT (which segment, how
+    /// far into it) rather than by a clock. The window slides between arming this and the fresh item
+    /// fetching the playlist that carries it, so a seconds value would name a different place by the
+    /// time it was served; a segment index does not renumber.
+    private var _liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)?
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -1607,6 +1641,43 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             + "for the next item",
             category: .session
         )
+    }
+
+    /// AE#454: tell the next item where to start, in the playlist it will load.
+    ///
+    /// A rejoin is two operations, attaching an item and placing it, and only the first used to be
+    /// expressed to AVPlayer at the swap. So the fresh item did what a live playlist tells any client
+    /// to do, joined at the edge, started playing there, and got the place it held ~150 ms later as a
+    /// seek. The playlist is ours, and HLS has a tag for this question, so the placement belongs in
+    /// the manifest rather than in a correction after the fact.
+    ///
+    /// Returns the resolved position, or nil when `seconds` names nothing this producer holds (an
+    /// evicted target), in which case the caller keeps the edge join it would have had.
+    @discardableResult
+    func armLiveRejoinStart(atOutputSeconds seconds: Double) -> (segmentIndex: Int, secondsIntoSegment: Double)? {
+        stateLock.lock()
+        let segs = segments
+        stateLock.unlock()
+        guard let idx = Self.thumbnailSegmentIndex(atSeconds: seconds, segments: segs) else { return nil }
+        let into = Swift.max(0, seconds - segs[idx].startSeconds)
+        stateLock.lock()
+        _liveRejoinStart = (idx, into)
+        stateLock.unlock()
+        return (idx, into)
+    }
+
+    /// AE#454: the placement is spent once the item that asked for it is running. Left armed, the next
+    /// item to load for any other reason would inherit a position it never asked about.
+    func clearLiveRejoinStart() {
+        stateLock.lock()
+        _liveRejoinStart = nil
+        stateLock.unlock()
+    }
+
+    var liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _liveRejoinStart
     }
 
     /// Blocking-reload hold bound: 3 x sealed TARGETDURATION (= the advertised HOLD-BACK depth).

@@ -22,6 +22,11 @@ extension AetherEngine {
         nativeClockSeconds = value
         // AE#446 round 4: before anything folds, establish which axis this item's clock is even on.
         measureLiveItemAxisOffset()
+        // AE#454: and if it could not be established, publish nothing derived from it. The raw clock
+        // above is kept (it is a reading of the item, not of the session), but the seam lookup, the
+        // published playhead and the live window all fold an offset that belongs to the item that
+        // just left, and the window's edge is a running maximum a single wrong sample latches.
+        if liveItemPlacementPending { return }
         // Newest seam at or before the raw clock wins: activates seams on forward play, re-applies pre-seam shift on backward DVR seeks.
         if let active = presentationAxis.shiftSeconds(atItemSeconds: value) {
             playlistShiftSeconds = active
@@ -208,6 +213,22 @@ extension AetherEngine {
             .sink { [weak self] ready in
                 guard let self = self else { return }
                 self.isSessionReady = ready
+                // AE#454: the item the session's published position describes. Until a fresh item says
+                // it can play, nothing it reports is a reading of where the session is; see
+                // `liveItemPlacementPending`.
+                if ready {
+                    // The placement is spent here, on every path rather than only on the one that
+                    // replays the stashed seek: a pre-ready seek can be superseded by a host scrub
+                    // (latest-wins), and an arm left standing would be inherited by whatever item the
+                    // session loads next for an unrelated reason.
+                    self.nativeVideoSession?.clearLiveRejoinStart()
+                    // An item with a rejoin placement still outstanding is not yet describing the
+                    // session: the hold runs to the PLACEMENT, not to readiness, or whether the
+                    // hand-off is reported depends on where a 100 ms tick happens to fall inside it.
+                    if self.pendingPreReadySeek?.origin != .liveRejoin {
+                        self.acceptCurrentItemForPublishing()
+                    }
+                }
                 if ready {
                     // #361: an audio session has a picture nowhere, so its ladder ends at readiness
                     // rather than stalling one checkpoint short of the end forever.
@@ -227,7 +248,36 @@ extension AetherEngine {
                 if ready, self.state != .loading, let pending = self.pendingPreReadySeek {
                     self.pendingPreReadySeek = nil
                     EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending.seconds))s (#127)", category: .engine)
-                    Task { @MainActor in await self.seek(to: pending.seconds, origin: pending.origin) }
+                    // AE#454: a placement the playlist already carried out does not need a seek to
+                    // carry it out again, and the seek is not free: a zero-tolerance seek bounces
+                    // transport and costs a rebuffer at the exact moment the picture is coming back
+                    // (measured on the harness: 250 ms of the 485 ms hand-off). Read where the item
+                    // actually came up and let the fact decide, so a client that ignored the tag, or
+                    // honoured it only to a segment boundary, still gets the correcting seek.
+                    if pending.origin == .liveRejoin, let host = self.nativeHost,
+                       let itemTarget = self.liveRejoinItemAxisTarget(pending.seconds),
+                       abs(host.currentTime - itemTarget) <= Self.liveRejoinPlacementSatisfiedSeconds {
+                        EngineLog.emit(
+                            "[AetherEngine] #454 the playlist already placed this item at its own "
+                            + "\(String(format: "%.2f", host.currentTime))s, "
+                            + "\(String(format: "%.3f", abs(host.currentTime - itemTarget)))s from the "
+                            + "\(String(format: "%.2f", itemTarget))s the rejoin asked for; no correcting seek",
+                            category: .engine)
+                        self.acceptCurrentItemForPublishing()
+                        return
+                    }
+                    if pending.origin == .liveRejoin, let host = self.nativeHost {
+                        EngineLog.emit(
+                            "[AetherEngine] #454 the fresh item came up at its own "
+                            + "\(String(format: "%.2f", host.currentTime))s of "
+                            + "\(String(format: "%.2f", host.seekableStart))..\(String(format: "%.2f", host.seekableEnd))s, "
+                            + "not where the rejoin asked for; the placement seek follows",
+                            category: .engine)
+                    }
+                    Task { @MainActor in
+                        await self.seek(to: pending.seconds, origin: pending.origin)
+                        if pending.origin == .liveRejoin { self.acceptCurrentItemForPublishing() }
+                    }
                 }
             }
             .store(in: &cancellables)

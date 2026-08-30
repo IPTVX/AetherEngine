@@ -57,6 +57,7 @@ final class PublicAPIDocumentationTests: XCTestCase {
     /// Public, and deliberately undocumented as host API. Each entry is a claim that an adopter
     /// reading the docs is better off not meeting this symbol, so it carries its reason.
     private static let notHostAPI: [String: String] = [
+        "setForceMasterPlaylistForTesting": "test hook, aetherctl live --force-master",
         "setForceSoftwarePathForTesting": "test hook, aetherctl live --sw",
         "setSourceThrottleKbpsForTesting": "test hook, aetherctl --throttle-kbps",
         "setSoftwareBackgroundAudioOnlyForTesting": "test hook",

@@ -104,6 +104,10 @@ protocol HLSSegmentProvider: AnyObject {
     /// `VideoSegmentProvider.liveOutageEndlist` for why nothing short of ENDLIST keeps AVPlayer fetching.
     var liveOutageEndlist: Bool { get }
 
+    /// AE#454: which segment a rejoin wants the NEXT item to start on, and how far into it. nil on
+    /// every build except the ones between an in-place rejoin swap and the item it placed running.
+    var liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)? { get }
+
     /// Upper bound on how long a blocking reload may hold before the 503. Production providers derive
     /// it from the sealed TARGETDURATION (3 x TD, the HOLD-BACK depth) so a fastZap session (TD=2)
     /// times out in 6 s instead of 18 s — a hold that outlives AVPlayer's forward buffer guarantees
@@ -133,6 +137,7 @@ extension HLSSegmentProvider {
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
     var liveTargetSegmentDuration: Double? { nil }
+    var liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)? { nil }
     var liveBlockingReloadEnabled: Bool { true }
     var liveTargetDurationFloorSeconds: Double? { nil }
     func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int {
@@ -1389,6 +1394,28 @@ final class HLSLocalServer: @unchecked Sendable {
         if typeIsLive || liveOutage {
             // RFC 8216 §6.2.2: EXT-X-DISCONTINUITY-SEQUENCE must advance when discontinuity-tagged segments slide out of the window; omitting it shifts AVPlayer's discontinuity numbering one window after each program boundary.
             lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(snapshot.discontinuitySequence)")
+        }
+        // AE#454: a rejoin's placement, in the manifest the fresh item loads rather than as a seek
+        // 150 ms after it already started playing somewhere else. Recomputed on every build, so a
+        // window that slid between arming and this fetch still names the same content.
+        if typeIsLive, let rejoin = provider.liveRejoinStart,
+           let offset = LiveEdgePolicy.rejoinStartTimeOffset(
+               segmentIndex: rejoin.segmentIndex,
+               secondsIntoSegment: rejoin.secondsIntoSegment,
+               firstVisible: firstVisible,
+               visibleCount: count,
+               targetDuration: targetDuration,
+               segmentDuration: { provider.segmentDuration(at: $0) }) {
+            let tag = "#EXT-X-START:TIME-OFFSET=\(String(format: "%.3f", offset)),PRECISE=YES"
+            lines.append(tag)
+            // The served value, so a field log can say whether the placement was actually offered and
+            // at what depth. Bounded by the arm: this is off on every build except the ones between a
+            // rejoin swap and the item it placed running.
+            EngineLog.emit(
+                "[HLSLocalServer] #454 serving \(tag) for segment \(rejoin.segmentIndex) + "
+                + "\(String(format: "%.2f", rejoin.secondsIntoSegment))s, \(count - firstVisible) "
+                + "segment(s) listed from seg\(firstVisible)",
+                category: .session)
         }
         if typeIsLive {
             // Refresh counter keeps consecutive polls byte-distinct, which is worth having against any

@@ -12,6 +12,98 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.56.9] - 2026-08-30
+
+### Added
+
+- **The served rejoin placement names itself in the log (AE#454).** A field log could see the engine
+  arm a placement and could not see whether the playlist actually offered one, or at what depth. The
+  served tag now says so, and the pair is self-checking: the offset the server writes and the
+  position the fresh item reports at readiness are the same number. Bounded by the arm, so it is off
+  on every build except the ones between a rejoin swap and the item it placed running.
+
+## [6.56.8] - 2026-08-30
+
+### Fixed
+
+- **A rejoin places the item in its playlist (AE#454).** A rejoin is two operations, attaching an
+  item and placing it, and only the first was ever stated to AVPlayer at the swap: the item went out
+  with no start position, so it did what a live playlist tells any client to do, joined at its own
+  edge and started playing there, and the place the viewer held arrived afterwards as the deferred
+  seek. Reported from a device: thirteen outage swaps out of thirteen landed exactly on the held
+  place, and every one of them played 4 to 37 s ahead of it for 140 to 220 ms first, which on a
+  starving origin with a seam every 25 to 40 s reads as a channel jumping around rather than as a
+  recovery. The placement now goes into the manifest the fresh item loads
+  (`EXT-X-START:TIME-OFFSET`, `PRECISE=YES`), armed by segment rather than by seconds so a window
+  that slides between arming and serving still names the same content, and taken at the resolution
+  the playlist serves. Measured on the harness with one instrument across both arms: the fresh
+  item's first request went from eleven segments above the one the consumer had reached to the
+  segment the consumer was on, and the reported position went from 50.27 s above the held place to
+  never leaving it. The deferred seek stays as the fallback for a client that ignores the tag, and
+  is retired when the item did come up where it was asked for.
+- **An item's axis offset was measured on the item it was measured on (AE#454).** Between an
+  in-place swap and the fresh item reporting a seekable range, the retired item's offset was folded
+  into the fresh item's clock, which reads about zero, so the session published the retired item's
+  zero as its position: 70 to 80 s below the place it held in the field, and it flowed into the live
+  window's edge, which is a running maximum. The published playhead and the live window now hold
+  across the hand-off, bounded by the placement rather than by readiness. A cold join is unchanged.
+
+## [6.56.7] - 2026-08-30
+
+### Fixed
+
+- **A composition lands on the base, not on the axis (AE#418).** A reporter's retest of 6.56.6 had
+  every previous failure mode gone and exactly one frame left over on each correction, constant
+  rather than growing. The fixture pair isolates it: the FIRST placement into an item's timeline puts
+  the segment's first PRESENTED sample at its advertised start, and every later one puts its first
+  DECODED sample there instead, so a composition lands one presentation lead under the axis it
+  composes onto. Measured on two fixtures identical but for `-bf 3`: AVPlayer held a re-placed
+  segment from item 61.083 where the axis alone predicts 61.000 and the picture read -18.083 for the
+  rest of the run, against 61.000 and -18.000 without B-frames. The producer now publishes the gating
+  sample's own lead (pts minus dts) alongside the shift and the composition subtracts it, so the
+  reading confirms the prediction instead of correcting it. What this pays for is the placement that
+  cannot be measured at all, a seek burst reopening backwards inside the buffer: measured on that
+  arm, -23.166 s after two compositions and -27.166 s after three, both matching the picture exactly,
+  where 6.56.6 kept -23.083 and -27.000.
+
+## [6.56.6] - 2026-08-30
+
+### Fixed
+
+- **A measurement that may only agree is still a prediction (AE#418).** The VOD axis is read out of
+  `AVPlayerItem.loadedTimeRanges` after every seam, and that reading was then collapsed onto the
+  nearest axis the session had already published, which made the prediction the yardstick for the
+  measurement meant to check it. Reported from a retest on two devices: a reading matching no
+  prediction was thrown away, so a session kept composing to -26.152 s while two readings 400 s of
+  media apart both said -10.93 s, and one device ended 42.6 s wrong and stayed there for the rest of
+  the session; a reading one or two frames off the prediction was called a confirmation, so the
+  difference stayed in the axis and the next placement composed on top of it, walking the error past
+  the tolerance in six placements, after which every reading was refused. The reading is now the
+  axis. What decides whether it describes THIS placement is where it came from: a run that overlaps
+  nothing the item held when the placement was recorded, or one that opened above it. A start that
+  walked downward is the same run backfilling, which AVPlayer does after a run opens (measured: a run
+  that opened at 1522.6 read 1507.1 fifteen seconds later), and is never read. A placement counted
+  twice across a producer restart is undone by the next reading rather than carried, and a placement
+  superseded before its window closes says so instead of falling silent.
+
+- **The gate's offset is measured on the sample that is PRESENTED (AE#418).** It was taken on the
+  first packet's decode time. A segment opens on a random-access point in decode order, and with
+  B-frames that sample is presented `video_delay` frames after it is decoded, so the published axis
+  sat that far under the truth on every epoch of a B-frame source, which is most real content. The
+  gate's own line carried both numbers all along (`actual=42917 anchorPts=43000`), and the segment
+  bytes agree (tfdt 686672 with a first-sample composition offset of 1328 in a timescale of 16000,
+  the same 0.083 s). Measured with `play --picture-probe` on a new B-frame fixture that
+  `Scripts/timecode-fixture.sh` writes, mean `capErr` over 39 ticks: +0.113 s before, +0.031 s after,
+  against +0.030 s on the same fixture encoded without B-frames.
+
+- **A resampler reads a frame per what it was built for, at every site that keeps one (AE#452).** A
+  live transport-stream splice from 5.1 to stereo left a long-lived `SwrContext` reading six planes
+  from a frame carrying two, and the read past the end of the frame's plane array crashed the
+  session at the program boundary. The configuration a resampler was built from is a claim about
+  every later frame, so it is now re-checked per frame and the context rebuilt when it no longer
+  holds, at all three sites that keep one. Fix contributed by @tschuegy in #453, hardened across the
+  remaining sites here.
+
 ## [6.56.5] - 2026-08-29
 
 ### Fixed
