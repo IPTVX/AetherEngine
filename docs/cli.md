@@ -154,6 +154,26 @@ AVPlayer discarded (a fetch during a seek burst, which is a fetch and not a plac
 picture probe the two oracles agree exactly: a resume predicting a seam at `52.000` reads
 `loaded [52.000-64.958]`, and a far seek predicting `21.000` reads `[21.000-38.622]`.
 
+**Round 4 lets that reading WIN.** Round 3 collapsed the measured base onto the nearest axis the
+session had already published, which made the prediction the yardstick for the measurement meant to
+check it: a base matching no prediction was refused (a reporter's session composed to `-26.152` while
+two readings 400 s of media apart both said `-10.93`, and ended 42.6 s out), and a base a frame or
+two off was called a confirmation, so that difference stayed in the axis and the next placement
+composed on top of it. What decides now is where the reading came from: a run that overlaps nothing
+the item held when the placement was recorded, or one that opened ABOVE it. A start that walked
+DOWNWARD is the same run backfilling, which AVPlayer does after a run opens, and is never read. The
+new lines are `#418 segN placement confirmed` (residual under a millisecond), `#418 segN placed on
+base Xs, not Ys (... residual Zs)`, `#418 segN opened no run of its own to measure`, and
+`#418 segN superseded before it was measured`.
+
+Round 4 also needs a fixture with B-FRAMES, and `Scripts/timecode-fixture.sh` now writes one
+(`tc-bframes.mkv`). `-preset ultrafast` disables them, so on `tc-drought.mkv` a segment's dts and pts
+are one number and the gate's offset is the same either way. On real content they are not: the gate
+opens on a random-access point in DECODE order, and taking the offset there put the axis
+`video_delay` frames under the truth on every epoch. The pair isolates exactly that. Read the verdict
+as the MEAN of `capErr` per axis over the run, since a single tick carries up to two frames of the
+probe's own quantisation.
+
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
 `--malloc-census` turns on the large-allocation census (`AetherEngine.setLargeAllocationCensusEnabled`) for the run, for tracing a footprint that grows where the segment budget says it should not. Besides the 30 s sample it arms a jump trigger, which exists because the 30 s memprobe cannot catch a failure that completes inside one sample (every kill on #220 was that shape): a counter polled at `--census-hz N` runs the zone walk once it climbs `--census-threshold-mb N` above its running high-water. Both flags are inert without `--malloc-census`.

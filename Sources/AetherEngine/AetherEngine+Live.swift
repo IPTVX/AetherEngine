@@ -164,6 +164,10 @@ extension AetherEngine {
     func measureLiveItemAxisOffset() {
         guard isLive, let host = nativeHost else { return }
         guard host.itemGeneration != liveItemAxisOffsetGeneration else { return }
+        // AE#454: everything below this line establishes the axis; until it succeeds there is no
+        // measurement for THIS item, and the one above it belongs to the item that just left. See
+        // `liveItemAxisUnmeasuredAfterSwap` for what the clock does in the meantime.
+
         // A range of zero width is an item that has not reported yet, not an item at the origin.
         guard host.seekableEnd > host.seekableStart,
               let producerFloor = residentLiveFloorSessionSeconds() else { return }
@@ -179,6 +183,62 @@ extension AetherEngine {
             + "into the session, so its own clock reads that much below the session's; folding it into "
             + "every conversion for as long as this item is the one playing",
             category: .engine)
+    }
+
+    /// AE#454: a fresh item has no position for the session until it says it can play.
+    ///
+    /// Two readings are wrong in the window between an in-place swap and the fresh item's readiness,
+    /// and they were both being published as the session's playhead:
+    ///
+    /// - The axis offset is latched per item and re-measured when the item under the host changes,
+    ///   but the re-measurement needs the fresh item to have reported a seekable range of its own.
+    ///   Until then the RETIRED item's offset was folded into the fresh item's clock, which reads ~0,
+    ///   so the session published the retired item's zero: 70 to 80 s below the place it held in the
+    ///   field, 80.27 s below it on the harness.
+    /// - Even with the axis established, AVPlayer's clock before readiness names the segment it
+    ///   fetched first rather than where it will start. Measured on the harness after the placement
+    ///   moved into the playlist: the item was placed at 50.14 s and reported 40.17 s, one segment
+    ///   below, for 192 ms.
+    ///
+    /// Neither is a reading of where the session is, and both flowed into `LiveWindow.noteEdge`, which
+    /// is a running maximum a single wrong sample latches. So the clock and the window hold across the
+    /// hand-off. The hold is bounded by readiness, which every other part of the session already
+    /// depends on; an item that never becomes ready leaves the clock on the frame that is actually on
+    /// screen, which is the honest report of that session.
+    ///
+    /// False for the first item of a session, where nothing has been accepted yet and the cold join
+    /// publishes exactly as before.
+    var liveItemPlacementPending: Bool {
+        guard isLive, let host = nativeHost else { return false }
+        return Self.liveItemPlacementPending(
+            acceptedGeneration: liveAcceptedItemGeneration,
+            itemGeneration: host.itemGeneration,
+            axisGeneration: liveItemAxisOffsetGeneration,
+            itemReportsRange: host.seekableEnd > host.seekableStart)
+    }
+
+    /// AE#454: from here on, what the item under the host reports IS what the session reports.
+    ///
+    /// Taken at readiness on every ordinary path, and one step later on a rejoin: an item that is
+    /// ready but has not been placed yet is playing where the playlist put it, not where the session
+    /// decided to be, and the placement can still be a seek away.
+    @MainActor
+    func acceptCurrentItemForPublishing() {
+        liveAcceptedItemGeneration = nativeHost?.itemGeneration ?? -1
+    }
+
+    /// AE#454: the rule above, on its own so the case can be stated without a session.
+    nonisolated static func liveItemPlacementPending(
+        acceptedGeneration: Int,
+        itemGeneration: Int,
+        axisGeneration: Int,
+        itemReportsRange: Bool
+    ) -> Bool {
+        guard acceptedGeneration != -1 else { return false }
+        if itemGeneration != acceptedGeneration { return true }
+        // Ready and axis-less is not a contradiction: they are separate signals and their order is
+        // AVFoundation's business, so the second reading is guarded on its own input.
+        return itemGeneration != axisGeneration && !itemReportsRange
     }
 
     /// AE#446 round 4: the arithmetic behind `measureLiveItemAxisOffset`, on its own so the case can
@@ -343,6 +403,33 @@ extension AetherEngine {
             0, (axis.itemSeconds(forSourceSeconds: sessionTarget) ?? (sessionTarget - shift))
                - itemAxisOffset)
         return (sessionTarget, clockTarget)
+    }
+
+    /// AE#454: how close the fresh item has to be to the place it was asked for before the correcting
+    /// seek is not worth its cost.
+    ///
+    /// Tight on purpose. `EXT-X-START` with `PRECISE=YES` places an item exactly (measured on the
+    /// harness: 6 ms from the target), so anything a segment boundary or an ignored tag could produce
+    /// is far outside this and still gets the seek. It is a test of whether the placement WORKED, not
+    /// a tolerance on where a rejoin may land.
+    nonisolated static let liveRejoinPlacementSatisfiedSeconds: Double = 0.5
+
+    /// AE#454: the item-axis position a live rejoin target resolves to right now, or nil with nothing
+    /// to resolve it against. Same pure landing rule the seek itself uses, so the comparison cannot
+    /// drift from the seek it decides to skip.
+    @MainActor
+    func liveRejoinItemAxisTarget(_ sessionTarget: Double) -> Double? {
+        guard isLive, let window = liveWindow, let host = nativeHost else { return nil }
+        return Self.liveSeekLanding(
+            requested: sessionTarget,
+            window: window,
+            itemEnd: host.seekableEnd,
+            shift: playlistShiftSeconds,
+            axis: presentationAxis,
+            origin: .liveRejoin,
+            residentRange: residentLiveRangeSessionSeconds(),
+            itemAxisOffset: liveItemAxisOffsetSeconds
+        ).clockTarget
     }
 
     /// Seek to the current live edge. No-op when not live.

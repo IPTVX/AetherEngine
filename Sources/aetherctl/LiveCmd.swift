@@ -126,7 +126,8 @@ func runLive(
     forceRecoveryReloadAt: Double? = nil,
     rewindHold: Double? = nil,
     blockingReload: Bool? = nil,
-    liveOnly: Bool = false
+    liveOnly: Bool = false,
+    forceMaster: Bool = false
 ) -> Int32 {
     // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
     let logEpoch = Date()
@@ -134,10 +135,16 @@ func runLive(
 
     // TEST-ONLY: force SoftwarePlaybackHost routing; cleared on exit to avoid in-process bleed.
     AetherEngine.setForceSoftwarePathForTesting(forceSoftware)
+    // AE#454: the device's own manifest route, which no live leg had ever taken.
+    AetherEngine.setForceMasterPlaylistForTesting(forceMaster)
+    if forceMaster {
+        print("aetherctl live: --force-master set, routing behind the master playlist")
+    }
     if forceSoftware {
         print("aetherctl live: --sw set, forcing SoftwarePlaybackHost routing")
     }
     defer { AetherEngine.setForceSoftwarePathForTesting(false) }
+    defer { AetherEngine.setForceMasterPlaylistForTesting(false) }
 
     let resolvedSeed = seedPath ?? "Fixtures/user/h264-ts-sample.ts" // relative to CWD under `swift run`
     print("aetherctl live: seed=\(resolvedSeed) seconds=\(playSeconds)" +
@@ -234,7 +241,8 @@ func runLive(
                                              expectsRecovery: unfreezeAfter != nil,
                                              forceRecoveryReloadAt: forceRecoveryReloadAt,
                                              blockingReload: blockingReload,
-                                             liveOnly: liveOnly)
+                                             liveOnly: liveOnly,
+                                             forceMaster: forceMaster)
             fixture.stop()
             CFRunLoopStop(CFRunLoopGetMain())
             return
@@ -632,6 +640,21 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
     private(set) var handedWhileRunwayPlaying = false
     private var runwayEnded = false
     private var didSwap = false
+    /// AE#454: the two stamps the hand-off is argued from. The rejoin names the place it is coming
+    /// back to BEFORE it swaps, so everything the session reports between that line and the placement
+    /// landing is a position nobody decided. A 1 Hz tick cannot see it; the reporter measured 140 to
+    /// 220 ms in the field.
+    private(set) var swapAt: Date?
+    private(set) var heldPlace: Double?
+    /// AE#454: the FIRST thing the fresh item asked for. A sampler can miss a 41 ms excursion; a
+    /// request cannot be missed, and it is a statement about content rather than about an axis. A
+    /// rejoin that comes back to the place it held asks for the segment the consumer was on; one that
+    /// joins the edge first asks for the segment the window ends on, tens of indices up.
+    private(set) var firstFetchAfterSwap: Int?
+    /// AE#454: when the placement landed. The hand-off is exactly the interval between the swap and
+    /// this; after it the session is playing on from where it was placed, and counting that as an
+    /// excursion would call every healthy rejoin a flash.
+    private(set) var placementLandedAt: Date?
 
     /// AE#446 round 3: segments the window listed, that the consumer had not reached, and that the
     /// rejoin then jumped over. nil when no rejoin happened.
@@ -682,12 +705,28 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
            let idx = Int(line[r.upperBound..<dot]) {
             segmentFetches += 1
             lastSegmentFetched = max(lastSegmentFetched, idx)
-            if didSwap { fetchedAfterSwap.insert(idx) } else { fetchedBeforeSwap.insert(idx) }
+            if didSwap {
+                if firstFetchAfterSwap == nil { firstFetchAfterSwap = idx }
+                fetchedAfterSwap.insert(idx)
+            } else {
+                fetchedBeforeSwap.insert(idx)
+            }
         }
         // The swap is the moment the session goes back to being live; everything fetched from here on
         // is the rejoin's choice of where to come back.
         if line.contains("#446 the window ran out and the source is delivering again")
-            || line.contains("nudge did not revive the consumer") { didSwap = true }
+            || line.contains("nudge did not revive the consumer") {
+            didSwap = true
+            // AE#454: both rejoin lines end their position with the same clause, so one parser covers
+            // the outage swap and the #65 reload. Stamped here rather than at the fetch, because the
+            // hand-off starts when the item is replaced, not when the fresh one asks for something.
+            if swapAt == nil, let marker = line.range(of: "s, the place it held"),
+               let at = line[..<marker.lowerBound].range(of: "at ", options: .backwards),
+               let held = Double(String(line[at.upperBound..<marker.lowerBound])) {
+                swapAt = Date()
+                heldPlace = held
+            }
+        }
         if line.contains("#446 the window ran out") { runwayEnded = true }
         if line.contains("requesting host retune") || line.contains("publishing liveSourceReset") {
             handedToHost = true
@@ -705,9 +744,36 @@ private final class FreezeRecoveryCounters: @unchecked Sendable {
         if line.contains("nudge did not revive the consumer") {
             if line.contains("the place it held") { keptPlace += 1 } else { edgeRejoins += 1 }
         }
+        // The hand-off closes when the placement is settled, whichever way it settled: the correcting
+        // seek landing, or the engine reading that the playlist had already done it.
+        if didSwap, placementLandedAt == nil,
+           line.contains("programmatic landed") || line.contains("#454 the playlist already placed") {
+            placementLandedAt = Date()
+        }
         if line.contains("live reopen attempt") { reopenAttempts += 1 }
         if line.contains("reload: stopInternal start") { fullReloads += 1 }
         if line.contains("blocking reload msn=") { unsatisfiable += 1 }
+    }
+}
+
+/// AE#454: what the session REPORTED, sampled fast enough to see a hand-off.
+///
+/// The freeze leg's own loop ticks at 1 Hz, which is the cadence a rejoin's placement is decided and
+/// landed inside of. The reporter measured the whole excursion at 140 to 220 ms, so a leg sampling
+/// once a second can only ever find the session already settled and call the run healthy.
+private final class HandoffSamples: @unchecked Sendable {
+    private let lock = NSLock()
+    private var rows: [(at: Date, t: Double)] = []
+
+    func add(at: Date, t: Double) {
+        lock.lock(); defer { lock.unlock() }
+        rows.append((at, t))
+    }
+
+    /// Everything reported in the `window` seconds after `start`, oldest first.
+    func after(_ start: Date, window: Double) -> [(at: Date, t: Double)] {
+        lock.lock(); defer { lock.unlock() }
+        return rows.filter { $0.at >= start && $0.at.timeIntervalSince(start) <= window }
     }
 }
 
@@ -724,7 +790,8 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
                             expectsRecovery: Bool = false,
                             forceRecoveryReloadAt: Double? = nil,
                             blockingReload: Bool? = nil,
-                            liveOnly: Bool = false) async -> Int32 {
+                            liveOnly: Bool = false,
+                            forceMaster: Bool = false) async -> Int32 {
     let counters = FreezeRecoveryCounters()
     let prior = EngineLog.handler
     EngineLog.handler = { line in counters.note(line); prior?(line) }
@@ -747,6 +814,11 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     if liveOnly {
         print("  live-only: LoadOptions.dvrWindowSeconds = nil (the session advertises no rewind)")
     }
+    // AE#454: the master route is the DEVICE default for a live session with any subtitle track (and
+    // on tvOS for every HEVC one), and it is the route the harness never exercised: `useMaster=false`
+    // on every live leg so far. Whether a client honours a media playlist's placement when it arrived
+    // through a master is a different question from whether it honours one it fetched directly.
+    options.prepareNativeSubtitles = forceMaster
     options.liveBlockingReload = blockingReload
     if let blockingReload {
         print("  blocking reload forced \(blockingReload ? "ON" : "OFF") for this leg")
@@ -757,6 +829,17 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
         print("VERDICT: live-freeze FAIL: load error: \(error.localizedDescription)")
         engine.stop()
         return 1
+    }
+
+    // AE#454: 20 ms, for the whole run rather than only around the swap, because nothing announces a
+    // hand-off early enough to arm a sampler at it. A MainActor property read is cheap next to the
+    // engine's own work, and the rows are only read after the run.
+    let handoff = HandoffSamples()
+    let handoffSampler = Task { @MainActor in
+        while !Task.isCancelled {
+            handoff.add(at: Date(), t: engine.currentTime)
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 
     // The fixture arms its freeze from the moment its serve loop starts, which is the reader's
@@ -830,6 +913,7 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     }
 
     let finalState = engine.state
+    handoffSampler.cancel()
     engine.stop()
     EngineLog.handler = prior
 
@@ -857,6 +941,57 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
                            $0.segments, $0.seconds, $0.allowance)
                  } ?? ""))
     }
+    // AE#454: the hand-off, in the terms the viewer experiences it. The rejoin names the place it is
+    // coming back to before it swaps, so every position the session reports between that line and the
+    // placement landing is one nobody decided: the fresh item's own join (above the held place) and,
+    // while its axis is still unmeasured, the retired item's zero (below it).
+    var handoffFlash: (above: Double, below: Double, spanMS: Int)? = nil
+    var handoffJoinedElsewhere: (first: Int, lastBefore: Int)? = nil
+    if let swapAt = counters.swapAt, let held = counters.heldPlace {
+        // The excursion, not the window it happens in. A fixed window after the swap also contains
+        // the session playing on legitimately from the place it landed, and counting that as a
+        // departure would call every healthy rejoin a flash. So: the first sample that LEAVES the
+        // held place, through the first one that comes back to it.
+        let tolerance = Swift.max(1.0, counters.segmentDuration * 0.5)
+        // The hand-off, bounded at both ends by events rather than by a guessed duration: it opens at
+        // the swap and closes when the placement lands. A fixed window would either miss a slow
+        // landing or count the session playing on afterwards.
+        let handoffSeconds = counters.placementLandedAt.map { $0.timeIntervalSince(swapAt) } ?? 1.5
+        let rows = handoff.after(swapAt, window: handoffSeconds)
+        let departure = rows.firstIndex { abs($0.t - held) > tolerance }
+        print("")
+        print("=== AE#454 HAND-OFF ===")
+        print(String(format: "  the place it held:    %.2fs (tolerance %.2fs)", held, tolerance))
+        print(String(format: "  hand-off lasted:      %dms (swap to placement landing)",
+                     Int(handoffSeconds * 1000)))
+        if let departure {
+            let tail = rows[departure...]
+            let back = tail.firstIndex { abs($0.t - held) <= tolerance }
+            let excursion = Array(rows[departure..<(back ?? rows.endIndex)])
+            let highest = excursion.map(\.t).max() ?? held
+            let lowest = excursion.map(\.t).min() ?? held
+            var spanMS = 0
+            if let first = excursion.first, let last = excursion.last {
+                spanMS = Int(last.at.timeIntervalSince(first.at) * 1000) + 20
+            }
+            print(String(format: "  left it for:          %.2fs .. %.2fs over %dms (%d sample(s) at 20ms)",
+                         lowest, highest, spanMS, excursion.count))
+            print(String(format: "  above / below:        %.2fs / %.2fs",
+                         Swift.max(0, highest - held), Swift.max(0, held - lowest)))
+            print("  came back to it:      " + (back == nil ? "not within 6s" : "yes"))
+            handoffFlash = (Swift.max(0, highest - held), Swift.max(0, held - lowest), spanMS)
+        } else {
+            print("  left it:              never (\(rows.count) sample(s) at 20ms)")
+        }
+        if let first = counters.firstFetchAfterSwap, let lastBefore = counters.fetchedBeforeSwap.max() {
+            let joinedElsewhere = first > lastBefore + 1
+            print("  fresh item asked for: seg\(first) first (the consumer had consumed through "
+                  + "seg\(lastBefore))"
+                  + (joinedElsewhere ? "  <- joined its own edge before it was told where to go" : ""))
+            if joinedElsewhere { handoffJoinedElsewhere = (first, lastBefore) }
+        }
+    }
+
     print("  recovery lines: itemDeath=\(counters.itemDeaths) edgeRejoin=\(counters.edgeRejoins) "
           + "keptPlace=\(counters.keptPlace) "
           + "reopen=\(counters.reopenAttempts) fullReload=\(counters.fullReloads) "
@@ -908,6 +1043,21 @@ private func liveFreezeTest(url: URL, seconds playSeconds: Double, dvrWindow: Do
     if counters.fetchedAfterSwap.isEmpty, maxForwardSnap > 30.0 {
         print(String(format: "VERDICT: live-freeze POSITION LOST (forward step %.2fs, no rejoin in this run)",
                      maxForwardSnap))
+        return 1
+    }
+    // AE#454: a rejoin that LANDS on the place it held and RENDERS somewhere else on the way there is
+    // not a held position, it is a held position the viewer never saw. The tolerance is one segment,
+    // which is the smallest excursion the content itself can explain.
+    if let joined = handoffJoinedElsewhere {
+        print("VERDICT: live-freeze HAND-OFF JOINED ELSEWHERE (the fresh item's first request was "
+              + "seg\(joined.first), \(joined.first - joined.lastBefore) segment(s) above the "
+              + "seg\(joined.lastBefore) the consumer had reached, before the placement landed)")
+        return 1
+    }
+    if let flash = handoffFlash, max(flash.above, flash.below) > max(1.0, counters.segmentDuration) {
+        print(String(format: "VERDICT: live-freeze HAND-OFF FLASHED (%.2fs above / %.2fs below the place "
+                     + "it held, for %dms, before the placement landed)",
+                     flash.above, flash.below, flash.spanMS))
         return 1
     }
     print(String(format: "VERDICT: live-freeze position held (largest step %.2fs, advanced %.2fs after the freeze)",

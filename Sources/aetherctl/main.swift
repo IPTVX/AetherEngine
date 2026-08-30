@@ -104,6 +104,7 @@ func printUsage() {
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
+                     [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N] [--live-only] [--no-blocking-reload] [--force-master]
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N]
                      [--no-blocking-reload]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
@@ -488,6 +489,11 @@ if first == "live" {
     // rewind outside the engine. The freeze leg then measures the only timeshift such a session can
     // have, the backlog an outage puts between the closed window's end and the source's return.
     let liveOnly = takeFlag("--live-only", from: &rest)
+    // AE#454: --force-master routes the live session behind its master playlist and sets
+    // LoadOptions.prepareNativeSubtitles the way a real host does (unconditionally). That pairing is
+    // the device's own route, and every live leg before this ran media-direct, so nothing here had
+    // ever exercised it.
+    let liveForceMaster = takeFlag("--force-master", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -503,7 +509,7 @@ if first == "live" {
                  forceRecoveryReloadAt: forceRecoveryReloadAt,
                  rewindHold: rewindHold,
                  blockingReload: noBlockingReload ? false : nil,
-                 liveOnly: liveOnly))
+                 liveOnly: liveOnly, forceMaster: liveForceMaster))
 }
 
 if first == "play" {

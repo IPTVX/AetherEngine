@@ -686,6 +686,10 @@ public final class AetherEngine: ObservableObject {
     var liveItemAxisOffsetSeconds: Double = 0
     /// The item generation `liveItemAxisOffsetSeconds` was measured for.
     var liveItemAxisOffsetGeneration: Int = -1
+    /// AE#454: the item generation the session's published position describes, accepted at readiness.
+    /// -1 until the first item of a session is ready, which is what keeps a cold join publishing
+    /// exactly as before. See `liveItemPlacementPending`.
+    var liveAcceptedItemGeneration: Int = -1
     /// AE#446 round 4: bounded audit after a rejoin swap. See `auditLiveRejoinPlacement`.
     var liveRejoinAuditUntil: Date?
     var liveRejoinAuditLastEmit: Date?
@@ -1106,6 +1110,21 @@ public final class AetherEngine: ObservableObject {
     /// TEST-ONLY. Flip the SW-path override for the `aetherctl live --sw` harness; not for app use.
     public nonisolated static func setForceSoftwarePathForTesting(_ on: Bool) {
         forceSoftwarePathForTesting = on
+    }
+
+    /// TEST-ONLY: routes a loopback session behind its MASTER playlist regardless of codec, panel and
+    /// subtitle state, so the harness can exercise the route a real host actually takes.
+    ///
+    /// A device reaches the master whenever the session has any subtitle track (hosts set
+    /// `prepareNativeSubtitles` unconditionally) and, on tvOS, for every HEVC source. The harness
+    /// reached it for none of them: every live leg ran `useMaster=false`, so a question about how a
+    /// client treats what the manifest says had only ever been asked of the manifest the device
+    /// usually does not read (AE#454).
+    nonisolated(unsafe) static var forceMasterPlaylistForTesting = false
+
+    /// TEST-ONLY. Flip the master-route override for the `aetherctl live --force-master` harness.
+    public nonisolated static func setForceMasterPlaylistForTesting(_ on: Bool) {
+        forceMasterPlaylistForTesting = on
     }
 
     /// TEST-ONLY. Drive the #93/#65 stage-2 recovery reload (item swapped in place under a session that
@@ -2301,6 +2320,32 @@ public final class AetherEngine: ObservableObject {
             + " (same URL, same host)",
             category: .engine
         )
+        // AE#454: the placement, expressed in the playlist the fresh item is about to load. A rejoin
+        // is two operations, attaching an item and placing it, and only the first was ever stated to
+        // AVPlayer at the swap: the item then joined where a live playlist tells any client to join,
+        // its own edge, started playing there, and was corrected ~150 ms later by the stashed seek
+        // below. Measured on the harness at 50.27s above the place it held, and in the field at 4 to
+        // 37s for 140 to 220ms, thirteen swaps out of thirteen. Armed before the swap so the item's
+        // FIRST manifest carries it; the stashed seek stays as the fallback for a client that ignores
+        // the tag, and it is the same seek it always was.
+        if isLive, let rejoinPosition, let session = nativeVideoSession {
+            let outputSeconds = presentationAxis.itemSeconds(forSourceSeconds: rejoinPosition)
+                ?? (rejoinPosition - playlistShiftSeconds)
+            if let armed = session.armLiveRejoinStart(atOutputSeconds: outputSeconds) {
+                EngineLog.emit(
+                    "[AetherEngine] #454 placing the fresh item at "
+                    + "\(String(format: "%.2f", rejoinPosition))s in its own playlist: segment "
+                    + "\(armed.segmentIndex) + \(String(format: "%.2f", armed.secondsIntoSegment))s "
+                    + "(output \(String(format: "%.2f", outputSeconds))s), so it never joins the edge "
+                    + "to be corrected off it",
+                    category: .engine)
+            } else {
+                EngineLog.emit(
+                    "[AetherEngine] #454 the place it held is not in a segment the producer still "
+                    + "holds, so the fresh item joins as before and the stashed seek decides",
+                    category: .engine)
+            }
+        }
         // Live reload = live REJOIN: no stale-clock resume, no explicit start seek — the
         // zero-tolerance seek into a possibly-slid window wedges the fresh item in waitingToPlay.
         // Same contract as the #98 media fallback above; see LiveReloadPolicy.
@@ -5595,6 +5640,7 @@ public final class AetherEngine: ObservableObject {
         pendingPreReadySeek = nil
         liveItemAxisOffsetSeconds = 0
         liveItemAxisOffsetGeneration = -1
+        liveAcceptedItemGeneration = -1
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
         let scrubThumbs = scrubThumbnailExtractors

@@ -83,27 +83,37 @@ extension AetherEngine {
     /// it describes, and let the session correct it when the base it composed onto was never carried.
     ///
     /// Polled rather than awaited on an edge, because the publish happens when the segment is FETCHED
-    /// and the ranges only move once AVPlayer has taken the bytes. Bounded on both ends: it gives up
-    /// after `placementVerificationAttempts` reads, and it reads nothing at all once the playhead sits
-    /// inside a range (one answer is all this needs). Late is worse than never here, which is why the
-    /// window is short: eviction eventually trims a range's start away from the placement it began at.
+    /// and the ranges only move once AVPlayer has taken the bytes.
+    ///
+    /// Round 4: the first sample is the BASELINE, taken before AVPlayer can have the bytes, and every
+    /// later sample is read against it. Only a run that overlaps nothing in the baseline is this
+    /// placement's; the run that was already there answers a different question, and its own start
+    /// moves while it is asked, because AVPlayer backfills below a run after it opens. Reading the
+    /// first range that happened to hold the playhead is what let a stale run be reported as a
+    /// confirmation, one to two frames at a time, until the accumulated difference exceeded the check
+    /// itself.
     static let placementVerificationAttempts = 6
     static let placementVerificationIntervalMS = 250
 
     func verifyPlacementAgainstLoadedRanges(session: HLSVideoEngine) {
         placementVerificationTask?.cancel()
+        guard session.hasPlacementAwaitingMeasurement else { return }
         placementVerificationTask = Task { @MainActor [weak self, weak session] in
+            guard let baseline = await self?.avPlayerLoadedRanges() else { return }
             for _ in 0..<Self.placementVerificationAttempts {
                 try? await Task.sleep(for: .milliseconds(Self.placementVerificationIntervalMS))
                 guard !Task.isCancelled, let self, let session else { return }
                 let ranges = await self.avPlayerLoadedRanges()
                 guard !Task.isCancelled else { return }
                 let clock = self.nativeClockSeconds
-                guard let start = HLSVideoEngine.placementRangeStart(ranges: ranges, itemClock: clock)
+                guard let start = HLSVideoEngine.freshRunStart(
+                    ranges: ranges, baseline: baseline, itemClock: clock)
                 else { continue }
                 session.reconcileAxisWithObservedPlacement(observedItemStart: start, itemClock: clock)
                 return
             }
+            guard !Task.isCancelled else { return }
+            session?.reportPlacementUnreadable()
         }
     }
 
