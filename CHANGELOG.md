@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.57.0] - 2026-08-31
+
+### Changed
+
+- **The FFmpeg frameworks ship under an `Aether` prefix (FFmpegBuild 3.0.0).** Every FFmpeg packaged
+  for Apple platforms declares targets named `Libavcodec`, `Libavformat` and friends, and SwiftPM
+  target names are unique across the whole dependency graph, so an app whose player keeps a second
+  engine (KSPlayer, mpv, MobileVLCKit) could not resolve a graph holding this one at all: `multiple
+  similar targets 'Libavcodec', 'Libavfilter', 'Libavformat' and 3 others appear in package
+  'ffmpegbuild' and 'ffmpegkit'`. `moduleAliases` does not reach it, since it renames Swift source
+  targets rather than binary ones. Behind it sat a second collision on one install name in
+  `App.app/Frameworks/`. Both are name problems, so both are settled by naming: the modules are
+  `AetherLibavcodec` and friends, the install names follow
+  (`@rpath/AetherLibavcodec.framework/AetherLibavcodec`), and the umbrella product is
+  `AetherFFmpegBuild`. Same n8.1.2 binaries as before, and the FFmpeg C API is untouched.
+
+  **Hosts see nothing**: the public API never exposed an FFmpeg type. Only a host that imports
+  `Libav*` itself has a line to change.
+
+### Documentation
+
+- **docs/api.md gains the case a rename cannot cover.** Two dynamic framework sets coexist on their
+  own, because the two-level namespace binds per reference. A static FFmpeg in the same executable
+  still captures `_avcodec_*` for everything linked beside it, so the section now carries the recipe:
+  link the engine into a dynamic framework of the host's own and let its references bind there, with
+  the two commands that show which build actually answered.
+
 ## [6.56.9] - 2026-08-30
 
 ### Added
