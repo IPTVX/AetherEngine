@@ -159,6 +159,33 @@ The fix is the host's, because nothing inside a library can reach it: link Aethe
 
 This is not hypothetical. AE#396 was reported as an audio-bridge defect, reproduced on five fixtures and two devices, and was a second FFmpeg one major behind: the engine's only trace was `flac bridge encoder absent from this FFmpeg build`, a true sentence about a build that was not the engine's. That line now names the libavcodec that answered.
 
+### Holding a second player beside the engine
+
+A ladder that keeps KSPlayer, mpv or MobileVLCKit for the formats it already covers is a normal shape, and since FFmpegBuild 3.0.0 the engine's FFmpeg is named so it can live there. The frameworks ship as `AetherLibavcodec`, `AetherLibavformat`, `AetherLibavutil`, `AetherLibswresample`, `AetherLibswscale`, `AetherLibavfilter`, `AetherLibdav1d`, `AetherLibzimg` and `AetherLibzvbi`, and the install names follow (`@rpath/AetherLibavcodec.framework/AetherLibavcodec`). SwiftPM target names are unique across the whole dependency graph and two framework bundles cannot share one path in `App.app/Frameworks/`, so before the prefix a package graph holding both simply did not resolve.
+
+If the other FFmpeg is itself a set of **dynamic** frameworks, that is the whole fix. The two-level namespace records per reference which dylib a symbol came from, so the engine reaches its libavcodec and the other player reaches its own, in one process, with no link-order argument to win.
+
+If the other FFmpeg is **static**, the rename is not enough, and no rename could be: `_avcodec_open2` is `_avcodec_open2` in every FFmpeg there is. Its symbols become definitions inside the executable, and the engine, statically linked beside them, binds to those. The remedy is to stop linking the engine into the executable:
+
+1. Add a dynamic framework target to your project, say `PlayerEngineKit`, and link the `AetherEngine` product into that target instead of into the app.
+2. Embed the `AetherLib*` frameworks in the app as usual (Xcode does this for you when the package is linked).
+3. Have the app talk only to `PlayerEngineKit`.
+
+The engine's `_av*` references are then resolved when that framework links, against `AetherLibavcodec.framework`, and recorded as coming from it. Whatever the executable defines for its own player no longer participates. This is the same construction that lets MobileVLCKit's FFmpeg and FFmpegKit coexist today.
+
+Two commands confirm it, and they are worth running once rather than trusting the arrangement:
+
+```
+$ nm -m PlayerEngineKit.framework/PlayerEngineKit | grep _avcodec_open2
+(undefined) external _avcodec_open2 (from AetherLibavcodec)   # right: it comes from ours
+
+$ otool -L PlayerEngineKit.framework/PlayerEngineKit | grep -i libavcodec
+@rpath/AetherLibavcodec.framework/AetherLibavcodec
+```
+
+And the engine says it itself: the `[FFmpeg] libavcodec …` line at `init` reports the versions that actually answered, not the ones it was built against, so a wrong binding shows up in the log before it shows up as a defect.
+
+
 ## Constructing and binding
 
 ```swift
