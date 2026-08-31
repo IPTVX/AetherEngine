@@ -2129,7 +2129,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return (initData + segData, seg.index)
     }
 
-    public func stop() {
+    /// Stops the session and returns the detached cleanup that releases its source resources.
+    ///
+    /// Most callers can ignore the task to preserve non-blocking teardown. Hosts handing the
+    /// source to another playback backend may await it before opening the same remote URL again.
+    @discardableResult
+    public func stop() -> Task<Void, Never> {
         // Sodalite#32: drop the tap routes first so a pump still draining its last packets no-ops
         // instead of decoding into stores being torn down.
         subtitleTapLock.lock()
@@ -2187,7 +2192,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // Detached cleanup: producer waitForFinish must precede demuxer/cache/server close
         // (pump accesses them during unwind). ownedParams released last (pump read them).
-        Task.detached {
+        return Task.detached {
             _ = p?.waitForFinish(timeout: 3.0)
             s?.stop()
             c?.close()

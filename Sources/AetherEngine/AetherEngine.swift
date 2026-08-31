@@ -1228,6 +1228,8 @@ public final class AetherEngine: ObservableObject {
 
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
     var nativeVideoSession: HLSVideoEngine?
+    /// Detached source cleanup started by the most recent native-session stop.
+    private var nativeSourceTeardownTask: Task<Void, Never>?
     /// AE#446 round 2: polls for the source coming back after a window was closed with ENDLIST.
     /// Cancelled on stop; see `handleLiveOutageWindowExhausted`.
     var liveOutageResumeWatcher: Task<Void, Never>?
@@ -4856,6 +4858,30 @@ public final class AetherEngine: ObservableObject {
         customSourceIsSeekable = false
     }
 
+    /// Stops playback and waits until the outgoing native source has released its transport resources.
+    ///
+    /// Use this only when another playback backend must immediately open the same source. Regular UI
+    /// teardown should continue using `stop(resetDisplayCriteria:finalTeardown:)` so it remains non-blocking.
+    ///
+    /// - Parameters:
+    ///   - resetDisplayCriteria: Whether to restore the default display criteria during teardown.
+    ///   - finalTeardown: Whether this stop leaves playback entirely. Defaults to `resetDisplayCriteria`.
+    public func stopAndWaitForSourceTeardown(
+        resetDisplayCriteria: Bool = true,
+        finalTeardown: Bool? = nil
+    ) async {
+        stop(
+            resetDisplayCriteria: resetDisplayCriteria,
+            finalTeardown: finalTeardown
+        )
+        let stoppedGeneration = loadGeneration
+        let teardownTask = nativeSourceTeardownTask
+        await teardownTask?.value
+        if loadGeneration == stoppedGeneration {
+            nativeSourceTeardownTask = nil
+        }
+    }
+
     /// Active AVPlayer on the native path, nil on SW path or when idle. Published so hosts driving an
     /// AVPlayerViewController can rebind `.player` on every audio-track reload (one-shot assignment goes stale).
     @Published public internal(set) var currentAVPlayer: AVPlayer? {
@@ -5617,7 +5643,7 @@ public final class AetherEngine: ObservableObject {
         // host has already retired for the next item. Only the session's slot is cleared; the engine
         // keeps the host's observer and re-arms the next session with it in load().
         nativeVideoSession?.setNativeVideoFrameTimeObserver(nil)
-        nativeVideoSession?.stop()
+        nativeSourceTeardownTask = nativeVideoSession?.stop()
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
         airPlayProgressWatchdog?.cancel()
