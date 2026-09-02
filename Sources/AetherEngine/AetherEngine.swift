@@ -549,7 +549,7 @@ public final class AetherEngine: ObservableObject {
     /// Exposed for diagnostic overlays; hosts should not branch on it. Branch on `videoRoute` instead,
     /// which also separates the two native pipelines (#321).
     @Published public internal(set) var playbackBackend: PlaybackBackend = .none {
-        didSet { recomputeVideoRoute() }
+        didSet { recomputeVideoRoute(); recomputeAudioDelivery() }
     }
 
     /// Pipeline actually serving this session (#321), including the reroutes the host never asked for.
@@ -567,6 +567,42 @@ public final class AetherEngine: ObservableObject {
         videoRoute = next
         if next != .none {
             EngineLog.emit("[AetherEngine] #321: effective video route = \(next.rawValue)", category: .engine)
+        }
+    }
+
+    /// How this session's audio reaches the renderer (AE#462), above all whether a source that HAS
+    /// audio is playing video-only because no pipeline could be built for it (`.droppedNoPipeline`,
+    /// the value a fallback ladder demotes on). Derived from `playbackBackend` + `loadedOptions` +
+    /// the live pipeline's own classification, so it cannot drift from the running session.
+    @Published public internal(set) var audioDelivery: AudioDelivery = .none
+
+    /// The classification the pipeline serving this session made about itself, or nil while none is
+    /// live. Read through the backend rather than by probing all four hosts, so a host left behind by
+    /// a teardown cannot answer for the session that replaced it.
+    private var livePipelineAudioDelivery: (loopback: AudioDelivery?,
+                                            software: AudioDelivery?,
+                                            audioOnly: AudioDelivery?) {
+        (loopback: nativeVideoSession?.audioDelivery,
+         software: softwareHost?.audioDelivery,
+         // Neither audio-only host can reach video-only: AVPlayer owns the selection on the native
+         // one, and the software one throws out of its load when the decoder does not open.
+         audioOnly: audioAVPlayerHost != nil ? .playerManaged : (audioHost != nil ? .decoded : nil))
+    }
+
+    /// Idempotent for the same reason as the route above. Logged on every change, including the drop
+    /// to `.none`, so a diagnostic pull answers "did this session deliver audio" without the reader
+    /// having to reconstruct it from the cascade's own lines.
+    func recomputeAudioDelivery() {
+        let pipeline = livePipelineAudioDelivery
+        let next = AudioDelivery.derive(backend: playbackBackend,
+                                        nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
+                                        loopbackSession: pipeline.loopback,
+                                        softwareHost: pipeline.software,
+                                        audioOnlyHost: pipeline.audioOnly)
+        guard audioDelivery != next else { return }
+        audioDelivery = next
+        if next != .none {
+            EngineLog.emit("[AetherEngine] AE#462: audio delivery = \(next.rawValue)", category: .engine)
         }
     }
 
@@ -684,8 +720,20 @@ public final class AetherEngine: ObservableObject {
     /// has slid, which an in-place swap does routinely. Measured rather than assumed; see
     /// `measureLiveItemAxisOffset`. 0 on every path where the question does not arise.
     var liveItemAxisOffsetSeconds: Double = 0
+    /// AE#446 round 5: the item generation the axis latch was armed for, recorded at the attach that
+    /// armed it. A stated axis is only this item's if the arm that cleared the latch was its own.
+    var liveItemAxisArmedGeneration: Int = -1
     /// The item generation `liveItemAxisOffsetSeconds` was measured for.
     var liveItemAxisOffsetGeneration: Int = -1
+    /// AE#454 round 2: the item generation whose axis the playlist has already stated, so the
+    /// statement is taken once rather than on every tick.
+    var liveItemAxisStatedGeneration: Int = -1
+    /// AE#454 round 2: the item generation a rejoin armed a manifest placement for.
+    ///
+    /// Only that item came up on an axis the playlist stated, so only for that item may the stated
+    /// axis be believed over a measurement. Any later item loaded for an unrelated reason reads the
+    /// producer as before.
+    var liveRejoinPlacementGeneration: Int = -1
     /// AE#454: the item generation the session's published position describes, accepted at readiness.
     /// -1 until the first item of a session is ready, which is what keeps a cold join publishing
     /// exactly as before. See `liveItemPlacementPending`.
@@ -1110,6 +1158,18 @@ public final class AetherEngine: ObservableObject {
     /// TEST-ONLY. Flip the SW-path override for the `aetherctl live --sw` harness; not for app use.
     public nonisolated static func setForceSoftwarePathForTesting(_ on: Bool) {
         forceSoftwarePathForTesting = on
+    }
+
+    /// TEST-ONLY: makes every audio pipeline fail to build, so the AE#462 video-only drop is
+    /// reachable without a source whose codec this FFmpeg build has no decoder for. Honored by the
+    /// loopback cascade and by `SoftwarePlaybackHost`'s decoder open. Set only via
+    /// `setForceAudioPipelineFailureForTesting(_:)` from `aetherctl`.
+    nonisolated(unsafe) static var forceAudioPipelineFailureForTesting = false
+
+    /// TEST-ONLY. Flip the forced audio-pipeline failure for the `aetherctl play --drop-audio`
+    /// harness; not for app use.
+    public nonisolated static func setForceAudioPipelineFailureForTesting(_ on: Bool) {
+        forceAudioPipelineFailureForTesting = on
     }
 
     /// TEST-ONLY: routes a loopback session behind its MASTER playlist regardless of codec, panel and
@@ -1545,7 +1605,7 @@ public final class AetherEngine: ObservableObject {
     /// Read by AetherEngine+FrameExtractor. Every internal reroute (#154, #168, #199, #246, #268) reaches
     /// the published route through this property, so its writes feed `recomputeVideoRoute` (#321).
     private(set) var loadedOptions: LoadOptions = .init() {
-        didSet { recomputeVideoRoute() }
+        didSet { recomputeVideoRoute(); recomputeAudioDelivery() }
     }
 
     /// #364: the one narrow write into `loadedOptions` outside a load, so a mid-session teletext page
@@ -1553,6 +1613,19 @@ public final class AetherEngine: ObservableObject {
     /// reload). Without it the page would silently revert to the load-time value on the next reopen,
     /// which is the same defect `matchContentEnabled` had before the replay existed.
     func setLoadedTeletextPage(_ page: Int?) { loadedOptions.teletextPage = page }
+
+    /// AE#464: the third narrow write into `loadedOptions`, same reason as the teletext page. The
+    /// value has to live where the session's own rebuilds replay it from, or a lip-sync correction
+    /// would be lost at the next audio-track switch or background return.
+    func setLoadedAudioDelay(_ seconds: Double) { loadedOptions.audioDelaySeconds = seconds }
+
+    /// AE#460: the second narrow write into `loadedOptions` outside a load, for a host correction
+    /// that a session-preserving reload is about to rebuild on. Installed before the rebuild rather
+    /// than carried through it, because only the URL branch passes a struct into `load`: the
+    /// custom-source branch reaches `reloadWithAudioOverride`, which reads these fields one by one.
+    /// Callers go through `reloadAtCurrentPosition(applying:)`, which refuses the load-identity
+    /// fields first; this setter does not re-check them.
+    func applySessionOptionCorrection(_ options: LoadOptions) { loadedOptions = options }
 
     #if DEBUG
     /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
@@ -2330,10 +2403,12 @@ public final class AetherEngine: ObservableObject {
         // 37s for 140 to 220ms, thirteen swaps out of thirteen. Armed before the swap so the item's
         // FIRST manifest carries it; the stashed seek stays as the fallback for a client that ignores
         // the tag, and it is the same seek it always was.
+        var didArmPlacement = false
         if isLive, let rejoinPosition, let session = nativeVideoSession {
             let outputSeconds = presentationAxis.itemSeconds(forSourceSeconds: rejoinPosition)
                 ?? (rejoinPosition - playlistShiftSeconds)
             if let armed = session.armLiveRejoinStart(atOutputSeconds: outputSeconds) {
+                didArmPlacement = true
                 EngineLog.emit(
                     "[AetherEngine] #454 placing the fresh item at "
                     + "\(String(format: "%.2f", rejoinPosition))s in its own playlist: segment "
@@ -2354,6 +2429,9 @@ public final class AetherEngine: ObservableObject {
         host.swapItem(url: url,
                       startPosition: isLive ? nil : anchor,
                       skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true))
+        // AE#454 round 2: the item that is about to load is the one the placement was armed for, and
+        // the only one whose axis the playlist will state.
+        if didArmPlacement { liveRejoinPlacementGeneration = host.itemGeneration }
         host.play()
         if let rejoinPosition {
             // Stashed rather than seeked: the pre-readiness seek IS the wedge LiveReloadPolicy exists
@@ -3130,6 +3208,17 @@ public final class AetherEngine: ObservableObject {
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
         if options.nativeRemoteHLS {
+            // AE#461: the bypass demuxes nothing and builds no decoder of its own (AVPlayer plays the
+            // remote playlist), so a decode-path preference has nothing to act on here. Say so rather
+            // than let it look like it was applied.
+            if options.preferredDecodePath == .software {
+                EngineLog.emit(
+                    "[AetherEngine] #461: preferredDecodePath=.software ignored on the nativeRemoteHLS "
+                    + "bypass; AVPlayer plays the remote playlist and the engine decodes nothing. Drop "
+                    + "nativeRemoteHLS to reach a decode path the engine owns.",
+                    category: .engine
+                )
+            }
             // #316: this bypass returns before the probe path's registration, so a host that declared
             // sidecars at load time used to get nothing at all, silently. Seat them here instead.
             registerDeclaredExternalSubtitles(options)
@@ -3559,9 +3648,10 @@ public final class AetherEngine: ObservableObject {
         // HDR/DV title as SDR in Stats for Nerds.
         videoFormat = effectiveFormat
         #else
-        videoFormat = (effectiveFormat != .sdr && panelHDRAfterHandshake)
-            ? effectiveFormat
-            : .sdr
+        videoFormat = Self.presentedVideoFormat(
+            effectiveFormat: effectiveFormat,
+            panelPresentsHDR: panelHDRAfterHandshake,
+            sourceVideoFormat: sourceVideoFormat)
         #endif
         // #361: the handshake above is the second stretch a host cannot see, and on a real SDR->HDR
         // switch it is seconds long. Recorded on every branch, including the ones with nothing to
@@ -3728,6 +3818,29 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit("[AetherEngine] source is forward-only, forcing software path", category: .engine)
             }
         }
+        // AE#461: the host's own routing override, scoped to this session. Placed last among the
+        // routing decisions and before the guards below, because it is an override: it wins over
+        // what the engine concluded, and it does not get to suspend what the software path cannot
+        // represent. The two levers that existed before this were both wrong for the job: the test
+        // hook below is process-global (on a shared engine it drags every concurrent session with
+        // it), and the only per-session route onto the software host was presenting a reader that
+        // fails its seek, which costs the source its seeks, its audio switch, its title switch and
+        // `reloadAtCurrentPosition` itself. Unlike the #2 capability gate this is NOT VOD-only: a
+        // live load never reaches that gate at all, and a live session is exactly where a host has
+        // no second engine left to hand a struggling stream to.
+        if options.preferredDecodePath == .software {
+            // Stating the no-op matters here for the same reason it does for #364's teletext page:
+            // a host that asked for software and saw software cannot otherwise tell "the engine had
+            // already routed there" from "the request did not arrive".
+            EngineLog.emit(
+                useSoftwarePath
+                    ? "[AetherEngine] #461: host asked for the software path; the routing had already chosen it"
+                    : "[AetherEngine] #461: host asked for the software path, overriding the native route",
+                category: .engine
+            )
+        }
+        useSoftwarePath = VideoRoutingPolicy.usesSoftwarePath(
+            routedSoftware: useSoftwarePath, preferred: options.preferredDecodePath)
         // TEST-ONLY: forces SW path for aetherctl live --sw; unset in shipping builds.
         if Self.forceSoftwarePathForTesting {
             useSoftwarePath = true
@@ -3802,9 +3915,12 @@ public final class AetherEngine: ObservableObject {
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: true
                 )
+                // AE#462: the host's own resolved index, not the engine's pick. The pick says which
+                // track was ASKED for; only the host knows whether a decoder opened for it, and this
+                // label claimed one for a session that had dropped its audio and gone video-only.
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
                     audioTracks: probedAudioTracks,
-                    activeIndex: resolvedInitialAudio
+                    activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
@@ -3816,6 +3932,9 @@ public final class AetherEngine: ObservableObject {
                 startLiveTelemetrySampler()
                 armDisplayModeDiagnostic(gen: gen, backend: "software",
                                          contentRate: detectedRate, requestedRate: snappedRate)
+                armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
+                                      panelPresentedHDRAtLoad: panelHDRAfterHandshake,
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             } else {
                 // Native path: pass the probe Demuxer to loadNative so HLSVideoEngine.start() skips
                 // avformat_open_input + find_stream_info (~1-3 s saved on slow CDN). The cue prewarm
@@ -3826,6 +3945,7 @@ public final class AetherEngine: ObservableObject {
                     startPosition: startPosition,
                     audioSourceStreamIndex: selectedAudio,
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
+                    forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: panelHDRAfterHandshake,
                     audioBridgeMode: options.audioBridgeMode,
@@ -3902,6 +4022,9 @@ public final class AetherEngine: ObservableObject {
                 startLiveTelemetrySampler()
                 armDisplayModeDiagnostic(gen: gen, backend: "native",
                                          contentRate: detectedRate, requestedRate: snappedRate)
+                armPlaybackPanelProbe(gen: gen, effectiveFormat: effectiveFormat,
+                                      panelPresentedHDRAtLoad: panelHDRAfterHandshake,
+                                      sessionIsPlaying: Self.loadPerformsAutostart(options))
             }
         } catch is CancellationError {
             // Superseded.
@@ -4970,6 +5093,8 @@ public final class AetherEngine: ObservableObject {
 
     private var displayModeDiagnostic: Task<Void, Never>?
 
+    private var playbackPanelProbe: Task<Void, Never>?
+
     /// Sodalite #49: read back what the Match-Frame-Rate switch actually landed on. `preferredDisplayCriteria`
     /// is a hint with no read-back, so a display-link sample once playback is running is the only way to tell
     /// three cases apart for a judder report: the panel ignored the criteria and kept the system rate (50.000
@@ -4998,6 +5123,45 @@ public final class AetherEngine: ObservableObject {
                 + "(nominal \(fmt(sample?.nominal))) player=\(fmt(playerRate.map(Double.init)))fps",
                 category: .engine
             )
+        }
+        #endif
+    }
+
+    /// AE#459: re-ask the panel, once frames are running, whether it is presenting HDR.
+    ///
+    /// Every answer `panelPresentsHDR` gets is sampled around the criteria write, and an Apple TV whose
+    /// output format is fixed to HDR has nothing to say at that moment: there is no dynamic-range
+    /// transition, so the EDR headroom stays 1.00 and `panelProvenToEngageHDR` can never be armed either.
+    /// Such a panel therefore reads SDR forever, which mislabels every HDR/DV session in Stats for Nerds
+    /// and, through the same boolean, serves it media-direct with no HDR signaling.
+    ///
+    /// The probe does not re-route the running session; the proof it latches makes the next load in this
+    /// process route correctly on its own. What it fixes here and now is the label.
+    @MainActor
+    func armPlaybackPanelProbe(gen: UInt64, effectiveFormat: VideoFormat,
+                               panelPresentedHDRAtLoad: Bool, sessionIsPlaying: Bool) {
+        #if os(tvOS)
+        playbackPanelProbe?.cancel()
+        playbackPanelProbe = nil
+        guard DisplayCriteriaController.shouldProbePanelDuringPlayback(
+            effectiveFormat: effectiveFormat,
+            panelPresentedHDRAtLoad: panelPresentedHDRAtLoad,
+            sessionIsPlaying: sessionIsPlaying) else { return }
+        playbackPanelProbe = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let presentsHDR = await self.displayCriteria.probePanelDuringPlayback()
+            guard !Task.isCancelled, self.loadGeneration == gen, presentsHDR else { return }
+            let corrected = Self.presentedVideoFormat(
+                effectiveFormat: effectiveFormat,
+                panelPresentsHDR: true,
+                sourceVideoFormat: self.sourceVideoFormat)
+            guard corrected != self.videoFormat else { return }
+            EngineLog.emit(
+                "[AetherEngine] panel answered HDR during playback, republishing videoFormat "
+                + "\(self.videoFormat) -> \(corrected); the load-time read could not see it and this "
+                + "session was served without HDR signaling (#459)",
+                category: .engine)
+            self.videoFormat = corrected
         }
         #endif
     }
@@ -5650,6 +5814,8 @@ public final class AetherEngine: ObservableObject {
         airPlayProgressWatchdog = nil
         displayModeDiagnostic?.cancel()
         displayModeDiagnostic = nil
+        playbackPanelProbe?.cancel()
+        playbackPanelProbe = nil
         airPlayServedMasterToReceiver = false
         extractorYieldState.deactivate()
         setPendingRecoverySeekTarget(nil)
@@ -5666,6 +5832,9 @@ public final class AetherEngine: ObservableObject {
         pendingPreReadySeek = nil
         liveItemAxisOffsetSeconds = 0
         liveItemAxisOffsetGeneration = -1
+        liveRejoinPlacementGeneration = -1
+        liveItemAxisStatedGeneration = -1
+        liveItemAxisArmedGeneration = -1
         liveAcceptedItemGeneration = -1
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
@@ -6076,6 +6245,13 @@ public enum AetherEngineError: Error, LocalizedError {
     /// the software path would decode it as YCbCr (green/purple cast), so the load fails instead.
     /// AV1 P10.0 requires hardware AV1 decode; HEVC P5 requires a seekable source for the native path.
     case dolbyVisionUnplayableOnSoftwarePath(profile: String)
+    /// AE#460: `reloadAtCurrentPosition(applying:)` was handed a change to a `LoadOptions` field
+    /// that names the session rather than tunes it. The session is untouched and still playing;
+    /// changing these means loading the source again.
+    case loadIdentityNotCorrectable(fields: [String])
+    /// AE#460: this session cannot be rebuilt in place. Read `sessionReloadRefusal` to ask the same
+    /// question without attempting the reload.
+    case sessionNotReloadable(SessionReloadRefusal)
 
     public var errorDescription: String? {
         switch self {
@@ -6085,6 +6261,13 @@ public enum AetherEngineError: Error, LocalizedError {
             return "HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources."
         case .dolbyVisionUnplayableOnSoftwarePath(let profile):
             return "Dolby Vision Profile \(profile) has no compatible base layer and cannot be color-correctly decoded on the software playback path"
+        case .loadIdentityNotCorrectable(let fields):
+            let named = "LoadOptions." + fields.joined(separator: ", LoadOptions.")
+            return fields.count == 1
+                ? "\(named) names the session and cannot be changed by a session-preserving reload; load the source again to change it"
+                : "\(named) name the session and cannot be changed by a session-preserving reload; load the source again to change them"
+        case .sessionNotReloadable(let refusal):
+            return "The session cannot be rebuilt at its current position: \(refusal)"
         }
     }
 }

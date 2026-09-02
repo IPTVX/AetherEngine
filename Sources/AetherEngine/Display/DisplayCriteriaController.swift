@@ -241,6 +241,42 @@ final class DisplayCriteriaController {
         return lastCriteriaWasHDR ? .engineHDR : .engineRateOnly
     }
 
+    // MARK: - Late panel probe (#459)
+
+    /// How long after the first frames the panel is re-asked whether it is presenting HDR, and how often.
+    ///
+    /// Every reading `panelPresentsHDR` gets today is taken around the criteria write, which is the one
+    /// moment a panel already parked in HDR has nothing to report: no dynamic-range transition, so no raised
+    /// headroom, so no proof, forever (#459). Vincent's 2026-08-09 device trace has the reading this window
+    /// exists to catch, on an Apple TV whose output was fixed to 4K HDR: headroom 1.20 at t+2.5s, back to
+    /// 1.00 by t+20s, against a flat 1.00 for the same title with the output fixed to 4K SDR.
+    ///
+    /// So the window opens wide enough to contain that rise and closes before the value decays into
+    /// meaninglessness. A window that closes with nothing seen is itself the measurement: it says this panel
+    /// never raises the headroom, which is the one thing no log line could say before.
+    nonisolated static let playbackProbeWindowMs = 12_000
+    nonisolated static let playbackProbeIntervalMs = 250
+
+    /// Whether a session's label can still change by asking the panel again once frames are running.
+    ///
+    /// SDR sessions are excluded on both counts: SDR content composites no HDR, so the headroom cannot rise
+    /// for it, and there would be nothing to upgrade the label to if it did. A paused mount (#124) is
+    /// excluded for the first of those reasons alone: no frames, nothing composited, and a window that
+    /// closes on that would report the panel's silence as if it had been asked.
+    nonisolated static func shouldProbePanelDuringPlayback(
+        effectiveFormat: VideoFormat,
+        panelPresentedHDRAtLoad: Bool,
+        sessionIsPlaying: Bool
+    ) -> Bool {
+        effectiveFormat != .sdr && !panelPresentedHDRAtLoad && sessionIsPlaying
+    }
+
+    /// Whether the probe takes another sample. One reading above 1.0 is authoritative and latches the proof
+    /// for good, so the first hit ends the probe.
+    nonisolated static func playbackProbeContinues(elapsedMs: Int, observedHDR: Bool) -> Bool {
+        !observedHDR && elapsedMs < playbackProbeWindowMs
+    }
+
     /// How the gate learned a switch was running. This is the one bit that separates "the panel was already
     /// switching while the AVPlayerItem was built" from "the switch started after the gate opened", the
     /// ordering question Sodalite#49 was filed on and which no log line could answer.
@@ -975,6 +1011,52 @@ final class DisplayCriteriaController {
             attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
             panelProvenToEngageHDR: panelProvenToEngageHDR
         )
+        #else
+        return false
+        #endif
+    }
+
+    /// Re-ask the panel whether it is presenting HDR, now that the session's frames are on screen.
+    ///
+    /// The load-time read cannot answer for a panel already parked in HDR: it is taken around the criteria
+    /// write, and that panel makes no dynamic-range transition to raise the headroom (#459). This one is
+    /// taken while HDR content composites, which is when Vincent's device trace shows the value rising, and
+    /// it goes through `observeHeadroom` so a hit latches the proof for every later load in the process.
+    ///
+    /// Returns whether the panel answered HDR. Bounded by `playbackProbeWindowMs`, and a window that closes
+    /// with nothing seen is logged as the measurement it is.
+    func probePanelDuringPlayback() async -> Bool {
+        #if os(tvOS)
+        guard let window = resolveWindow() else { return false }
+        let started = DispatchTime.now()
+        var samples = 0
+        var maxHeadroom = 0.0
+        var observedHDR = false
+        while !Task.isCancelled,
+              Self.playbackProbeContinues(elapsedMs: Self.elapsedMs(since: started),
+                                          observedHDR: observedHDR) {
+            samples += 1
+            maxHeadroom = max(maxHeadroom, Double(window.screen.currentEDRHeadroom))
+            observedHDR = observeHeadroom(window.screen)
+            if !observedHDR {
+                try? await Task.sleep(for: .milliseconds(Self.playbackProbeIntervalMs))
+            }
+        }
+        guard !Task.isCancelled else { return false }
+        let headroom = String(format: "%.2f", maxHeadroom)
+        if observedHDR {
+            EngineLog.emit(
+                "[DisplayCriteria] playback probe: panel reports HDR after "
+                + "\(Self.elapsedMs(since: started))ms (headroom \(headroom), \(samples) samples)",
+                category: .engine)
+        } else {
+            EngineLog.emit(
+                "[DisplayCriteria] playback probe: no HDR reading in \(Self.elapsedMs(since: started))ms "
+                + "(max headroom \(headroom), \(samples) samples); this panel does not raise the EDR "
+                + "headroom for HDR content, so the session keeps its SDR label",
+                category: .engine)
+        }
+        return observedHDR
         #else
         return false
         #endif

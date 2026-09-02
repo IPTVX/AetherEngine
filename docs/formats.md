@@ -84,6 +84,7 @@ For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationReco
 
 - **Profile 5** (DV-only, IPT-PQ, no base layer) emits a bare `dvh1.05.<dvLevel>` codec tag in the primary `CODECS` attribute with the `dvcC` box preserved. `dvh1` is forced even on non-DV panels (AVPlayer's system DV decoder tonemaps IPT-PQ internally; without `dvh1` the IPT chroma reads as YCbCr and shows a green / purple cast), so P5-on-non-DV is routed through a media playlist to dodge the `-11868` variant rejection.
 - **Profiles 8.1 / 8.4** (HDR10- / HLG-compatible base) emit `hvc1.2.4.L<level>` as the primary `CODECS` tag. On a DV-capable display the muxer writes the `dvvC` box and the variant carries `dvh1.08.<dvLevel>/db1p` (8.1) or `/db4h` (8.4) in `SUPPLEMENTAL-CODECS`, which is what makes AVKit engage DV. On a non-DV display the `dvvC` is stripped (a lone `hvc1` + `dvvC` still trips `-11868`) and the stream plays as its plain HDR10 / HLG base with AVPlayer's tone-mapping.
+- **Profile 8.1 on a non-DV display, with `LoadOptions.forceDolbyVisionOnNonDVDisplay`** (experimental, default off, AE#455) is served the way Profile 5 is served instead: `dvh1` sample entry, the container `dvcC` rewritten to profile 5 / compatibility 0, `CODECS="dvh1.05.<dvLevel>"`, no supplemental. AVPlayer then runs its own Dolby Vision composition and applies the per-frame RPU to the pixels before they leave the device, where the default route gives the panel one static HDR10 grade. The bitstream never changes; only the container's claim about it does, and what makes that hold together is that a Profile 8.1 RPU already carries the mapping out of its own HDR10 base layer, so the composer does not need the container to describe that layer. What makes it experimental is that this is not what the profile field means: a decoder that read the base layer's colorimetry from the profile rather than from the RPU would decode IPT out of YCbCr, the green / violet cast of #4 and #176. Profile 8.1 only. Profile 8.4's base layer is HLG, and a profile-5 `dvcC` over an HLG `colr` is a container that contradicts itself.
 
 AV1+DV emits a bare `dav1.10.<dvLevel>` primary for Profile 10.0 (DV-only) and Profile 10.1 (HDR10-compat base) with no supplemental entry, and an `av01...` primary plus `dav1.10.<dvLevel>/db4h` in `SUPPLEMENTAL-CODECS` for Profile 10.4 (HLG-compat base), on hardware-AV1 hosts.
 
@@ -113,6 +114,46 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 `.surroundCompat` is the default because the soundbar / basic-AVR install base is the majority. Object metadata (Atmos / TrueHD-MA) is lost in either mode: FFmpeg's EAC3 encoder doesn't produce JOC, and FLAC has no object-channel concept. If a JOC source ever falls through to the bridge the engine logs a loud `WARNING: Atmos downgrade, ...`.
 
 Two bridge lifecycle invariants (issue #99): the encoder PTS counter re-bases onto the first fed packet's (gate-shifted) source PTS on every session start and producer restart, so bridged audio always shares the video's output timeline, including a `load(startPosition:)` resume that anchors mid-file (a 0-based bridge timeline puts the audio track a full resume-offset away from video inside the same fragments, which AVPlayer silently discards). And the EOF tail flush leaves the encoder in FFmpeg's terminal draining state, so the bridge latches that and rebuilds the encoder on the next restart; a VOD pump that still dies with `muxerFailed` gets a bounded producer rebuild instead of stranding the session.
+
+### Audio a build has no decoder for
+
+AC-4 (ATSC 3.0 / NextGen TV) and MPEG-H 3D Audio have no decoder in the bundled FFmpeg, and there is
+nothing to switch on: FFmpeg carries codec ids for both so a container can be demuxed, but
+`libavcodec/allcodecs.c` names neither. The AC-4 decoder patches have sat out of tree for years and
+the format is Dolby patent-encumbered; MPEG-H has an upstream wrapper around Fraunhofer's `mpeghdec`,
+whose licence is not LGPL-redistributable. Apple's own stack does not fill the gap either: there is no
+AC-4 format constant in CoreAudio.
+
+Such a track is not merely silent, it is expensive. `has_codec_parameters` fails an audio stream with
+no sample rate, and that value can only come from the container or from opening a decoder, so
+`find_stream_info` reads to the full probe budget before failing open with the track missing anyway.
+On a live source that budget is spent at the wire rate, which is where Sodalite#100's minute-long
+tuning indicator came from. The demuxer therefore parks a stream whose codec has no decoder AND whose
+parameters the container left unset out of the probe's way, and restores it immediately after, so the
+open costs what it would have without the track and the caller still sees the track in
+`audioTracks`. A host with its own metadata (Jellyfin names a live channel's audio codec in
+PlaybackInfo without opening a tuner) can do better still and refuse the channel with a real sentence.
+
+### Track language on the native path
+
+AVFoundation reads a track's language from the master playlist, not from the media, so the audio the
+engine muxes into its single variant is also declared there: one URI-less
+`EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",LANGUAGE="<iso 639-2/T>",DEFAULT=YES,AUTOSELECT=YES` plus
+`AUDIO="aud"` on the variant (RFC 8216 4.3.4.2.1, the URI is absent precisely because the audio is
+inside the variant). AVPlayer then exposes it as a one-option audible `AVMediaSelection` group and
+labels it from `LANGUAGE`, which is what a system audio menu shows. Measured on macOS 26: the same
+fMP4 whose audio `mdhd` reads `deu` reports `AVAssetTrack.languageCode == nil` and no audible group
+at all when the master does not declare the rendition, while the identical `mdhd` read from a
+progressive `.mp4` reports `deu`. The `mdhd` is written too (the track is that language whoever
+reads it), it just is not what the label comes from. The rendition is advertised only when the audio
+actually reached the variant, so an audio cascade that fell through to video-only never names a
+group its segments do not carry (AE#458).
+
+Source labels are resolved to ISO 639-2/T through ICU, which covers every language it knows plus
+BCP-47 subtags (`pt-BR` becomes `por`) and rejects free text such as `English` or a track title, in
+front of a twenty-row table for the ISO 639-2/B bibliographic codes ICU does not resolve and
+Matroska routinely writes (`ger`, `fre`, `cze`). A label that resolves to nothing writes nothing, so
+an untagged source keeps the master it had before.
 
 ### Dolby Atmos
 

@@ -374,6 +374,15 @@ final class NativeAVPlayerHost {
         var readinessDeadline: Double?
     }
 
+    /// AE#446 round 5: a fresh item is about to attach, invoked before anything can fetch a playlist
+    /// for it.
+    ///
+    /// A live item's zero is the first segment ITS playlist listed, so the axis belongs to the item,
+    /// and the engine has to know which item a served playlist describes. Every attach passes through
+    /// `load` (`swapItem` delegates to it), so this hook is the one place that knows, and a swap path
+    /// added later inherits it without anyone remembering to arm at the call site.
+    var onWillAttachItem: (@MainActor () -> Void)?
+
     /// Replace the item under a session that survives the swap, keeping the contract that session was
     /// loaded under (#440 round 5).
     ///
@@ -419,6 +428,9 @@ final class NativeAVPlayerHost {
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
+        // AE#446 round 5: before the item exists, so the first playlist it fetches is recorded against
+        // it rather than against the one it replaces.
+        onWillAttachItem?()
         let loadStart = DispatchTime.now()
         loadStartTime = loadStart
 
@@ -485,6 +497,12 @@ final class NativeAVPlayerHost {
         lastSuppressedStartupFailure = nil
         isReady = false
         seekableEnd = 0
+        // AE#454 round 2: both ends, or the mirror is a mixture. Only the end was reset here, so after
+        // an in-place swap `seekableStart` still carried the RETIRED item's window while `seekableEnd`
+        // already read the fresh item's. Anything reading the pair across a hand-off then measures one
+        // item against the other; the live axis offset is a difference between exactly those two, and
+        // it collapses to 0 on the reading that matters (AE#454 round 2, reported from a device).
+        seekableStart = 0
         // #334: the bypass's ceiling on silence. Started with the mount rather than at readyToPlay,
         // because the session it exists for is exactly the one that never gets there.
         if let budget = contract.readinessDeadline {
@@ -498,8 +516,13 @@ final class NativeAVPlayerHost {
             let end = Self.seekableEnd(from: item.seekableTimeRanges)
             let start = Self.seekableStart(from: item.seekableTimeRanges)
             Task { @MainActor in
-                self?.seekableEnd = end
-                self?.seekableStart = start
+                // AE#454 round 2: a reading belongs to the item it was taken from. The observation is
+                // replaced on the next attach, but a notification already in flight is not, and its
+                // hop to the main actor can land after the swap; the same `sid == sessionID` guard the
+                // end-of-media path has carried since #15.
+                guard let self, self.sessionID == sid else { return }
+                self.seekableEnd = end
+                self.seekableStart = start
             }
         }
 

@@ -371,6 +371,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let hdcpLevel: String?
     private let sourceBitrate: Int64
 
+    /// AE#458: ISO 639-2/T of the ONE audio track muxed into the variant, for the master's
+    /// EXT-X-MEDIA:TYPE=AUDIO tag. Nil for a source whose audio carries no resolvable language.
+    private let audioLanguage: String?
+
     /// #15: native subtitle cue stores (one per text track) for the WebVTT rendition served to AVPlayer.
     /// Immutable references; each store is internally locked and filled lazily by the readers on selection.
     private let nativeSubStores: [NativeSubtitleCueStore]
@@ -388,6 +392,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#418: fired with the index AVPlayer just placed into its timeline. What that segment
     /// carries below its advertised start is what moves the axis every consumer folds with.
     private let segmentPlacedHandler: (@Sendable (Int) -> Void)?
+    /// AE#418 round 7: what the server made of that request. Set alongside the placed handler.
+    private let segmentServedHandler: (@Sendable (Int, Bool) -> Void)?
     /// Sodalite#32 Phase 2: tap-fed stores can carry raw ASS event lines (the overlay renders the
     /// styling); the WebVTT rendition must serve plain text, so strip at build time.
     private let stripASSMarkupInVTT: Bool
@@ -476,6 +482,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// fetching the playlist that carries it, so a seconds value would name a different place by the
     /// time it was served; a segment index does not renumber.
     private var _liveRejoinStart: (segmentIndex: Int, secondsIntoSegment: Double)?
+    /// AE#454 round 2: what the playlist that carried the placement actually STATED, and the axis it
+    /// stated it on. See `noteServedLiveRejoinPlacement`.
+    private var _servedLiveRejoinPlacement: (timeOffset: Double, playlistStartOutputSeconds: Double)?
+    /// AE#446 round 5: the axis of the playlist the item currently under the host loaded, stated by
+    /// the build that served it. Armed (cleared) once per item attach, then first build wins. See
+    /// `noteServedLiveItemAxis`.
+    private var _servedLiveItemAxisOutputSeconds: Double?
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -530,6 +543,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         frameRate: Double?,
         hdcpLevel: String?,
         sourceBitrate: Int64,
+        audioLanguage: String? = nil,
         isLive: Bool = false,
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
@@ -554,7 +568,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         nativeSubtitleDefaultOrdinal: Int = 0,
         nativeSubtitleWholeProgram: Bool = false,
         currentShiftSeconds: @escaping @Sendable () -> Double = { 0 },
-        segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil
+        segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil,
+        segmentServedHandler: (@Sendable (Int, Bool) -> Void)? = nil
     ) {
         self.cache = cache
         self.segments = segments
@@ -571,6 +586,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.frameRate = frameRate
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
+        self.audioLanguage = audioLanguage
         self.restartHandler = restartHandler
         self.unrecoverableGapHandler = unrecoverableGapHandler
         self.restartActivity = restartActivity
@@ -590,6 +606,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.nativeSubtitleWholeProgram = nativeSubtitleWholeProgram
         self.currentShiftSeconds = currentShiftSeconds
         self.segmentPlacedHandler = segmentPlacedHandler
+        self.segmentServedHandler = segmentServedHandler
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.
@@ -1002,6 +1019,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         /// Folded again after that re-anchor, which is the repair reproducing its own trigger. No
         /// further attempt changes the outcome, so the source fails instead of freezing.
         case fail
+    }
+
+    /// AE#418 round 7: the server's account of a media-segment response, forwarded to the session so
+    /// a placement can tell a request still being answered from one that never will be.
+    func didServeMediaSegment(index: Int, delivered: Bool) {
+        segmentServedHandler?(index, delivered)
     }
 
     /// AE#418 round 2: whether this request puts a segment into AVPlayer's timeline anew.
@@ -1662,8 +1685,78 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let into = Swift.max(0, seconds - segs[idx].startSeconds)
         stateLock.lock()
         _liveRejoinStart = (idx, into)
+        // A new placement supersedes whatever the last one was served as.
+        _servedLiveRejoinPlacement = nil
         stateLock.unlock()
         return (idx, into)
+    }
+
+    /// AE#454 round 2: record the placement a build actually served, and the axis it served it on.
+    ///
+    /// A live item's zero is the first segment ITS playlist listed, so the playlist that carries the
+    /// placement is also the statement of the axis the item will come up on. Both numbers are known
+    /// here. The engine was rebuilding the second of them instead, as the difference between the
+    /// segment cache's resident floor and the item's own reported seekable start, and a difference
+    /// between two independently sampled quantities is only as good as the older sample: fed the
+    /// range of the item that just left, it collapses to exactly 0 and is then latched for the fresh
+    /// item's whole life (reported from a device on 6.57.0, AE#454 round 2, seam 1 of the session).
+    ///
+    /// First build wins. An item's zero is the FIRST playlist it loaded, and later builds of a
+    /// sliding window state a smaller offset against the very same content.
+    func noteServedLiveRejoinPlacement(timeOffset: Double, firstVisible: Int) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard _servedLiveRejoinPlacement == nil else { return }
+        guard firstVisible >= 0, firstVisible < segments.count else { return }
+        _servedLiveRejoinPlacement = (timeOffset, segments[firstVisible].startSeconds)
+    }
+
+    /// AE#454 round 2: the placement the playlist stated, for as long as it describes the item that
+    /// loaded it. Survives `clearLiveRejoinStart`, which retires the ARM: the readiness handler clears
+    /// the arm and then asks this same question about the item that just came up.
+    var servedLiveRejoinPlacement: (timeOffset: Double, playlistStartOutputSeconds: Double)? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _servedLiveRejoinPlacement
+    }
+
+    /// AE#446 round 5: a fresh item is about to attach, so the axis the last one came up on is spent.
+    ///
+    /// Called from the one funnel every attach passes through (`NativeAVPlayerHost.load`, which every
+    /// in-place swap delegates to), so a swap path added later inherits this without remembering to.
+    func armLiveItemAxisStatement() {
+        stateLock.lock()
+        _servedLiveItemAxisOutputSeconds = nil
+        stateLock.unlock()
+    }
+
+    /// AE#446 round 5: record the axis this build served, for the item that is loading its first
+    /// playlist right now.
+    ///
+    /// An item's zero is the first segment ITS playlist listed, and the build that lists it is the
+    /// one party that knows the number exactly. The alternative is a difference between two
+    /// independently sampled quantities (the cache's resident floor and the item's own reported
+    /// seekable start), which is only as good as the older sample and is latched for the item's whole
+    /// life: measured against a device on 6.60.0 it read 0.05s for an item whose playlist began at
+    /// exactly 0.00s (AE#446, cmcpherson274), and on 6.57.0 the same construction read 0 for an item
+    /// whose playlist began 6.76s in (AE#454 round 2).
+    ///
+    /// First build wins, because an item's zero is the FIRST playlist it loaded and later builds of a
+    /// sliding window state a smaller offset against the very same content.
+    func noteServedLiveItemAxis(firstVisible: Int) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard _servedLiveItemAxisOutputSeconds == nil else { return }
+        guard firstVisible >= 0, firstVisible < segments.count else { return }
+        _servedLiveItemAxisOutputSeconds = segments[firstVisible].startSeconds
+    }
+
+    /// AE#446 round 5: where the playlist the current item loaded begins, on the producer's output
+    /// axis, or nil when no build has served this item yet.
+    var servedLiveItemAxisOutputSeconds: Double? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _servedLiveItemAxisOutputSeconds
     }
 
     /// AE#454: the placement is spent once the item that asked for it is running. Left armed, the next
@@ -2004,6 +2097,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
+
+    /// AE#458: NAME is required and must be unique in the group, and with one muxed track it always is.
+    /// AVKit labels the option from LANGUAGE, not from NAME, so this only has to be human-readable;
+    /// the localized language name is what the subtitle renditions already use.
+    var masterAudioRendition: (language: String, name: String)? {
+        guard let audioLanguage else { return nil }
+        let name = Locale.current.localizedString(forIdentifier: audioLanguage) ?? audioLanguage
+        return (language: audioLanguage, name: name)
+    }
 
     // MARK: - Native subtitle renditions (#15)
 

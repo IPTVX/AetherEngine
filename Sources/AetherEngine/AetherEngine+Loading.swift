@@ -254,24 +254,34 @@ extension AetherEngine {
                     // (measured on the harness: 250 ms of the 485 ms hand-off). Read where the item
                     // actually came up and let the fact decide, so a client that ignored the tag, or
                     // honoured it only to a segment boundary, still gets the correcting seek.
+                    //
+                    // Round 2: ask the playlist what it STATED before reconstructing it. The
+                    // reconstruction subtracts an axis the fresh item has not established yet, and on
+                    // the session's first swap that axis read 0 and the check moved an item that was
+                    // already exactly where the manifest had put it (reported on 6.57.0).
                     if pending.origin == .liveRejoin, let host = self.nativeHost,
-                       let itemTarget = self.liveRejoinItemAxisTarget(pending.seconds),
-                       abs(host.currentTime - itemTarget) <= Self.liveRejoinPlacementSatisfiedSeconds {
-                        EngineLog.emit(
-                            "[AetherEngine] #454 the playlist already placed this item at its own "
-                            + "\(String(format: "%.2f", host.currentTime))s, "
-                            + "\(String(format: "%.3f", abs(host.currentTime - itemTarget)))s from the "
-                            + "\(String(format: "%.2f", itemTarget))s the rejoin asked for; no correcting seek",
-                            category: .engine)
-                        self.acceptCurrentItemForPublishing()
-                        return
-                    }
-                    if pending.origin == .liveRejoin, let host = self.nativeHost {
+                       let resolved = Self.liveRejoinPlacementTarget(
+                           served: self.liveRejoinPlacementGeneration == host.itemGeneration
+                               ? self.nativeVideoSession?.servedLiveRejoinPlacement?.timeOffset : nil,
+                           reconstructed: self.liveRejoinItemAxisTarget(pending.seconds)) {
+                        let distance = abs(host.currentTime - resolved.target)
+                        let provenance = resolved.stated ? "the playlist served" : "the rejoin asked for"
+                        if distance <= Self.liveRejoinPlacementSatisfiedSeconds {
+                            EngineLog.emit(
+                                "[AetherEngine] #454 the playlist already placed this item at its own "
+                                + "\(String(format: "%.2f", host.currentTime))s, "
+                                + "\(String(format: "%.3f", distance))s from the "
+                                + "\(String(format: "%.2f", resolved.target))s \(provenance); no correcting seek",
+                                category: .engine)
+                            self.acceptCurrentItemForPublishing()
+                            return
+                        }
                         EngineLog.emit(
                             "[AetherEngine] #454 the fresh item came up at its own "
                             + "\(String(format: "%.2f", host.currentTime))s of "
                             + "\(String(format: "%.2f", host.seekableStart))..\(String(format: "%.2f", host.seekableEnd))s, "
-                            + "not where the rejoin asked for; the placement seek follows",
+                            + "\(String(format: "%.2f", distance))s from the "
+                            + "\(String(format: "%.2f", resolved.target))s \(provenance); the placement seek follows",
                             category: .engine)
                     }
                     Task { @MainActor in
@@ -620,6 +630,7 @@ extension AetherEngine {
         startPosition: Double?,
         audioSourceStreamIndex: Int32? = nil,
         keepDvh1TagWithoutDV: Bool = false,
+        forceDolbyVisionOnNonDVDisplay: Bool = false,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
@@ -679,6 +690,7 @@ extension AetherEngine {
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
             displaySupportsHDR: Self.displayCapabilities.supportsHDR,
             keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
+            forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
             matchContentEnabled: matchContentEnabled,
             panelIsInHDRMode: panelIsInHDRMode,
             audioSourceStreamIndexOverride: audioSourceStreamIndex,
@@ -704,6 +716,8 @@ extension AetherEngine {
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
             forwardBufferSegments: loadedOptions.forwardBufferSegments
         )
+        // AE#464: every producer this session builds reads it off the session. Set before start().
+        session.audioDelaySeconds = loadedOptions.audioDelaySeconds
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
         session.sideReaderLinkGate = sideReaderLinkGate
@@ -1101,6 +1115,16 @@ extension AetherEngine {
         }
         replayVideoNowPlayingInfo(to: host)
         self.nativeHost = host
+        // AE#446 round 5: an item's axis is stated by the playlist it loads, so the statement has to be
+        // keyed to the item that loaded it. Installed on the one funnel every attach passes through, so
+        // the session's FIRST item is covered as well as every swap: both used to reconstruct the axis
+        // from the cache instead, and a reconstruction is only as good as the older of its two samples.
+        host.onWillAttachItem = { [weak self] in
+            // The host owns this closure, so it reaches back for the host rather than capturing it.
+            guard let self, let attaching = self.nativeHost else { return }
+            self.nativeVideoSession?.armLiveItemAxisStatement()
+            self.liveItemAxisArmedGeneration = attaching.itemGeneration
+        }
         applyDesiredVolume(to: host)
         applyDesiredRate(to: host)
         // Publish before wiring mirrors so subscribers see the AVPlayer before the first time update. Only emit on change: re-publishing the same instance retriggers the AVKit re-registration this reuse path avoids.
@@ -1554,6 +1578,7 @@ extension AetherEngine {
         // of such a wiring work in isolation, which is why a dead sink here reads as a working one.
         softwareCancellables.removeAll()
         let host = SoftwarePlaybackHost()
+        host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
             fieldRate: loadedOptions.deinterlaceFieldRate
@@ -2024,8 +2049,9 @@ extension AetherEngine {
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec, isSoftware: true
                 )
+                // AE#462: the rebuilt host's own resolved index (see the load site).
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
-                    audioTracks: audioTracks, activeIndex: audioStreamIndex ?? -1
+                    audioTracks: audioTracks, activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
                 softwareHost?.play()
@@ -2043,6 +2069,7 @@ extension AetherEngine {
                         isLive: loadedOptions.isLive, currentTime: resumeAt),
                     audioSourceStreamIndex: audioStreamIndex,
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
+                    forceDolbyVisionOnNonDVDisplay: loadedOptions.forceDolbyVisionOnNonDVDisplay,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
                     panelIsInHDRMode: loadedOptions.panelIsInHDRMode,
                     audioBridgeMode: loadedOptions.audioBridgeMode,
