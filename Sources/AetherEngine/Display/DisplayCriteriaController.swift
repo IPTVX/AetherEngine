@@ -33,10 +33,11 @@ final class DisplayCriteriaController {
     /// Has a criteria write ever demonstrably driven THIS display into HDR (headroom observed above 1.0)?
     ///
     /// Deliberately never cleared, not by `reset()` and not by a switch that ends at headroom 1.0. The
-    /// headroom is a transition artifact, so its absence proves nothing (see `panelPresentsHDR`) and any
-    /// invalidation rule built on it would re-arm the very false negative this exists to answer. A display
-    /// change cannot strand it either: `effectiveVideoFormat` clamps to `displayCapabilities` before
-    /// `apply()`, so an SDR route writes SDR criteria and never consults the proof.
+    /// headroom collapses while HDR video is on the screen (see `panelPresentsHDR`), so its absence at
+    /// exactly the moment a load asks proves nothing, and any invalidation rule built on it would re-arm
+    /// the very false negative this exists to answer. A display change cannot strand it either:
+    /// `effectiveVideoFormat` clamps to `displayCapabilities` before `apply()`, so an SDR route writes SDR
+    /// criteria and never consults the proof.
     private var panelProvenToEngageHDR: Bool = false
 
     #if os(tvOS)
@@ -195,16 +196,36 @@ final class DisplayCriteriaController {
 
     /// Will the panel present this session in HDR?
     ///
-    /// `UIScreen.currentEDRHeadroom` is not a readout of the panel's HDMI mode. It is raised around a
-    /// dynamic-range TRANSITION and decays back to 1.0 while the panel keeps presenting HDR (device trace,
-    /// HDR10+ panel, 2026-08-02: headroom fell 1.20 -> 1.00 thirteen seconds into a confirmed HDR10 session
-    /// with `isDisplayModeSwitchInProgress` false throughout). A replay that starts before the TV has dropped
-    /// back to SDR therefore makes no transition at all, the headroom never rises, and the single read taken
-    /// after `waitForSwitch` concluded "panel is SDR". On tvOS that one boolean IS the master-vs-media routing
-    /// gate (`resolveUseMasterPlaylist`, where `builtInPanelEngagesOnDemand` is false), so the session was
-    /// served media-direct with no HDR signaling and labelled SDR while the TV itself reported HDR.
+    /// `UIScreen.currentEDRHeadroom` is honest exactly when no video is on the screen, and dishonest for
+    /// seconds to tens of seconds after HDR video has been. Measured on an Apple TV 4K (3rd gen), HDR10+
+    /// panel, 2026-09-02, seven runs across four configurations:
     ///
-    /// So the reading is trusted only as a positive. Its absence is answered by what this display has already
+    ///     output fixed 4K HDR, nothing playing:      1.20, and again 1.20 fifty-five seconds later
+    ///     output fixed 4K HDR, SDR content playing:  1.20
+    ///     output fixed 4K SDR, either of the above:  1.00
+    ///     output fixed 4K HDR, 17s after HDR ended:  1.20
+    ///
+    /// So a panel parked in HDR does report itself, with no transition anywhere in sight, and it keeps
+    /// reporting itself: the value is stable rather than decaying, and a rate-only criteria write does not
+    /// collapse it either (measured with Match Frame Rate on, `SET: format=sdr rate=25.000 extensions=none`,
+    /// headroom 1.20 straight through). What DOES collapse it is HDR video on the screen: the 2026-08-02
+    /// trace has it falling 1.20 -> 1.00 thirteen seconds into a confirmed HDR10 session with
+    /// `isDisplayModeSwitchInProgress` false throughout, and the 2026-08-09 table below is the same effect.
+    /// It recovers once that video is gone.
+    ///
+    /// That is why a REPLAY was the failure shape: it starts while the previous HDR session has already
+    /// pulled the value down, the single read taken after `waitForSwitch` sees 1.0, and on tvOS that one
+    /// boolean IS the master-vs-media routing gate (`resolveUseMasterPlaylist`, where
+    /// `builtInPanelEngagesOnDemand` is false), so the session was served media-direct with no HDR signaling
+    /// and labelled SDR while the TV itself reported HDR.
+    ///
+    /// Do not read "the headroom is a transition artifact" into this. That was the model until 2026-09-02 and
+    /// it is wrong in the direction that costs a search: it predicts a parked panel can never prove itself,
+    /// which sends the next reader hunting for a way to force a transition. The engine's problem was never
+    /// that the panel had nothing to say, it was WHEN the question gets asked.
+    ///
+    /// The reading is still trusted only as a positive, because a 1.0 at the moment of asking cannot be told
+    /// apart from a panel that is genuinely SDR. Its absence is answered by what this display has already
     /// proven: once a criteria write has driven it into HDR, asking for HDR again puts it there. A panel that
     /// never engages (Match Frame Rate on, Match Dynamic Range off, which tvOS reports through the same
     /// combined toggle) never sets the proof and keeps the conservative answer, so it is still never offered a
@@ -218,7 +239,9 @@ final class DisplayCriteriaController {
     ///     4K HDR, t+20s:   current 1.00, potential 1.00
     ///     4K SDR, t+2.5s:  current 1.00, potential 1.00
     ///
-    /// The first row is the one that closes it: the panel was demonstrably in an HDR mode, and the value
+    /// Those three rows were taken DURING playback, which is why the second one reads 1.00; see the idle
+    /// table above for the same box with nothing on the screen. The first row is the one that closes it:
+    /// the panel was demonstrably in an HDR mode, and the value
     /// documented as the maximum the screen can display read *lower* than the live one at the same instant,
     /// from the same `UIScreen`. That is not a sampling-time problem, it is a property tvOS does not
     /// maintain. There is no mode read-back; do not go looking for one here again (Sodalite#49).
@@ -245,15 +268,22 @@ final class DisplayCriteriaController {
 
     /// How long after the first frames the panel is re-asked whether it is presenting HDR, and how often.
     ///
-    /// Every reading `panelPresentsHDR` gets today is taken around the criteria write, which is the one
-    /// moment a panel already parked in HDR has nothing to report: no dynamic-range transition, so no raised
-    /// headroom, so no proof, forever (#459). Vincent's 2026-08-09 device trace has the reading this window
-    /// exists to catch, on an Apple TV whose output was fixed to 4K HDR: headroom 1.20 at t+2.5s, back to
-    /// 1.00 by t+20s, against a flat 1.00 for the same title with the output fixed to 4K SDR.
+    /// Every reading `panelPresentsHDR` gets is taken around the criteria write. On a box that has just been
+    /// playing HDR, that is the one moment the value is still pulled down by the session being replaced, so a
+    /// panel parked in HDR can read SDR there and keep reading SDR for good (#459). The 2026-08-09 device
+    /// trace has the reading this window exists to catch, on an Apple TV whose output was fixed to 4K HDR:
+    /// headroom 1.20 at t+2.5s, back to 1.00 by t+20s, against a flat 1.00 for the same title with the output
+    /// fixed to 4K SDR.
     ///
     /// So the window opens wide enough to contain that rise and closes before the value decays into
     /// meaninglessness. A window that closes with nothing seen is itself the measurement: it says this panel
     /// never raises the headroom, which is the one thing no log line could say before.
+    ///
+    /// This probe is the instrument, not the last word on the cause. The 2026-09-02 runs (see
+    /// `panelPresentsHDR`) could not reproduce #459 on an HDR10+ panel in any configuration, including the
+    /// reporter's, because there the idle reading is honest and the load-time read inherits it. Whether the
+    /// reporter's panel raises the headroom at all is what this probe's own log line answers, and nothing
+    /// further should be built here before it has.
     nonisolated static let playbackProbeWindowMs = 12_000
     nonisolated static let playbackProbeIntervalMs = 250
 
@@ -1002,7 +1032,8 @@ final class DisplayCriteriaController {
 
     /// Whether the panel presents this session in HDR, read after apply() + waitForSwitch() settle. A live
     /// headroom above 1.0 answers it; a decayed one is answered by `panelPresentsHDR` from what this display
-    /// has already proven, because the headroom is a transition artifact and its absence proves nothing.
+    /// has already proven, because HDR video on the screen pulls the value down and a replay asks while the
+    /// previous session was still doing that.
     func currentPanelIsHDR() -> Bool {
         #if os(tvOS)
         guard let window = resolveWindow() else { return false }
