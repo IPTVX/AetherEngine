@@ -761,8 +761,15 @@ public final class AetherEngine: ObservableObject {
     /// AE#446 round 4: bounded audit after a rejoin swap. See `auditLiveRejoinPlacement`.
     var liveRejoinAuditUntil: Date?
     var liveRejoinAuditLastEmit: Date?
+    /// One-shot host request: keep the running native item attached until the next `load()` can
+    /// replace it atomically. A foreground playlist or episode change through a host-mounted
+    /// `AVPlayerLayer` has the same nil-item exposure PiP does; this lets the host ask for the
+    /// same protection without pretending Picture in Picture is active. Armed by
+    /// `prepareForItemReplacement()`, consumed by the next `load()`, cleared by `stop()`.
+    private var nextLoadRequestsInPlaceItemHandover = false
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
-    /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
+    /// or host-requested next-episode handover); consumed and reset by the loopback host.load
+    /// callsite (inPlaceSwap).
     var pendingInPlaceItemHandover = false
     /// SW-PiP bridge, the software-path analog of `currentAVPlayer`: set when a SW session has its
     /// display layer, nil on teardown. Hosts build their sample-buffer PiP ContentSource from it.
@@ -835,8 +842,29 @@ public final class AetherEngine: ObservableObject {
     /// AE#158: a system PiP window closes the moment its source layer's player drops its item (the #93
     /// in-PiP recovery reload hit the same nil-item gap), so a native->native load while PiP is active
     /// keeps the old item attached through the load gap and swaps in place once the new master is ready.
-    nonisolated static func shouldHandOverItemInPlace(pipActive: Bool, priorBackendWasNative: Bool) -> Bool {
-        pipActive && priorBackendWasNative
+    /// A host that mounts the engine's own `AVPlayerLayer` can be left with a black layer across the
+    /// same gap on a foreground episode change, so it may request the handover explicitly
+    /// (`hostRequested`). Neither applies unless the outgoing backend is native: there is no item to
+    /// keep on the software path, and a native successor to a software session builds a fresh host.
+    nonisolated static func shouldHandOverItemInPlace(
+        pipActive: Bool,
+        hostRequested: Bool = false,
+        priorBackendWasNative: Bool
+    ) -> Bool {
+        priorBackendWasNative && (pipActive || hostRequested)
+    }
+
+    /// Consume the one-shot host request at the load boundary, folded with PiP's mandatory handover.
+    /// Consumed here rather than where it is read so one episode transition cannot change the
+    /// teardown of a later, unrelated load.
+    func consumeInPlaceItemHandoverRequest(priorBackendWasNative: Bool) -> Bool {
+        let hostRequested = nextLoadRequestsInPlaceItemHandover
+        nextLoadRequestsInPlaceItemHandover = false
+        return Self.shouldHandOverItemInPlace(
+            pipActive: pictureInPictureActive,
+            hostRequested: hostRequested,
+            priorBackendWasNative: priorBackendWasNative
+        )
     }
 
     /// SW-PiP: playable range for the sample-buffer PiP UI on the PTS axis of the enqueued frames
@@ -1448,6 +1476,9 @@ public final class AetherEngine: ObservableObject {
     /// AVPlayer says it holds the bytes that seam describes. One at a time, newest wins, cancelled in
     /// stopInternal: it exists only to check the axis just published, so an older check is stale.
     var placementVerificationTask: Task<Void, Never>?
+    /// AE#481: the sampler reading what the run holding a seek landing carries. One at a time, and the
+    /// newest seek owns it: an older landing describes a position the playhead has left.
+    var landingAxisTask: Task<Void, Never>?
 
     /// 1 Hz live-telemetry sampler. Lifecycle mirrors memoryProbeTask. Holds a weak engine reference
     /// so the retained task can't keep self alive past teardown.
@@ -3210,10 +3241,10 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
-        // AE#158: while a PiP window is live, the running item must survive this load's teardown or the
-        // system closes the window; the loopback host.load callsite finishes the handover (inPlaceSwap).
-        let handOverInPlace = Self.shouldHandOverItemInPlace(pipActive: pictureInPictureActive,
-                                                             priorBackendWasNative: priorBackendWasNative)
+        // AE#158: while a PiP window is live, or when the host asked for it, the running item must
+        // survive this load's teardown; the loopback host.load callsite finishes the handover
+        // (inPlaceSwap). The host request is consumed here so it can affect only this load.
+        let handOverInPlace = consumeInPlaceItemHandoverRequest(priorBackendWasNative: priorBackendWasNative)
         pendingInPlaceItemHandover = handOverInPlace
         // #128 follow-up: preserve the previous session's display criteria across the load seam. Nil-ing it
         // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
@@ -4552,6 +4583,15 @@ public final class AetherEngine: ObservableObject {
         // still had when the seek was issued; from the landing forward the clock describes the axis
         // it will have instead.
         nativeVideoSession?.snapAxisAfterSeek(landingItemSeconds: clockTarget)
+        // AE#481: and what the landing's run carries is a READING, not the composition it inherits. A
+        // seek that opens a new run at a segment written on its planned position lands on a source-true
+        // stretch, which nothing else in the session ever looks at: measured on the #418 chain with the
+        // re-anchoring seek last, the clock stayed 9 s over the picture from the landing to the end of
+        // the session. Armed here rather than at the landing because the sampler waits for a run to
+        // hold the target anyway, and a superseded seek cancels it.
+        if let session = nativeVideoSession, nativeHost != nil {
+            verifyAxisAtSeekLanding(session: session, landingItemSeconds: clockTarget)
+        }
         // AE#412: inside a keyframe drought, audio opened plan boundaries the keyframe-gated cutter
         // folded, so the landing segment can carry no random-access point at all. AVPlayer reaches
         // back a fixed few seconds on a cold seek and does not look for one, so the picture would
@@ -5070,7 +5110,19 @@ public final class AetherEngine: ObservableObject {
     ///   every caller, but the two are separable: a host that keeps display criteria across a stop/load
     ///   pair (`resetDisplayCriteria: false`) and *is* genuinely leaving playback can pass
     ///   `finalTeardown: true`. Only a final teardown honours `deactivatesAudioSessionOnStop`.
+    /// Keep the current native `AVPlayerItem` attached until the next `load()` replaces it atomically.
+    ///
+    /// Call immediately before a foreground playlist or episode replacement when the host mounts the
+    /// engine's own player layer and a nil-item gap would leave it black. The request is consumed by
+    /// the next `load()` and has no effect when the outgoing session is not on the native backend.
+    /// It does not pause, stop, or otherwise change transport state; a `stop()` before the next load
+    /// cancels it. PiP hosts do not need this: an active PiP window already forces the handover.
+    public func prepareForItemReplacement() {
+        nextLoadRequestsInPlaceItemHandover = true
+    }
+
     public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
+        nextLoadRequestsInPlaceItemHandover = false
         stopInternal(resetDisplayCriteria: resetDisplayCriteria,
                      finalTeardown: finalTeardown ?? resetDisplayCriteria)
         state = .idle
@@ -5928,6 +5980,8 @@ public final class AetherEngine: ObservableObject {
         memoryProbeTask = nil
         placementVerificationTask?.cancel()
         placementVerificationTask = nil
+        landingAxisTask?.cancel()
+        landingAxisTask = nil
         // AE#446: the outage watcher belongs to the session whose window was closed with ENDLIST.
         liveOutageResumeWatcher?.cancel()
         liveOutageResumeWatcher = nil
@@ -5958,7 +6012,12 @@ public final class AetherEngine: ObservableObject {
         // AE#158: keepCurrentItem defers the item detach to the next host.load(inPlaceSwap:) so a
         // system PiP window never sees a nil-item gap across a native->native load. Only meaningful
         // together with keepNativeHost; load() computes it via shouldHandOverItemInPlace.
-        if !keepCurrentItem {
+        if keepCurrentItem && keepNativeHost {
+            // Keep the presentation, not the outgoing session's publishers. loadNative subscribes
+            // before host.load, and @Published would replay the old EOF, clock and readiness into
+            // the successor otherwise.
+            nativeHost?.prepareForItemHandover()
+        } else {
             nativeHost?.tearDown()
         }
         if !keepNativeHost {

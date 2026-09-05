@@ -166,7 +166,15 @@ time out of the picture itself, which is the one axis question nothing else here
 other observable (`#260` frame times, `prodShift` / `hostShift`) describes what the engine WROTE, not
 where AVPlayer then PUT it. Per tick it appends `pic` (source seconds decoded from the frame),
 `picItem` (AVPlayer's own `itemTimeForDisplay` for that frame), `axisErr` (their difference, 0 on an
-honest axis) and `capErr` (the same error as a host placing a cue at `sourceTime` would make it).
+honest axis), `capErr` (the same error as a host placing a cue at `sourceTime` would make it) and
+`capFr`, that same error in frames.
+
+The two errors do NOT have the same resolution, which is why `capFr` is printed. `axisErr`
+differences two frame-grid values read out of one `copyPixelBuffer` call, so it is a whole number of
+frames and every digit of it is a reading. `capErr` differences that same grid value against the
+engine's continuous clock, so below one frame it carries the sub-frame phase of the sampling instant:
+`capFr=+0.40` is the same frame, `capFr=+1.80` is not. Two runs whose `capErr` differs by less than a
+frame have not been shown to differ.
 Needs a fixture whose picture states its own frame number, which `Scripts/timecode-fixture.sh`
 writes; against anything else it prints `pic=none` or nonsense. `pic=none` is also the normal read
 before the first frame and during a stall, so it is not reported as a zero. This is what settled
@@ -199,16 +207,17 @@ Round 4 also needs a fixture with B-FRAMES, and `Scripts/timecode-fixture.sh` no
 (`tc-bframes.mkv`). `-preset ultrafast` disables them, so on `tc-drought.mkv` a segment's dts and pts
 are one number and the gate's offset is the same either way. On real content they are not: the gate
 opens on a random-access point in DECODE order, and taking the offset there put the axis
-`video_delay` frames under the truth on every epoch. The pair isolates exactly that. Read the verdict
-as the MEAN of `capErr` per axis over the run, since a single tick carries up to two frames of the
-probe's own quantisation.
+`video_delay` frames under the truth on every epoch. The pair isolates exactly that. Read the verdict per axis in
+`capFr`, whole frames: a single tick carries up to two frames of the probe's own quantisation. A mean
+of `|capErr|` over ticks does NOT buy resolution below that quantum, it averages the sampling phase
+(AE#418 round 11).
 
 **Round 8: how far a placement sits below its axis is MEASURED, in seconds.** Rounds 5, 6 and 7 read
 that distance as a multiple of the epoch's presentation lead: round 5 shipped the multiple as
 arithmetic, round 6 measured it per source, round 7 held the median of its readings. The premise was
 that the distance is a geometry of the source. It is not. `Scripts/timecode-fixture.sh` writes three
 clips identical but for their reorder depth, and on the same burst arm over a throttled origin
-(`slowrange.py`, 3200 kbps + 100 ms), `--picture-probe` reading the axis off AVPlayer's own video
+(`Scripts/slowrange.py`, 3200 kbps + 100 ms), `--picture-probe` reading the axis off AVPlayer's own video
 output, 2 runs each and every run identical:
 
 | clip | gate lead | placement 2 sits | placement 3 sits |
@@ -243,6 +252,27 @@ rebuilt timeline; the distance stays Xs`. The third is the one worth having: a r
 reading corrects the axis like any other, by 28.000 s on `tc-wide-cues-lie.mkv`, and round 7 refuses
 it the parameter on purpose, so its correction line was otherwise indistinguishable from one that had
 just taught a 28 s lesson.
+
+AE#481 is the case those ten rounds could not see, because a seek burst heals it inside a second. The
+axis belongs to the RUN a re-aimed segment opened, not to the timeline from its advertised start on:
+run the same chain with the re-anchoring seek LAST (`--seek-count 5 --seek-pattern 65,60,70,58,75`,
+served through `Scripts/slowrange.py` at 600 kbps / 300 ms) and the picture reads `pic - picItem` of
+-9.000 at item 53.000 and 0.000 everywhere the landing goes, while the session keeps mapping with
+-9.000 and `capErr` sits at +9.017 to the end of the run. A seek landing now reads what its run
+carries, and says so: `#481 the run holding the landing at item Xs opens at Ys, which is segN's own
+playlist position, so it carries Zs and not the Ws this session was mapping with`. The discriminator
+is that opening, asked of ONE segment: the first the local server answered after the seek, which is the
+one whose content opens that run. It goes into a timeline carrying an axis at the seam that axis
+predicts and into a timeline carrying nothing at its own position, which is round 7's pair of
+admissible answers. Asked of the whole plan the same rule publishes on a coincidence (31 boundaries
+over 120 s against a half-second tolerance: measured, a 0.000 axis written into a timeline carrying
+-27.875 s). Measured on the arm above, `capErr` goes from +9.037 to +0.037, which is 216 frames and the
+only unambiguous number in the set, while the 24-seek arms it must not touch are unchanged (10
+placements, axis -34.376, no reading fired in 2 of 2 runs). On the two slow arms the `capErr` tail
+moves onto the same one-frame lattice pair the fast arm sits on (`+0.009` / `-0.033`). That is a
+sub-frame move and carries no accuracy claim in either direction: an earlier revision of this
+paragraph read it as an improvement from 0.0230 and 0.0411 to 0.0162, which is the mistake AE#418
+round 11 documents on both sides of that thread.
 
 `--start-position S` starts at a resume anchor, the same one `serve` takes. `--sw` forces the software path for a source that would route native, which is how a native-only fixture exercises the SW pipeline.
 
@@ -421,7 +451,7 @@ Activates two subtitle tracks simultaneously on one source (primary + secondary)
 
 ## live
 
-Runs a live MPEG-TS session against a built-in fixture that serves an endless broadcast by looping a seed `.ts` with rewritten timestamps. Flags simulate the failure modes the live path hardens against: `--drop-after N` (mid-stream connection drop + reconnect), `--discontinuity-at N` (program-boundary PTS / PCR jump), `--realtime` (1x wall-clock pacing), `--preroll N` (backlog seconds the paced fixture bursts before 1x pacing; default 30, `0` models a strict-realtime origin with no backlog), `--fast-zap` (loads with `LoadOptions.liveJoinProfile = .fastZap`; the first serve prefers the full holdback but is bounded after two finalized segments plus a 0.5...2.0 s observed-segment grace), `--dvr-window N` (timeshift), `--measure-rss` (sliding-window retention), `--reload-test` (live rejoin end to end, including the full-backlog replay shape some origins serve on reconnect). `--seed <ts>` overrides the seed clip, `--sw` forces the software live path, `--report-cache-bytes` tracks on-disk DVR footprint, `--serve-only` parks the fixture without attaching an engine (raw `curl` / `ffprobe` inspection), `--rewind-test` runs the DVR rewind-and-return matrix variant, `--rewind-hold N` parks the playhead N seconds behind the edge and HOLDS it there for the rest of the run (the regime that separates a resident floor doing its job from a window outrunning the reader: it reports the floor-minus-playhead inversion, stalled ticks, and any `live window slid past the consumer` line), `--freeze-after N` freezes the upstream with the connection still open, `--rewind-before-freeze N` parks the playhead inside the DVR window first, `--unfreeze-after N` lets the frozen upstream deliver again after N seconds (the only way to drive the recovery half: a window closed with ENDLIST re-opening, and where the rejoin puts a timeshifted viewer), `--live-only` loads with no DVR window at all (the shape of a client that keeps its rewind outside the engine, which is where AE#446 round 4 came from: the freeze leg then measures the only timeshift such a session can have, the backlog an outage puts between the closed window's end and the source's return, and the sliding 60 s live-only retention makes the fresh item's own axis observable), `--force-recovery-reload-at N` drives the stage-2 recovery reload without waiting for a real item death, and `--gen-highbitrate-seed` generates a ~22 Mbps 1080p H.264 MPEG-TS seed (for RSS-retention measurement) then exits. `--sliding` is still accepted and does nothing: the sliding window is unconditional for live sessions now, and the flag stays only so an older script does not fail on it.
+Runs a live MPEG-TS session against a built-in fixture that serves an endless broadcast by looping a seed `.ts` with rewritten timestamps. Flags simulate the failure modes the live path hardens against: `--drop-after N` (mid-stream connection drop + reconnect), `--discontinuity-at N` (program-boundary PTS / PCR jump), `--realtime` (1x wall-clock pacing), `--preroll N` (backlog seconds the paced fixture bursts before 1x pacing; default 30, `0` models a strict-realtime origin with no backlog), `--fast-zap` (loads with `LoadOptions.liveJoinProfile = .fastZap`; the first serve prefers the full holdback but is bounded after two finalized segments plus a 0.5...2.0 s observed-segment grace), `--dvr-window N` (timeshift), `--measure-rss` (sliding-window retention), `--reload-test` (live rejoin end to end, including the full-backlog replay shape some origins serve on reconnect). `--seed <ts>` overrides the seed clip, `--sw` forces the software live path, `--report-cache-bytes` tracks on-disk DVR footprint, `--serve-only` parks the fixture without attaching an engine (raw `curl` / `ffprobe` inspection), `--rewind-test` runs the DVR rewind-and-return matrix variant, `--rewind-hold N` parks the playhead N seconds behind the edge and HOLDS it there for the rest of the run (the regime that separates a resident floor doing its job from a window outrunning the reader: it reports the floor-minus-playhead inversion, stalled ticks, and any `live window slid past the consumer` line), `--freeze-after N` freezes the upstream with the connection still open, `--rewind-before-freeze N` parks the playhead inside the DVR window first, `--unfreeze-after N` lets the frozen upstream deliver again after N seconds (the only way to drive the recovery half: a window closed with ENDLIST re-opening, and where the rejoin puts a timeshifted viewer). Since AE#446 round 7 the leg reports two different healthy outcomes for it, and the difference is the whole point of that round: `VERDICT: live-freeze position held` is a window that was closed and rejoined, while `VERDICT: live-freeze gap absorbed` is a gap short enough that the window was never closed at all, so no item was swapped and the viewer saw nothing. A freeze under `3 x TARGETDURATION` with more than `2 x TARGETDURATION` of runway ahead of the consumer drives the second (with the built-in fixture's TARGETDURATION 6 that is, for example, `--freeze-after 100 --unfreeze-after 12 --rewind-before-freeze 60`), `--live-only` loads with no DVR window at all (the shape of a client that keeps its rewind outside the engine, which is where AE#446 round 4 came from: the freeze leg then measures the only timeshift such a session can have, the backlog an outage puts between the closed window's end and the source's return, and the sliding 60 s live-only retention makes the fresh item's own axis observable), `--force-recovery-reload-at N` drives the stage-2 recovery reload without waiting for a real item death, and `--gen-highbitrate-seed` generates a ~22 Mbps 1080p H.264 MPEG-TS seed (for RSS-retention measurement) then exits. `--sliding` is still accepted and does nothing: the sliding window is unconditional for live sessions now, and the flag stays only so an older script does not fail on it.
 
 The freeze leg's verdict is stated in SEGMENTS, not in seconds. A forward step in seconds cannot tell a lost position from a source discontinuity the session correctly folded: a client that reconnects during the freeze is served from a fresh loop of the seed, and since a connection always starts at a loop boundary the remainder of the loop the parked connection had not reached is skipped, which is a real jump in the source (28.8 s on the bundled seed, 49.1 s reported on a 93 s capture) and shows up as a legitimate step in the playhead. What the verdict reads instead is which segments the consumer fetched before and after the rejoin: any the window listed, that it had not reached, and that the rejoin then jumped over. It also fails a rejoin that re-enters further below the place it held than the landing's own backward buffering explains (a re-fetch is not a re-watch, and the allowance is computed from the cut size because AVPlayer's lookback is a fixed 6 to 8 s of content), and a run where the source delivered again and the session never went live at all, which every seconds-based number reads as healthy (the playhead had not moved, so it had not moved wrong).
 
