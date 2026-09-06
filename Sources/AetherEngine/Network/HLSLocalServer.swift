@@ -411,9 +411,30 @@ final class HLSLocalServer: @unchecked Sendable {
     /// When set (e.g. `aether-engine://engine/`), segment URIs in the playlist are absolute custom-scheme URLs routed through AVAssetResourceLoader. Nil emits relative URIs for the aetherctl HTTP workflow.
     private let subResourceBaseURL: URL?
 
-    init(provider: HLSSegmentProvider, subResourceBaseURL: URL? = nil) {
+    /// AE#495: fetches a remote origin on this server's behalf. Mounted when a host has set
+    /// `EngineTLS.serverTrustEvaluator`, so the https handshake happens where that answer is
+    /// read instead of inside AVPlayer's own networking.
+    let relay: HLSOriginRelay?
+
+    /// A relay-only server has no provider: nothing here produces segments, every byte comes
+    /// from the origin, and the master is whatever the origin served.
+    init(provider: HLSSegmentProvider? = nil, subResourceBaseURL: URL? = nil,
+         relay: HLSOriginRelay? = nil) {
         self.provider = provider
         self.subResourceBaseURL = subResourceBaseURL
+        self.relay = relay
+    }
+
+    /// Admits `origin` to the relay and returns the address standing in for it, for a player
+    /// pointed at the relay rather than at a provider's playlists. Nil before `start()` or with
+    /// no relay mounted.
+    func relayURL(for origin: URL) -> URL? {
+        guard let relay, relay.admit(origin) != nil else { return nil }
+        stateLock.lock()
+        let listeningPort = port
+        stateLock.unlock()
+        guard listeningPort > 0 else { return nil }
+        return HLSOriginRelay.localURL(for: origin, port: listeningPort, token: pathToken)
     }
 
     // MARK: - Lifecycle
@@ -720,6 +741,25 @@ final class HLSLocalServer: @unchecked Sendable {
             // Range / capability header that explains the 404. Revert with the
             // arrival-line promotion above once #50 is root-caused.
             EngineLog.emit("[HLSLocalServer] first request headers fd=\(fd): \(headers)", category: .hlsServer)  // #50 diag: .info, revert post-root-cause
+        }
+
+        if normalizedPath == HLSOriginRelay.route {
+            guard let relay else {
+                return send404(fd: fd, path: normalizedPath, reason: "no relay mounted")
+            }
+            stateLock.lock()
+            let listeningPort = port
+            stateLock.unlock()
+            let headerLines = Array(text.components(separatedBy: "\r\n").dropFirst())
+            guard let answer = relay.respond(
+                query: query,
+                host: Self.requestHeader(named: "host", in: headerLines),
+                range: Self.requestHeader(named: "range", in: headerLines),
+                port: listeningPort, token: pathToken)
+            else {
+                return send404(fd: fd, path: normalizedPath, reason: "relay names no origin")
+            }
+            return sendRelay(fd: fd, path: normalizedPath, answer: answer)
         }
 
         switch normalizedPath {
@@ -1050,6 +1090,50 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         return (.segment, streamFileToSocket(fileURL: fileURL, socketFd: fd, path: path,
                                              expectedLength: fileSize))
+    }
+
+    static func requestHeader(named name: String, in lines: [String]) -> String? {
+        let wanted = name.lowercased() + ":"
+        for line in lines where line.lowercased().hasPrefix(wanted) {
+            return line.dropFirst(wanted.count).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
+    }
+
+    /// Writes a relayed answer. Separate from `send200` because this is the only path that
+    /// passes a status through from somewhere else and the only one that answers 206, which
+    /// a ranged segment fetch upstream comes back as.
+    private func sendRelay(fd: Int32, path: String, answer: HLSOriginRelay.Response) -> Bool {
+        var header = "HTTP/1.1 \(answer.status) \(Self.reasonPhrase(answer.status))\r\n"
+        header += "Content-Length: \(answer.body.count)\r\n"
+        header += "Content-Type: \(answer.contentType)\r\n"
+        if let contentRange = answer.contentRange {
+            header += "Content-Range: \(contentRange)\r\n"
+        }
+        header += "Accept-Ranges: bytes\r\n"
+        header += "Cache-Control: no-cache\r\n"
+        header += "Connection: keep-alive\r\n\r\n"
+
+        EngineLog.emit(
+            "[HLSLocalServer] -> \(answer.status) relay bytes=\(answer.body.count) "
+                + "type=\(answer.contentType)", category: .hlsServer, level: .verbose)
+        guard writeAll(fd: fd, data: Data(header.utf8), path: "\(path) [header]") else {
+            return false
+        }
+        return answer.body.isEmpty ? true : writeAll(fd: fd, data: answer.body, path: path)
+    }
+
+    static func reasonPhrase(_ status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 206: return "Partial Content"
+        case 400: return "Bad Request"
+        case 403: return "Forbidden"
+        case 404: return "Not Found"
+        case 416: return "Range Not Satisfiable"
+        case 502: return "Bad Gateway"
+        default: return "Status \(status)"
+        }
     }
 
     private func send404(fd: Int32, path: String, reason: String) -> Bool {

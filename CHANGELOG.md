@@ -27,6 +27,28 @@ the public-API contract.
   streaming paths, the disc reader, both HLS ingest readers, the audio tap
   fetcher, the carriage probe and the remote HLS subtitle proxy.
 
+- **The remote HLS stand-in relays the origin so the trust evaluator reaches
+  AVPlayer.** `EngineTLS` only governs sessions the engine opens, and on that
+  route the origin URL goes to `AVURLAsset`, where AVPlayer resolves it through
+  its own networking and asks no delegate about the certificate. An origin
+  behind a self-signed certificate could direct play, since that reads through
+  AVIOReader, and then fail the moment it transcoded. Once a host has set an
+  evaluator, an `HLSOriginRelay` is mounted on the `HLSLocalServer` that #316
+  already stands in front of a remote master, so the https request is made by
+  the engine and the handshake happens where the evaluator is asked. Playlists
+  are rewritten so every variant, key, map and segment follows, and anything
+  else is relayed byte for byte with `Range` forwarded verbatim and
+  `Content-Range` mirrored. Relayed requests are charged to
+  `OriginRequestBudget` like every other fetch the engine makes, so a metered
+  origin arms the same pacer the reader and the subtitle prefetcher read.
+  Sessions with no evaluator set reach AVPlayer unchanged.
+
+- The trust opt-in and #316's subtitle renditions now **compose**. The
+  rewritten master carries the injected renditions and its variants come back
+  through the relay, so a self-signed origin with sidecars gets both. The
+  renditions the engine serves itself are named relatively and stay with the
+  server that owns them.
+
 ### Changed
 
 - The live subtitle rendition fetch owns its session instead of borrowing

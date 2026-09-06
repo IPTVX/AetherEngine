@@ -104,6 +104,101 @@
                     "open failed as \(String(describing: refusal)), not a trust refusal")
         }
 
+        @Test("Through the relay: a client that never sees the certificate gets the stream")
+        func relayServesThroughUntrustedOrigin() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            let previous = EngineTLS.serverTrustEvaluator
+            defer { EngineTLS.serverTrustEvaluator = previous }
+            EngineTLS.serverTrustEvaluator = { _ in true }
+
+            let server = try Self.relayServer()
+            defer { server.stop(); server.relay?.stop() }
+
+            let master = URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!
+            let entry = try #require(server.relayURL(for: master))
+
+            let playlist = try await Self.text(of: entry)
+            #expect(playlist.contains("#EXT-X-STREAM-INF"))
+            let variant = try #require(
+                playlist.components(separatedBy: "\n").first { $0.hasPrefix("http://127.0.0.1:") })
+
+            let media = try await Self.text(of: try #require(URL(string: variant)))
+            #expect(media.contains("#EXTINF"))
+            let segmentLine = try #require(
+                media.components(separatedBy: "\n").first {
+                    $0.hasPrefix("http://127.0.0.1:") && !$0.contains("m3u8")
+                })
+
+            let (bytes, response) = try await URLSession.shared.data(
+                from: try #require(URL(string: segmentLine)))
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            #expect(bytes.count == 4096, "served \(bytes.count) segment bytes")
+            #expect(bytes.first == 0x47, "not an MPEG-TS sync byte")
+        }
+
+        @Test("Through the relay: no evaluator refuses to launder an untrusted origin")
+        func relayRefusesWhenNotOptedIn() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            let previous = EngineTLS.serverTrustEvaluator
+            defer { EngineTLS.serverTrustEvaluator = previous }
+            EngineTLS.serverTrustEvaluator = nil
+
+            let server = try Self.relayServer()
+            defer { server.stop(); server.relay?.stop() }
+
+            let master = URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!
+            let entry = try #require(server.relayURL(for: master))
+
+            var request = URLRequest(url: entry)
+            request.timeoutInterval = 15
+            let (_, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 502,
+                    "the upstream handshake should have failed system trust")
+        }
+
+        @Test("Through the relay: an origin the evaluator declines is not laundered either")
+        func relayRefusesAnOriginTheEvaluatorDeclines() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            // The relay is mounted for every https origin once an evaluator
+            // exists, so the per-origin answer has to hold at the handshake it
+            // makes on the player's behalf.
+            let previous = EngineTLS.serverTrustEvaluator
+            defer { EngineTLS.serverTrustEvaluator = previous }
+            EngineTLS.serverTrustEvaluator = { $0.host == "media.example" }
+
+            let server = try Self.relayServer()
+            defer { server.stop(); server.relay?.stop() }
+
+            let master = URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!
+            let entry = try #require(server.relayURL(for: master))
+
+            var request = URLRequest(url: entry)
+            request.timeoutInterval = 15
+            let (_, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 502,
+                    "an origin the evaluator declined was served anyway")
+        }
+
+        private static func relayServer() throws -> HLSLocalServer {
+            let server = HLSLocalServer(relay: HLSOriginRelay())
+            try server.start()
+            return server
+        }
+
+        private static func text(of url: URL) async throws -> String {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            let (data, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            return String(decoding: data, as: UTF8.self)
+        }
+
         /// A refused handshake reaches the host as a typed failure rather than as unreadable media,
         /// so the refusal arms assert the classification and not only that no byte was served.
         private static func openFailure(of reader: AVIOReader) -> Error? {
