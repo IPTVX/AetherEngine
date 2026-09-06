@@ -242,6 +242,22 @@ struct HLSOriginRelayAddressingTests {
         #expect(try await status(of: entry) == 404, "a refused playlist came back as a served one")
     }
 
+    @Test("The relay is wanted only where the system refuses the origin")
+    func trustProbeAnswersForTheOriginInHand() async throws {
+        // An origin the system reaches is one AVPlayer reaches, so relaying it would move a whole
+        // session's bytes through the process for nothing.
+        let reachable = try #require(RangeEchoOrigin())
+        defer { reachable.stop() }
+        let reached = await HLSOriginRelay.systemTrustRefuses(
+            URL(string: "http://127.0.0.1:\(reachable.port)/movie.ts")!)
+        #expect(reached == false, "a reachable origin was read as a trust refusal")
+
+        // An origin that is simply down is not a trust refusal either. It fails the direct route as
+        // well, and a relay saves nothing.
+        let down = await HLSOriginRelay.systemTrustRefuses(URL(string: "https://127.0.0.1:9/x.m3u8")!)
+        #expect(down == false, "an unreachable origin was read as a trust refusal")
+    }
+
     @Test("A header value from the origin cannot write a second response")
     func headerValuesAreSanitised() {
         let injected = "text/plain\r\nX-Injected: yes\r\n\r\nHTTP/1.1 200 OK"

@@ -55,6 +55,19 @@ the public-API contract.
   `URLSession.shared`, which cannot carry a delegate and was the one engine
   fetch no host trust decision could reach.
 
+### Changed (relay)
+
+- **The relay is mounted for the origins that need it, not for every https
+  origin a host with an evaluator plays.** Whether one is wanted is decided by
+  a single handshake with the origin, made the way AVPlayer makes its own, and
+  an origin the system trusts is one the native route reaches unaided. The
+  evaluator cannot answer this at load time (no protection space, no
+  `serverTrust`), and "an evaluator exists" says very little about the origin in
+  hand: a host commonly answers for a LAN address and holds a WAN address with a
+  real certificate. Without this, opting one server in moved every byte of every
+  remote-HLS session through the process. The evaluator's own answer is still
+  put at the handshake the relay makes.
+
 ### Fixed
 
 - **A refused certificate stays legible behind the relay.** 6.69.0 reads the

@@ -73,6 +73,54 @@ final class HLSOriginRelay: @unchecked Sendable {
         session.invalidateAndCancel()
     }
 
+    // MARK: - Whether a relay is wanted at all
+
+    /// One handshake with `origin`, made the way AVPlayer would make it, answering whether system
+    /// trust refuses it.
+    ///
+    /// Mounting the relay on every https origin a host with an evaluator ever plays would move every
+    /// byte of every session through this process, for origins AVPlayer can open by itself. The
+    /// evaluator cannot be asked instead: at load time there is no protection space and no
+    /// `serverTrust`, so a host that reads either would be answering about nothing. The system can be
+    /// asked, and its answer is exactly the question, because an origin it trusts is one the native
+    /// route reaches unaided.
+    ///
+    /// A range of one byte rather than a HEAD: origins that serve media commonly answer the first and
+    /// not the second, and either way the handshake is what is being read. Anything that is not a
+    /// trust refusal, an unreachable host, a timeout, a 500, answers false: those fail the load on the
+    /// direct route too, and a relay would not save them.
+    static func systemTrustRefuses(_ origin: URL, headers: [String: String] = [:]) async -> Bool {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = trustProbeSeconds
+        config.timeoutIntervalForResource = trustProbeSeconds
+        // No delegate on purpose. This session must answer the way AVPlayer's own networking does,
+        // which is system trust and nothing else; handing it `EngineTLS.sessionDelegate` would ask
+        // the host and get back the answer that hides what is being measured.
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        var request = URLRequest(url: origin)
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        do {
+            _ = try await session.data(for: request)
+            return false
+        } catch {
+            guard let code = TransportSecurityFailure.code(in: error) else { return false }
+            EngineLog.emit(
+                "[HLSOriginRelay] \(origin.host ?? "origin") is not trusted by the system "
+                    + "(NSURLError \(code)); the relay makes the handshake so the evaluator is asked",
+                category: .hlsServer)
+            return true
+        }
+    }
+
+    /// Long enough for a LAN server to finish a handshake and short enough that an origin which is
+    /// simply down does not hold a load open. A timeout answers false, which is the direct route.
+    private static let trustProbeSeconds: TimeInterval = 4
+
     // MARK: - Admission
 
     /// Lets this relay fetch `origin`, and adopts the headers a load carries. Returns the

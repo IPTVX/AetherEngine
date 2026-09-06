@@ -550,23 +550,33 @@ extension AetherEngine {
     /// Bitmap sidecars (`.sup`) are excluded: WebVTT is a text rendition, and promising one for a PGS file
     /// would serve an empty `.vtt` that AVPlayer never re-fetches. Those keep the overlay (and Phase D OCR).
     ///
-    /// The relay is asked for on any https origin once an evaluator exists, not only the ones it would
-    /// accept, because deciding here means asking about a protection space no handshake produced, with
-    /// no `serverTrust` for a host that reads one. The real question is put at the handshake the relay
-    /// makes, so an origin the evaluator declines fails there rather than being laundered.
+    /// The relay is not decided by asking the evaluator, which would mean asking about a protection
+    /// space no handshake produced, with no `serverTrust` for a host that reads one. It is decided by
+    /// the system's own answer to one handshake with this origin: an origin the system trusts is one
+    /// AVPlayer can reach on its own, and relaying it would move a whole session's bytes through the
+    /// process for nothing. A host commonly answers for a LAN address and holds a WAN address with a
+    /// real certificate, so "an evaluator exists" says very little about the origin in hand.
+    ///
+    /// The evaluator's own answer is still put at the handshake the relay makes, so an origin it
+    /// declines fails there rather than being laundered.
     @MainActor
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
                                          expectedGeneration: UInt64) async -> URL? {
-        let needsRelay = EngineTLS.serverTrustEvaluator != nil
+        let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
             && originURL.scheme?.lowercased() == "https"
-        guard !options.isLive || needsRelay else { return nil }
         let tracks = options.isLive
             ? []
             : externalSubtitleRegistry
                 .filter { $0.value.isTextFormat }
                 .sorted { $0.key < $1.key }
                 .map { RemoteHLSSubtitleProvider.Track(externalID: $0.key, source: $0.value) }
+        // Nothing to stand in for, so the origin is never asked.
+        guard !tracks.isEmpty || mayNeedRelay else { return nil }
+        let needsRelay = mayNeedRelay
+            ? await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
+            : false
+        guard !options.isLive || needsRelay else { return nil }
         guard !tracks.isEmpty || needsRelay else { return nil }
 
         guard let prepared = await RemoteHLSSubtitleProxy.prepare(
