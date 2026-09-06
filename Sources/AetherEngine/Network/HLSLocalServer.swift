@@ -751,15 +751,39 @@ final class HLSLocalServer: @unchecked Sendable {
             let listeningPort = port
             stateLock.unlock()
             let headerLines = Array(text.components(separatedBy: "\r\n").dropFirst())
-            guard let answer = relay.respond(
+            // The media body is written from here as it arrives rather than after it has all
+            // landed: buffering a segment puts its whole download in front of the player's first
+            // byte and hands AVPlayer's throughput estimate a loopback burst to pick the next
+            // rendition from.
+            let sink = HLSOriginRelay.Sink(
+                head: { [weak self] status, contentType, contentRange, contentLength in
+                    guard let self else { return false }
+                    let header = Self.relayResponseHeader(
+                        status: status, contentType: contentType, contentRange: contentRange,
+                        contentLength: contentLength)
+                    EngineLog.emit(
+                        "[HLSLocalServer] -> \(status) relay stream bytes=\(contentLength) "
+                            + "type=\(contentType)", category: .hlsServer, level: .verbose)
+                    return self.writeAll(fd: fd, data: Data(header.utf8),
+                                         path: "\(normalizedPath) [header]")
+                },
+                body: { [weak self] chunk in
+                    guard let self else { return false }
+                    return self.writeAll(fd: fd, data: chunk, path: normalizedPath)
+                })
+            switch relay.respond(
                 query: query,
                 host: Self.requestHeader(named: "host", in: headerLines),
                 range: Self.requestHeader(named: "range", in: headerLines),
-                port: listeningPort, token: pathToken)
-            else {
+                port: listeningPort, token: pathToken, sink: sink)
+            {
+            case nil:
                 return send404(fd: fd, path: normalizedPath, reason: "relay names no origin")
+            case .answer(let answer):
+                return sendRelay(fd: fd, path: normalizedPath, answer: answer)
+            case .streamed(let ok):
+                return ok
             }
-            return sendRelay(fd: fd, path: normalizedPath, answer: answer)
         }
 
         switch normalizedPath {
@@ -1104,15 +1128,9 @@ final class HLSLocalServer: @unchecked Sendable {
     /// passes a status through from somewhere else and the only one that answers 206, which
     /// a ranged segment fetch upstream comes back as.
     private func sendRelay(fd: Int32, path: String, answer: HLSOriginRelay.Response) -> Bool {
-        var header = "HTTP/1.1 \(answer.status) \(Self.reasonPhrase(answer.status))\r\n"
-        header += "Content-Length: \(answer.body.count)\r\n"
-        header += "Content-Type: \(Self.headerValue(answer.contentType))\r\n"
-        if let contentRange = answer.contentRange {
-            header += "Content-Range: \(Self.headerValue(contentRange))\r\n"
-        }
-        header += "Accept-Ranges: bytes\r\n"
-        header += "Cache-Control: no-cache\r\n"
-        header += "Connection: keep-alive\r\n\r\n"
+        let header = Self.relayResponseHeader(
+            status: answer.status, contentType: answer.contentType,
+            contentRange: answer.contentRange, contentLength: answer.body.count)
 
         EngineLog.emit(
             "[HLSLocalServer] -> \(answer.status) relay bytes=\(answer.body.count) "
@@ -1121,6 +1139,23 @@ final class HLSLocalServer: @unchecked Sendable {
             return false
         }
         return answer.body.isEmpty ? true : writeAll(fd: fd, data: answer.body, path: path)
+    }
+
+    /// The response head for a relayed answer, whether it is written whole or streamed. One writer,
+    /// because a streamed answer states its length before the body exists and the two framings have
+    /// to agree.
+    static func relayResponseHeader(status: Int, contentType: String, contentRange: String?,
+                                    contentLength: Int) -> String {
+        var header = "HTTP/1.1 \(status) \(reasonPhrase(status))\r\n"
+        header += "Content-Length: \(contentLength)\r\n"
+        header += "Content-Type: \(headerValue(contentType))\r\n"
+        if let contentRange {
+            header += "Content-Range: \(headerValue(contentRange))\r\n"
+        }
+        header += "Accept-Ranges: bytes\r\n"
+        header += "Cache-Control: no-cache\r\n"
+        header += "Connection: keep-alive\r\n\r\n"
+        return header
     }
 
     /// A header value written from somewhere else, made safe to concatenate into a response.

@@ -70,6 +70,17 @@ the public-API contract.
 
 ### Fixed
 
+- **A relayed segment reaches the player while the origin is still sending
+  it.** The relay read each body to its last byte before writing anything, which
+  put a segment's whole download in front of the player's first byte: AVPlayer
+  abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
+  and it sizes the next rendition off what it measured, which behind a buffer is
+  a loopback burst rather than the link. Media is now handed to the socket as it
+  arrives, written by the thread that is already parked on the request so a
+  socket the player stopped reading cannot hold up the other fetches on the
+  session. Playlists, refusals and bodies of unstated length are still read
+  whole, because they have to be rewritten, or framed by measuring.
+
 - **A refused certificate stays legible behind the relay.** 6.69.0 reads the
   refusal off the failed item's `NSUnderlyingErrorKey` chain, and with a relay
   in front the player's request went to loopback and came back a plain 502, so

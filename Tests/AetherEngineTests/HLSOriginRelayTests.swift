@@ -242,6 +242,70 @@ struct HLSOriginRelayAddressingTests {
         #expect(try await status(of: entry) == 404, "a refused playlist came back as a served one")
     }
 
+    @Test("A segment reaches the player while the origin is still sending it")
+    func mediaIsRelayedAsItArrives() async throws {
+        // Held to the last byte, a segment puts its whole download in front of the player's first
+        // byte: AVPlayer abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
+        // and it sizes the next rendition off what it measured, which behind a buffer is a loopback
+        // burst rather than the link.
+        //
+        // The origin sends its head and one slice and then holds the rest for far longer than this
+        // client will wait. A relay that streams answers in milliseconds; one that reads the body
+        // first cannot answer at all until the origin is done, so the wait is the whole discriminator
+        // and it does not turn on how loaded the machine is.
+        let upstream = try #require(TricklingOrigin(slices: 2, pauseSeconds: 20))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/movie.ts")!
+        let entry = try #require(server.relayURL(for: origin))
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        let started = Date()
+        let (bytes, response) = try await session.bytes(for: URLRequest(url: entry))
+        let headAt = Date().timeIntervalSince(started)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(response.expectedContentLength == Int64(TricklingOrigin.totalBytes(slices: 2)),
+                "the length the origin stated did not survive")
+        #expect(headAt < 5, "the answer only began after the origin had finished (\(headAt)s)")
+
+        for try await byte in bytes {
+            #expect(byte == 0x47, "not an MPEG-TS sync byte")
+            break
+        }
+        #expect(Date().timeIntervalSince(started) < 5, "the first byte waited for the whole body")
+    }
+
+    @Test("A body of unstated length is held, and held is not the same as rewritten")
+    func heldMediaIsStillMedia() async throws {
+        // A body with no Content-Length cannot be framed for the player without measuring it, so it
+        // is read whole. What must not follow is that a held body is treated as a playlist: the
+        // rewriter would walk MPEG-TS as lines of text.
+        let upstream = try #require(TricklingOrigin(declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/movie.ts")!
+        let entry = try #require(server.relayURL(for: origin))
+
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(body.count == TricklingOrigin.totalBytes(slices: 8), "relayed \(body.count) bytes")
+        #expect(body.allSatisfy { $0 == 0x47 }, "the body came back changed")
+    }
+
     @Test("The relay is wanted only where the system refuses the origin")
     func trustProbeAnswersForTheOriginInHand() async throws {
         // An origin the system reaches is one AVPlayer reaches, so relaying it would move a whole
@@ -277,6 +341,76 @@ struct HLSOriginRelayAddressingTests {
 }
 
 #if os(macOS)
+
+    /// Serves a fixed-length body in slices with a pause between them, so a client can tell a body
+    /// that is being relayed as it arrives from one that was read whole first. Nothing else here can
+    /// distinguish the two: over loopback a held body is delivered fast enough to look immediate.
+    final class TricklingOrigin {
+        static let sliceBytes = 64 * 1024
+        static func totalBytes(slices: Int) -> Int { sliceBytes * slices }
+
+        let port: UInt16
+        private let process: Process
+        private let workDir: URL
+
+        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) {
+            guard let launched = PythonOrigin.launch(
+                prefix: "aether-trickle-origin",
+                script: Self.serverPy(slices: slices, pauseSeconds: pauseSeconds,
+                                      declaresLength: declaresLength))
+            else { return nil }
+            process = launched.process
+            port = launched.port
+            workDir = launched.workDir
+        }
+
+        func stop() {
+            process.terminate()
+            try? FileManager.default.removeItem(at: workDir)
+        }
+
+        private static func serverPy(slices: Int, pauseSeconds: Double, declaresLength: Bool)
+            -> String
+        {
+            """
+            import http.server, time
+
+            SLICE = \(sliceBytes)
+            SLICES = \(slices)
+            PAUSE = \(pauseSeconds)
+            DECLARE = \(declaresLength ? "True" : "False")
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                protocol_version = "HTTP/1.1"
+
+                def log_message(self, *args):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(200)
+                    if DECLARE:
+                        self.send_header("Content-Length", str(SLICE * SLICES))
+                    else:
+                        # No length to state, so the body ends with the connection. URLSession
+                        # reports -1 for it, which is the arm that has to be held rather than framed.
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.end_headers()
+                    for _ in range(SLICES):
+                        try:
+                            self.wfile.write(b"\\x47" * SLICE)
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        time.sleep(PAUSE)
+
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            print("READY", server.server_address[1], flush=True)
+            server.serve_forever()
+            """
+        }
+    }
 
     /// Writes `files` and `script` into a scratch directory, runs the script with the system
     /// Python, and waits for its "READY <port>" line. The two origins below differ only in what
