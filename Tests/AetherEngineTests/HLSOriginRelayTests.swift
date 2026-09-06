@@ -182,11 +182,8 @@ struct HLSOriginRelayAddressingTests {
         #expect(upstream.lastRange == "bytes=100-199", "the origin saw \(upstream.lastRange ?? "no range")")
     }
 
-    @Test("A metered origin arms the pacer the reader already reads")
-    func refusalArmsTheSharedPacer() async throws {
-        OriginRequestBudget.shared.resetForTesting()
-        defer { OriginRequestBudget.shared.resetForTesting() }
-
+    @Test("A metered origin is charged to the budget the reader already reads")
+    func refusalReachesTheSharedBudget() async throws {
         let upstream = try #require(RangeEchoOrigin(status: 429))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
@@ -199,9 +196,60 @@ struct HLSOriginRelayAddressingTests {
         _ = try await URLSession.shared.data(for: URLRequest(url: entry))
 
         // The budget is process-wide and per origin, so a refusal seen here has to be the same
-        // refusal the reader and the subtitle prefetcher would have been paced by.
-        #expect(OriginRequestBudget.shared.isPaced(origin),
-                "a 429 through the relay left the origin unpaced")
+        // refusal the reader and the subtitle prefetcher would have been metered by.
+        //
+        // Read off the counter and the learned limit rather than `isPaced`. The quiet ladder
+        // `isPaced` reports is switched off process-wide by `quietPeriodCapForTesting`, which two
+        // other suites set in their init and never restore, so in a full run this suite's answer
+        // would be decided by whether one of them happened to have started. The origin's port is
+        // this test's own, which is what keeps the counter this test's own.
+        let snapshot = try #require(OriginRequestBudget.shared.snapshot(for: origin))
+        #expect(snapshot.refusals == 1, "a 429 through the relay was charged \(snapshot.refusals) times")
+        #expect(snapshot.limit == 1, "the refusal did not bring the origin's concurrency down")
+    }
+
+    @Test("A blocking-reload request keeps the parameters that make it block")
+    func blockingReloadParametersReachTheOrigin() throws {
+        // AVPlayer appends _HLS_msn / _HLS_part to a playlist URL that advertises CAN-BLOCK-RELOAD
+        // (#441). The relay URL already carries a query, so they arrive alongside `origin`; dropped,
+        // the reload answers at once and the player asks again immediately.
+        let origin = URL(string: "https://media.example.com/hls/media.m3u8?ApiKey=k")!
+        let local = try #require(HLSOriginRelay.localURL(for: origin, port: 51234, token: token))
+        let asAVPlayerAsks = "\(local.query ?? "")&_HLS_msn=42&_HLS_part=3"
+
+        let upstream = try #require(HLSOriginRelay.originURL(fromQuery: asAVPlayerAsks))
+        #expect(upstream.path == "/hls/media.m3u8")
+        let query = try #require(upstream.query)
+        #expect(query.contains("ApiKey=k"), "the origin's own query was dropped: \(query)")
+        #expect(query.contains("_HLS_msn=42"), "the blocking-reload sequence was dropped: \(query)")
+        #expect(query.contains("_HLS_part=3"), "the blocking-reload part was dropped: \(query)")
+    }
+
+    @Test("An origin that says the resource is gone is not rewritten into a playlist")
+    func errorStatusIsNotLaunderedIntoAPlaylist() async throws {
+        // The path looks like a playlist and the body is whatever the origin serves with its 404.
+        // Rewritten and framed as 200, that reaches AVPlayer as a parse error instead of as the
+        // one word it can act on.
+        let upstream = try #require(RangeEchoOrigin(status: 404))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/hls/media.m3u8")!
+        let entry = try #require(server.relayURL(for: origin))
+        #expect(try await status(of: entry) == 404, "a refused playlist came back as a served one")
+    }
+
+    @Test("A header value from the origin cannot write a second response")
+    func headerValuesAreSanitised() {
+        let injected = "text/plain\r\nX-Injected: yes\r\n\r\nHTTP/1.1 200 OK"
+        let written = HLSLocalServer.headerValue(injected)
+        #expect(!written.contains("\r"))
+        #expect(!written.contains("\n"))
+        #expect(written.hasPrefix("text/plain"))
+        #expect(HLSLocalServer.headerValue("bytes 0-99/4096") == "bytes 0-99/4096")
     }
 
     private func status(of url: URL) async throws -> Int {

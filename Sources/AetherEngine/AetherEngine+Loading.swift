@@ -488,6 +488,11 @@ extension AetherEngine {
         // rewritten master, without them the relay stands alone.
         let playbackURL = await prepareRemoteHLSStandIn(
             originURL: url, options: options, expectedGeneration: bypassGeneration) ?? url
+        // With a relay in front, the item AVPlayer fails is a loopback 502 and the refused handshake
+        // happened out of its sight, so the classification has to be able to ask the side that made it.
+        if let relay = remoteHLSSubtitleProxy?.server.relay {
+            host.upstreamTrustRefusal = { [weak relay] in relay?.upstreamTrustRefusalCode }
+        }
 
         // Jellyfin HLS URLs carry auth (ApiKey / PlaySessionId / LiveStreamId) as query params, but
         // generic live HLS origins (IPTV / Stremio add-on channels) enforce per-stream Referer /

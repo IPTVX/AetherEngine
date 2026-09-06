@@ -41,6 +41,9 @@ final class NativeAVPlayerHost {
     @Published private(set) var failure: PlaybackErrorInfo?
     /// #50: monotonic token; bumped on each deferred .failed so a superseding failure or item swap cancels the in-flight confirmation.
     private var failureConfirmToken: Int = 0
+    /// AE#495: what the AE#495 relay knows about the origin's certificate, when the item this host
+    /// plays is served by one. Set by the engine at mount, read only while classifying a failure.
+    var upstreamTrustRefusal: (@Sendable () -> Int?)?
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false
@@ -938,7 +941,8 @@ final class NativeAVPlayerHost {
                                                            domain: (item.error as NSError?)?.domain)
                 return
             }
-            failure = Self.itemFailureInfo(desc: desc, itemError: item.error)
+            failure = Self.itemFailureInfo(desc: desc, itemError: item.error,
+                                           relayRefusalCode: upstreamTrustRefusal?())
             return
         }
 
@@ -966,7 +970,8 @@ final class NativeAVPlayerHost {
                     + "clock=\(String(format: "%.2f", self.renderedTime)))",
                     category: .engine
                 )
-                self.failure = Self.itemFailureInfo(desc: desc, itemError: item.error)
+                self.failure = Self.itemFailureInfo(desc: desc, itemError: item.error,
+                                                    relayRefusalCode: self.upstreamTrustRefusal?())
             } else {
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(self.sessionID) deferred failure cleared: player recovered "
@@ -2378,8 +2383,13 @@ extension NativeAVPlayerHost {
     /// below it in `NSUnderlyingErrorKey`, so a host reading domain and code alone sees AVFoundation
     /// giving up and nothing about why. Everything that is not a trust refusal keeps
     /// `nativeItemFailed` exactly as before.
-    nonisolated static func itemFailureInfo(desc: String, itemError: Error?) -> PlaybackErrorInfo {
-        if let code = TransportSecurityFailure.code(in: itemError) {
+    ///
+    /// `relayRefusalCode` is the same verdict reached one hop away. With the AE#495 relay mounted the
+    /// player's request went to loopback and came back a plain 502, so the chain it would have been
+    /// read off no longer exists on this side; the relay lost the handshake and remembers it.
+    nonisolated static func itemFailureInfo(desc: String, itemError: Error?,
+                                            relayRefusalCode: Int? = nil) -> PlaybackErrorInfo {
+        if let code = TransportSecurityFailure.code(in: itemError) ?? relayRefusalCode {
             return PlaybackErrorInfo(kind: .sourceCertificateRejected,
                                      message: TransportSecurityFailure.sentence(for: code),
                                      underlyingDomain: NSURLErrorDomain,

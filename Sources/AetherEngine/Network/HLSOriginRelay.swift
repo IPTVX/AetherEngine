@@ -42,6 +42,18 @@ final class HLSOriginRelay: @unchecked Sendable {
     /// now points at the local server.
     private var upstreamHeaders: [String: String] = [:]
 
+    /// The NSURLError code of the last upstream handshake this relay lost to system trust, if any.
+    ///
+    /// 6.69.0 classifies a refused certificate off the failed item's `NSUnderlyingErrorKey` chain,
+    /// and behind a relay that chain no longer exists: the player's request went to loopback and
+    /// came back a plain 502. So the refusal is remembered on the side the handshake actually
+    /// happened on, and `NativeAVPlayerHost` reads it when it classifies the failure.
+    var upstreamTrustRefusalCode: Int? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _upstreamTrustRefusalCode
+    }
+    private var _upstreamTrustRefusalCode: Int?
+
     /// Built in init rather than on first use: the server handles connections concurrently,
     /// and a lazy var raced by two of them can build two sessions where only one is ever
     /// invalidated.
@@ -101,16 +113,37 @@ final class HLSOriginRelay: @unchecked Sendable {
     }
 
     /// The origin a relay request names, or nil when the query does not carry one.
+    ///
+    /// Every other field the client put on the URL is carried onto the origin's own query rather
+    /// than dropped. AVPlayer appends `_HLS_msn` / `_HLS_part` / `_HLS_skip` to a playlist URL when
+    /// the playlist advertises `CAN-BLOCK-RELOAD` (#441), and a reload that should have blocked
+    /// until the next segment exists answers immediately without them, so the player asks again at
+    /// once and the origin is polled as fast as the loopback can answer.
     static func originURL(fromQuery query: String) -> URL? {
+        var origin: URL?
+        var carried: [String] = []
         for field in query.split(separator: "&") {
             let pair = field.split(separator: "=", maxSplits: 1)
-            guard pair.count == 2, pair[0] == originQueryKey else { continue }
+            guard pair.count == 2, pair[0] == originQueryKey else {
+                carried.append(String(field))
+                continue
+            }
             guard let decoded = String(pair[1]).removingPercentEncoding, !decoded.isEmpty else {
                 return nil
             }
-            return URL(string: decoded)
+            origin = URL(string: decoded)
         }
-        return nil
+        guard let origin else { return nil }
+        guard !carried.isEmpty,
+            var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+        else { return origin }
+        // percentEncoded, because both halves are already encoded: the origin's query came out of
+        // the round trip through `localURL`, and the client's fields arrived off the wire.
+        var fields: [String] = []
+        if let existing = components.percentEncodedQuery, !existing.isEmpty { fields.append(existing) }
+        fields.append(contentsOf: carried)
+        components.percentEncodedQuery = fields.joined(separator: "&")
+        return components.url ?? origin
     }
 
     /// The authority a rewritten playlist should point its sub-resources at: whatever the
@@ -152,7 +185,13 @@ final class HLSOriginRelay: @unchecked Sendable {
             return Response(status: 502, body: Data(), contentType: "text/plain", contentRange: nil)
         }
 
-        guard Self.looksLikePlaylist(url: origin, contentType: fetched.contentType) else {
+        // A body is only rewritten when the origin said it served one. An answer that is not a
+        // success is passed through as it stands: rewriting a 404 page and framing it as a 200
+        // playlist hands AVPlayer a parse error where the origin had said, in the one word the
+        // player can act on, that the resource is gone.
+        guard (200..<300).contains(fetched.status),
+            Self.looksLikePlaylist(url: origin, contentType: fetched.contentType)
+        else {
             return Response(
                 status: fetched.status, body: fetched.body,
                 contentType: fetched.contentType ?? "application/octet-stream",
@@ -219,6 +258,16 @@ final class HLSOriginRelay: @unchecked Sendable {
         session.dataTask(with: request) { data, response, error in
             defer { done.signal() }
             if let error {
+                if let code = TransportSecurityFailure.code(in: error) {
+                    self.stateLock.lock()
+                    self._upstreamTrustRefusalCode = code
+                    self.stateLock.unlock()
+                    EngineLog.emit(
+                        "[HLSOriginRelay] upstream TLS refused for \(origin.host ?? "origin") "
+                            + "(NSURLError \(code)): \(TransportSecurityFailure.sentence(for: code))",
+                        category: .hlsServer)
+                    return
+                }
                 EngineLog.emit(
                     "[HLSOriginRelay] upstream failed for \(origin.host ?? "origin"): "
                         + "\(error.localizedDescription)", category: .hlsServer)

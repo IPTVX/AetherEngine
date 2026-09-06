@@ -1106,9 +1106,9 @@ final class HLSLocalServer: @unchecked Sendable {
     private func sendRelay(fd: Int32, path: String, answer: HLSOriginRelay.Response) -> Bool {
         var header = "HTTP/1.1 \(answer.status) \(Self.reasonPhrase(answer.status))\r\n"
         header += "Content-Length: \(answer.body.count)\r\n"
-        header += "Content-Type: \(answer.contentType)\r\n"
+        header += "Content-Type: \(Self.headerValue(answer.contentType))\r\n"
         if let contentRange = answer.contentRange {
-            header += "Content-Range: \(contentRange)\r\n"
+            header += "Content-Range: \(Self.headerValue(contentRange))\r\n"
         }
         header += "Accept-Ranges: bytes\r\n"
         header += "Cache-Control: no-cache\r\n"
@@ -1121,6 +1121,17 @@ final class HLSLocalServer: @unchecked Sendable {
             return false
         }
         return answer.body.isEmpty ? true : writeAll(fd: fd, data: answer.body, path: path)
+    }
+
+    /// A header value written from somewhere else, made safe to concatenate into a response.
+    ///
+    /// Every other writer here builds its values itself; the relay mirrors what an origin sent.
+    /// A CR or LF inside one of those ends the header early and the rest of the value is read as
+    /// the next header, or as the start of the body, so an origin could write a second response
+    /// into this one. Control characters go, and the value is bounded.
+    static func headerValue(_ raw: String) -> String {
+        let cleaned = raw.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7F }
+        return String(String.UnicodeScalarView(cleaned.prefix(512)))
     }
 
     static func reasonPhrase(_ status: Int) -> String {
