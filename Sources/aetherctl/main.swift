@@ -71,6 +71,7 @@ func printUsage() {
       aetherctl validate [--no-dv] [--force-dv] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
+                 [--assert-dv]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]... [--paused]
@@ -141,12 +142,26 @@ func printUsage() {
                      pretend the display can't render Dolby Vision.
                      Mirrors what AetherEngine.loadNative passes on a
                      non-DV TV / on macOS (where displayCapabilities
-                     reports supportsDolbyVision=false anyway).
+                     reports supportsDolbyVision=false unless the
+                     session asserts it, see `play --assert-dv`).
       --force-dv     AE#455: serve a DV Profile 8.1 source as Profile 5
                      (dvh1 + dvcC profile=5, CODECS=dvh1.05.LL) so
                      AVPlayer composes the RPU itself. Only has an
                      effect together with --no-dv; a display that does
                      Dolby Vision keeps the P8.1 route.
+
+    Flags (play only):
+      --assert-dv    AE#493: set LoadOptions.panelPresentsDolbyVision,
+                     the host's assertion that this display presents
+                     Dolby Vision. macOS has no per-mode capability API
+                     (AVPlayer.availableHDRModes is unavailable there)
+                     and HDR eligibility answers HDR10 and HLG but not
+                     DV, so a DV source otherwise plays as its HDR10
+                     base layer with effective-format=hdr10. With the
+                     flag the session serves the DV route (dvh1 tags,
+                     SUPPLEMENTAL-CODECS, master playlist). A wrong
+                     claim costs one in-place media-playlist fallback
+                     (-11868 / -11848), not the item.
 
     Flags (serve / seektest):
       --throttle-kbps N
@@ -570,6 +585,10 @@ if first == "play" {
     let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
+    // AE#493: `LoadOptions.panelPresentsDolbyVision`, the host assertion. macOS has no per-mode display
+    // capability API, so DV is unclaimable from inside the engine and a Mac run routes every DV source
+    // as its HDR10 base layer until the host says otherwise.
+    let playAssertDV = takeFlag("--assert-dv", from: &rest)
     // AE#492: `LoadOptions.deinterlaceFieldRate`. `send_field` (the default) emits one frame per
     // FIELD, so a 29.97i source hands the layer 59.94 frames per second against 23.976 for a
     // progressive one. That is the confound in every per-seek drop count taken across the two, and
@@ -752,7 +771,8 @@ if first == "play" {
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
-                 deinterlaceFieldRate: playFieldRate))
+                 deinterlaceFieldRate: playFieldRate,
+                 assertDolbyVision: playAssertDV))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

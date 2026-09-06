@@ -689,11 +689,16 @@ extension AetherEngine {
         } else {
             ingestReopenFactory = nil
         }
+        // AE#493: the same session table the format clamp used in `load`, so the label and the served
+        // route answer to one display. The host's Dolby Vision assertion is part of it on the platforms
+        // that have no per-mode capability API to read.
+        let sessionDisplayCaps = Self.displayCapabilities
+            .assertingDolbyVision(loadedOptions.panelPresentsDolbyVision)
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
-            dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
-            displaySupportsHDR: Self.displayCapabilities.supportsHDR,
+            dvModeAvailable: sessionDisplayCaps.supportsDolbyVision,
+            displaySupportsHDR: sessionDisplayCaps.supportsHDR,
             keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
             forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
             matchContentEnabled: matchContentEnabled,
