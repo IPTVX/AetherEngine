@@ -74,6 +74,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
 | Custom input | Play any byte source via the `IOReader` protocol (`load(source:)`) |
 | Network | SMB2/3 shares via the optional `AetherEngineSMB` product (NTLMv2 / guest, read-only) |
+| Certificate trust | A media server behind a self-signed or private-CA certificate plays once the host answers for it: `EngineTLS.serverTrustEvaluator` is asked per challenge about the origin the challenge came from, so a LAN address behind a private certificate and a WAN address with a real one are decided separately. Covers every session the engine owns, and the native remote-HLS route too, where AVPlayer asks no delegate of its own: there the engine stands a loopback relay in front of the origin so the handshake runs where the evaluator is asked. The relay is mounted only for an origin the system actually refuses, and media is relayed as it arrives rather than read whole |
 
 ## How it compares
 
@@ -338,7 +339,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.70.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -552,10 +553,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.70.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.70.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "6.71.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 

@@ -641,8 +641,18 @@ address behind a private certificate and a WAN address with a real one, and acce
 not quietly relax the second. A host that pins an SPKI hash reads the protection space and decides.
 Returning true for everything is the blunt version and is one line.
 
-This governs the sessions the engine owns. A certificate the host does not accept still reaches the
-host as `PlaybackErrorKind.sourceCertificateRejected` rather than as unreadable media.
+This governs the sessions the engine owns, and the one route where AVPlayer does its own networking
+is covered too. On native remote HLS the origin URL would go to `AVURLAsset`, which asks no delegate
+about the certificate and which an ATS exception does not reach, so the engine stands a loopback
+relay in front of the origin and makes the request itself. That happens only for an origin the
+system actually refuses (one handshake decides, since an origin the system trusts is one AVPlayer
+reaches unaided), and media is relayed as it arrives rather than read whole, so the player's first
+byte and its throughput estimate are the origin's rather than the loopback's. Nothing about this is
+configurable: setting an evaluator is the whole opt-in.
+
+A certificate the host does not accept still reaches the host as
+`PlaybackErrorKind.sourceCertificateRejected` rather than as unreadable media, on the relayed route
+as well.
 
 ## Diagnostics
 
