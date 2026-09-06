@@ -3305,7 +3305,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let config = URLSessionConfiguration.default
         config.urlCache = nil
         config.timeoutIntervalForRequest = 20
-        return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }()
 
     /// Total size from a data-connection response: `Content-Range` total on a 206, or
@@ -3574,7 +3574,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// No invalidation overhead.
     private static let chunkSession: URLSession = {
         let config = makeSessionConfig()
-        return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }()
 
     /// #220: long-lived session for the persistent streaming path, paired with a per-task
@@ -3590,7 +3590,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     ///
     /// Never invalidated. Releasing a connection is `task.cancel()` now, not session teardown.
     private static let persistentSession: URLSession = {
-        URLSession(configuration: makeSessionConfig(longLived: true), delegate: nil, delegateQueue: nil)
+        URLSession(configuration: makeSessionConfig(longLived: true), delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }()
 
     /// Outcome of an abortable semaphore wait (issue #27).
@@ -3864,6 +3864,15 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        EngineTLS.resolve(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
         willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
@@ -3951,6 +3960,15 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     init(extraHeaders: [String: String], bodyLimit: Int?) {
         self.extraHeaders = extraHeaders
         self.bodyLimit = bodyLimit
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        EngineTLS.resolve(challenge, completionHandler: completionHandler)
     }
 
     func urlSession(
@@ -4076,6 +4094,15 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
 
     func urlSession(
         _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        EngineTLS.resolve(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
         dataTask: URLSessionDataTask,
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
@@ -4121,6 +4148,15 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
 
     init(extraHeaders: [String: String]) {
         self.extraHeaders = extraHeaders
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        EngineTLS.resolve(challenge, completionHandler: completionHandler)
     }
 
     func urlSession(
