@@ -12,6 +12,55 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.70.0] - 2026-09-06
+
+### Added
+
+- **`LoadOptions.panelPresentsDolbyVision`, the claim about a display the engine cannot make itself
+  (#493).** `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode
+  capability table at all, and 6.69.0 filled the rest of that table from `eligibleForHDRPlayback`
+  while leaving Dolby Vision unclaimed on purpose: eligibility proves EDR, not that AVFoundation
+  will accept a DV variant on this display. The claim now belongs to whoever knows the hardware. It
+  composes into the session table through `DisplayCapabilities.assertingDolbyVision`, which the
+  format clamp and the served route both read, so the published `videoFormat` and the DV signaling
+  cannot disagree about one display. `supportsHDR` rides along, because without it an asserted
+  session would build a DV master for a route `displaySupportsHDR == false` had already sent
+  media-direct, and that is the HDR10 base layer the assertion exists to prevent; HDR10 and HLG are
+  not implied, since every DV television also taking HDR10 is a fact about the market rather than an
+  entailment of the claim. An assertion only ever adds, so `false` cannot hide an observed
+  capability, and a wrong one costs the existing single in-place media-playlist fallback (-11868 /
+  -11848) at the same position rather than the item. Proposed in this shape by Rasmusmart57.
+- **`aetherctl play --assert-dv`.** The Dolby Vision route was reachable from no macOS harness at
+  all, which is why the reporter had to A/B a local patch instead of a session option. Measured
+  against Dolby's own Profile 5 UHD clip on macOS 26.5: `effective-format=hdr10` with
+  `dvModeAvailable=false` without the flag, `effective-format=dolbyVision` with
+  `dvModeAvailable=true` with it, both playing.
+
+### Changed
+
+- **`LoadOptions.panelIsInHDRMode` counts on every platform (#459).** It was read only where the
+  host suppressed display criteria; it is now an OR term over the engine's own criteria readout
+  everywhere, still defaulting to `false`, so a host that asserts nothing is exactly where it was.
+  The readout it backs up rests on the EDR headroom, which answers only around a dynamic-range
+  transition: an Apple TV whose output format is locked to HDR never makes one and reads as an SDR
+  panel forever, and on tvOS 27 the property stopped answering on at least one box even across a
+  real switch. Both assertions state themselves in the log next to what was observed
+  (`[DisplayCriteria] host assertion in force: ... (observed: panelReadout=... supportsDolbyVision=...)`),
+  so a wrong claim is legible in the same log as the rejection it can produce.
+
+### Fixed
+
+- **The DemoPlayerMac source build fronts its window.** `swift run` produces an unbundled
+  executable, and AppKit starts such a process under an activation policy of `.prohibited`: measured
+  on macOS 26.5, `lsappinfo` reported the demonstrator as `BackgroundOnly` before this change and
+  `Foreground` after. A prohibited process cannot be activated, so its window never becomes key,
+  which is what the space and escape keys in the demonstrator's README need, and macOS does not
+  engage EDR for a window that never fronts, so an HDR source composited as SDR. That made the
+  source build a misleading place to reproduce an HDR report, which is what the README points beta
+  testers at it for. The packaged `.app` takes `.regular` from its Info.plist and was never
+  affected. Caught by Rasmusmart57 as a false positive in his own SwiftPM harness, with
+  `NSWindow.occlusionState`.
+
 ## [6.69.0] - 2026-09-06
 
 ### Added
