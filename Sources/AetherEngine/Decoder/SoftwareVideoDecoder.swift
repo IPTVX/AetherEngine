@@ -50,6 +50,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         set { skipLock.lock(); _skipUntilPTS = newValue; skipLock.unlock() }
     }
     private var _skipUntilPTS: CMTime?
+
+    /// AE#492: guarded by `lock`, the same one `flush()` and `decode(packet:epoch:)` take.
+    private var _feedEpoch: UInt64 = 0
+    var feedEpoch: UInt64 {
+        lock.lock(); defer { lock.unlock() }; return _feedEpoch
+    }
     private let skipLock = NSLock()
 
     /// Clear the skip threshold only if it is still the one we acted on.
@@ -196,8 +202,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// an error, and returning on it both dropped the packet and left the output queue full, so
     /// every subsequent send hit the same wall: video wedged permanently until a seek flushed
     /// the decoder, while audio kept playing.
-    func decode(packet: UnsafeMutablePointer<AVPacket>) {
+    func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64? = nil) {
         lock.lock()
+        // AE#492: a packet decided on before a flush must not be sent after it. Checked here rather
+        // than at the caller because only this lock orders the two: `flush()` takes it to retire the
+        // epoch, so either the send happens first and the flush drops what it produced, or the flush
+        // happens first and the send never runs.
+        if let epoch, epoch != _feedEpoch { lock.unlock(); return }
         guard let ctx = codecContext else { lock.unlock(); return }
         var sendRet = avcodec_send_packet(ctx, packet)
         lock.unlock()
@@ -399,6 +410,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     func flush() {
         lock.lock()
         defer { lock.unlock() }
+        // AE#492: retires every packet a caller had already decided to send. Bumped under the lock,
+        // so a feed that has not reached `avcodec_send_packet` yet is refused from here on.
+        _feedEpoch &+= 1
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
         deinterlacer.teardown()
         guard let ctx = codecContext else { return }

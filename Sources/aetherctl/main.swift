@@ -570,6 +570,21 @@ if first == "play" {
     let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
+    // AE#492: `LoadOptions.deinterlaceFieldRate`. `send_field` (the default) emits one frame per
+    // FIELD, so a 29.97i source hands the layer 59.94 frames per second against 23.976 for a
+    // progressive one. That is the confound in every per-seek drop count taken across the two, and
+    // `--deinterlace-field-rate frame` is the A/B that separates the rate from the path.
+    let playFieldRateSpec = takeStringFlag("--deinterlace-field-rate", from: &rest)
+    let playFieldRate: DeinterlaceFieldRate
+    if let playFieldRateSpec {
+        guard let parsed = DeinterlaceFieldRate(rawValue: playFieldRateSpec) else {
+            print("ERROR: --deinterlace-field-rate takes field|frame, got '\(playFieldRateSpec)'")
+            exit(64)
+        }
+        playFieldRate = parsed
+    } else {
+        playFieldRate = .field
+    }
     // AE#462: force the audio pipeline to fail so the video-only drop is observable end to end.
     // There is no fixture for it: the drop needs a codec this build has no decoder for (AC-4 is the
     // realistic one), and a threshold that plausible is worth less than the real published value.
@@ -736,7 +751,8 @@ if first == "play" {
                  optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
                  declaredDuration: declaredDuration,
-                 httpHeaders: playHeaders))
+                 httpHeaders: playHeaders,
+                 deinterlaceFieldRate: playFieldRate))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
