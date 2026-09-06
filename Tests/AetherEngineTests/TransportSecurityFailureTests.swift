@@ -80,6 +80,29 @@ struct TransportSecurityFailureTests {
         #expect(info.underlyingCode == -11819)
     }
 
+    @Test("AE#495: behind the relay the refusal is read off the side that made the handshake")
+    func relayRefusalIsClassifiedWithoutAChain() {
+        // The relay answers the player a plain 502 from loopback, so the item's error chain carries
+        // no certificate anywhere. Without the relay's own verdict this reads as a bad gateway, which
+        // is the one thing it is not.
+        let asSeenThroughLoopback = NSError(domain: "AVFoundationErrorDomain", code: -11800)
+        let info = NativeAVPlayerHost.itemFailureInfo(
+            desc: "The operation could not be completed", itemError: asSeenThroughLoopback,
+            relayRefusalCode: NSURLErrorServerCertificateUntrusted)
+        #expect(info.kind == .sourceCertificateRejected)
+        #expect(info.underlyingDomain == NSURLErrorDomain)
+        #expect(info.underlyingCode == NSURLErrorServerCertificateUntrusted)
+    }
+
+    @Test("AE#495: a relay that never lost a handshake changes nothing")
+    func relayWithoutARefusalIsInert() {
+        let top = NSError(domain: "AVFoundationErrorDomain", code: -11819)
+        let info = NativeAVPlayerHost.itemFailureInfo(desc: "Cannot Complete Action", itemError: top,
+                                                      relayRefusalCode: nil)
+        #expect(info.kind == .nativeItemFailed)
+        #expect(info.underlyingCode == -11819)
+    }
+
     @Test("AE#495: the typed refusal survives the HLS layer instead of being wrapped as invalid data")
     func typedRefusalSurvivesTheWrapper() {
         let passed = HLSVideoEngine.openFailure(

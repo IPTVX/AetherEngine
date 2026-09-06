@@ -182,11 +182,8 @@ struct HLSOriginRelayAddressingTests {
         #expect(upstream.lastRange == "bytes=100-199", "the origin saw \(upstream.lastRange ?? "no range")")
     }
 
-    @Test("A metered origin arms the pacer the reader already reads")
-    func refusalArmsTheSharedPacer() async throws {
-        OriginRequestBudget.shared.resetForTesting()
-        defer { OriginRequestBudget.shared.resetForTesting() }
-
+    @Test("A metered origin is charged to the budget the reader already reads")
+    func refusalReachesTheSharedBudget() async throws {
         let upstream = try #require(RangeEchoOrigin(status: 429))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
@@ -199,9 +196,140 @@ struct HLSOriginRelayAddressingTests {
         _ = try await URLSession.shared.data(for: URLRequest(url: entry))
 
         // The budget is process-wide and per origin, so a refusal seen here has to be the same
-        // refusal the reader and the subtitle prefetcher would have been paced by.
-        #expect(OriginRequestBudget.shared.isPaced(origin),
-                "a 429 through the relay left the origin unpaced")
+        // refusal the reader and the subtitle prefetcher would have been metered by.
+        //
+        // Read off the counter and the learned limit rather than `isPaced`. The quiet ladder
+        // `isPaced` reports is switched off process-wide by `quietPeriodCapForTesting`, which two
+        // other suites set in their init and never restore, so in a full run this suite's answer
+        // would be decided by whether one of them happened to have started. The origin's port is
+        // this test's own, which is what keeps the counter this test's own.
+        let snapshot = try #require(OriginRequestBudget.shared.snapshot(for: origin))
+        #expect(snapshot.refusals == 1, "a 429 through the relay was charged \(snapshot.refusals) times")
+        #expect(snapshot.limit == 1, "the refusal did not bring the origin's concurrency down")
+    }
+
+    @Test("A blocking-reload request keeps the parameters that make it block")
+    func blockingReloadParametersReachTheOrigin() throws {
+        // AVPlayer appends _HLS_msn / _HLS_part to a playlist URL that advertises CAN-BLOCK-RELOAD
+        // (#441). The relay URL already carries a query, so they arrive alongside `origin`; dropped,
+        // the reload answers at once and the player asks again immediately.
+        let origin = URL(string: "https://media.example.com/hls/media.m3u8?ApiKey=k")!
+        let local = try #require(HLSOriginRelay.localURL(for: origin, port: 51234, token: token))
+        let asAVPlayerAsks = "\(local.query ?? "")&_HLS_msn=42&_HLS_part=3"
+
+        let upstream = try #require(HLSOriginRelay.originURL(fromQuery: asAVPlayerAsks))
+        #expect(upstream.path == "/hls/media.m3u8")
+        let query = try #require(upstream.query)
+        #expect(query.contains("ApiKey=k"), "the origin's own query was dropped: \(query)")
+        #expect(query.contains("_HLS_msn=42"), "the blocking-reload sequence was dropped: \(query)")
+        #expect(query.contains("_HLS_part=3"), "the blocking-reload part was dropped: \(query)")
+    }
+
+    @Test("An origin that says the resource is gone is not rewritten into a playlist")
+    func errorStatusIsNotLaunderedIntoAPlaylist() async throws {
+        // The path looks like a playlist and the body is whatever the origin serves with its 404.
+        // Rewritten and framed as 200, that reaches AVPlayer as a parse error instead of as the
+        // one word it can act on.
+        let upstream = try #require(RangeEchoOrigin(status: 404))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/hls/media.m3u8")!
+        let entry = try #require(server.relayURL(for: origin))
+        #expect(try await status(of: entry) == 404, "a refused playlist came back as a served one")
+    }
+
+    @Test("A segment reaches the player while the origin is still sending it")
+    func mediaIsRelayedAsItArrives() async throws {
+        // Held to the last byte, a segment puts its whole download in front of the player's first
+        // byte: AVPlayer abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
+        // and it sizes the next rendition off what it measured, which behind a buffer is a loopback
+        // burst rather than the link.
+        //
+        // The origin sends its head and one slice and then holds the rest for far longer than this
+        // client will wait. A relay that streams answers in milliseconds; one that reads the body
+        // first cannot answer at all until the origin is done, so the wait is the whole discriminator
+        // and it does not turn on how loaded the machine is.
+        let upstream = try #require(TricklingOrigin(slices: 2, pauseSeconds: 20))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/movie.ts")!
+        let entry = try #require(server.relayURL(for: origin))
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        let started = Date()
+        let (bytes, response) = try await session.bytes(for: URLRequest(url: entry))
+        let headAt = Date().timeIntervalSince(started)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(response.expectedContentLength == Int64(TricklingOrigin.totalBytes(slices: 2)),
+                "the length the origin stated did not survive")
+        #expect(headAt < 5, "the answer only began after the origin had finished (\(headAt)s)")
+
+        for try await byte in bytes {
+            #expect(byte == 0x47, "not an MPEG-TS sync byte")
+            break
+        }
+        #expect(Date().timeIntervalSince(started) < 5, "the first byte waited for the whole body")
+    }
+
+    @Test("A body of unstated length is held, and held is not the same as rewritten")
+    func heldMediaIsStillMedia() async throws {
+        // A body with no Content-Length cannot be framed for the player without measuring it, so it
+        // is read whole. What must not follow is that a held body is treated as a playlist: the
+        // rewriter would walk MPEG-TS as lines of text.
+        let upstream = try #require(TricklingOrigin(declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay()
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let origin = URL(string: "http://127.0.0.1:\(upstream.port)/movie.ts")!
+        let entry = try #require(server.relayURL(for: origin))
+
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(body.count == TricklingOrigin.totalBytes(slices: 8), "relayed \(body.count) bytes")
+        #expect(body.allSatisfy { $0 == 0x47 }, "the body came back changed")
+    }
+
+    @Test("The relay is wanted only where the system refuses the origin")
+    func trustProbeAnswersForTheOriginInHand() async throws {
+        // An origin the system reaches is one AVPlayer reaches, so relaying it would move a whole
+        // session's bytes through the process for nothing.
+        let reachable = try #require(RangeEchoOrigin())
+        defer { reachable.stop() }
+        let reached = await HLSOriginRelay.systemTrustRefuses(
+            URL(string: "http://127.0.0.1:\(reachable.port)/movie.ts")!)
+        #expect(reached == false, "a reachable origin was read as a trust refusal")
+
+        // An origin that is simply down is not a trust refusal either. It fails the direct route as
+        // well, and a relay saves nothing.
+        let down = await HLSOriginRelay.systemTrustRefuses(URL(string: "https://127.0.0.1:9/x.m3u8")!)
+        #expect(down == false, "an unreachable origin was read as a trust refusal")
+    }
+
+    @Test("A header value from the origin cannot write a second response")
+    func headerValuesAreSanitised() {
+        let injected = "text/plain\r\nX-Injected: yes\r\n\r\nHTTP/1.1 200 OK"
+        let written = HLSLocalServer.headerValue(injected)
+        #expect(!written.contains("\r"))
+        #expect(!written.contains("\n"))
+        #expect(written.hasPrefix("text/plain"))
+        #expect(HLSLocalServer.headerValue("bytes 0-99/4096") == "bytes 0-99/4096")
     }
 
     private func status(of url: URL) async throws -> Int {
@@ -213,6 +341,76 @@ struct HLSOriginRelayAddressingTests {
 }
 
 #if os(macOS)
+
+    /// Serves a fixed-length body in slices with a pause between them, so a client can tell a body
+    /// that is being relayed as it arrives from one that was read whole first. Nothing else here can
+    /// distinguish the two: over loopback a held body is delivered fast enough to look immediate.
+    final class TricklingOrigin {
+        static let sliceBytes = 64 * 1024
+        static func totalBytes(slices: Int) -> Int { sliceBytes * slices }
+
+        let port: UInt16
+        private let process: Process
+        private let workDir: URL
+
+        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) {
+            guard let launched = PythonOrigin.launch(
+                prefix: "aether-trickle-origin",
+                script: Self.serverPy(slices: slices, pauseSeconds: pauseSeconds,
+                                      declaresLength: declaresLength))
+            else { return nil }
+            process = launched.process
+            port = launched.port
+            workDir = launched.workDir
+        }
+
+        func stop() {
+            process.terminate()
+            try? FileManager.default.removeItem(at: workDir)
+        }
+
+        private static func serverPy(slices: Int, pauseSeconds: Double, declaresLength: Bool)
+            -> String
+        {
+            """
+            import http.server, time
+
+            SLICE = \(sliceBytes)
+            SLICES = \(slices)
+            PAUSE = \(pauseSeconds)
+            DECLARE = \(declaresLength ? "True" : "False")
+
+            class Handler(http.server.BaseHTTPRequestHandler):
+                protocol_version = "HTTP/1.1"
+
+                def log_message(self, *args):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(200)
+                    if DECLARE:
+                        self.send_header("Content-Length", str(SLICE * SLICES))
+                    else:
+                        # No length to state, so the body ends with the connection. URLSession
+                        # reports -1 for it, which is the arm that has to be held rather than framed.
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.end_headers()
+                    for _ in range(SLICES):
+                        try:
+                            self.wfile.write(b"\\x47" * SLICE)
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        time.sleep(PAUSE)
+
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            print("READY", server.server_address[1], flush=True)
+            server.serve_forever()
+            """
+        }
+    }
 
     /// Writes `files` and `script` into a scratch directory, runs the script with the system
     /// Python, and waits for its "READY <port>" line. The two origins below differ only in what

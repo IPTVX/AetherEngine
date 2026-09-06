@@ -42,6 +42,18 @@ final class HLSOriginRelay: @unchecked Sendable {
     /// now points at the local server.
     private var upstreamHeaders: [String: String] = [:]
 
+    /// The NSURLError code of the last upstream handshake this relay lost to system trust, if any.
+    ///
+    /// 6.69.0 classifies a refused certificate off the failed item's `NSUnderlyingErrorKey` chain,
+    /// and behind a relay that chain no longer exists: the player's request went to loopback and
+    /// came back a plain 502. So the refusal is remembered on the side the handshake actually
+    /// happened on, and `NativeAVPlayerHost` reads it when it classifies the failure.
+    var upstreamTrustRefusalCode: Int? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _upstreamTrustRefusalCode
+    }
+    private var _upstreamTrustRefusalCode: Int?
+
     /// Built in init rather than on first use: the server handles connections concurrently,
     /// and a lazy var raced by two of them can build two sessions where only one is ever
     /// invalidated.
@@ -60,6 +72,54 @@ final class HLSOriginRelay: @unchecked Sendable {
     func stop() {
         session.invalidateAndCancel()
     }
+
+    // MARK: - Whether a relay is wanted at all
+
+    /// One handshake with `origin`, made the way AVPlayer would make it, answering whether system
+    /// trust refuses it.
+    ///
+    /// Mounting the relay on every https origin a host with an evaluator ever plays would move every
+    /// byte of every session through this process, for origins AVPlayer can open by itself. The
+    /// evaluator cannot be asked instead: at load time there is no protection space and no
+    /// `serverTrust`, so a host that reads either would be answering about nothing. The system can be
+    /// asked, and its answer is exactly the question, because an origin it trusts is one the native
+    /// route reaches unaided.
+    ///
+    /// A range of one byte rather than a HEAD: origins that serve media commonly answer the first and
+    /// not the second, and either way the handshake is what is being read. Anything that is not a
+    /// trust refusal, an unreachable host, a timeout, a 500, answers false: those fail the load on the
+    /// direct route too, and a relay would not save them.
+    static func systemTrustRefuses(_ origin: URL, headers: [String: String] = [:]) async -> Bool {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = trustProbeSeconds
+        config.timeoutIntervalForResource = trustProbeSeconds
+        // No delegate on purpose. This session must answer the way AVPlayer's own networking does,
+        // which is system trust and nothing else; handing it `EngineTLS.sessionDelegate` would ask
+        // the host and get back the answer that hides what is being measured.
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+
+        var request = URLRequest(url: origin)
+        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        do {
+            _ = try await session.data(for: request)
+            return false
+        } catch {
+            guard let code = TransportSecurityFailure.code(in: error) else { return false }
+            EngineLog.emit(
+                "[HLSOriginRelay] \(origin.host ?? "origin") is not trusted by the system "
+                    + "(NSURLError \(code)); the relay makes the handshake so the evaluator is asked",
+                category: .hlsServer)
+            return true
+        }
+    }
+
+    /// Long enough for a LAN server to finish a handshake and short enough that an origin which is
+    /// simply down does not hold a load open. A timeout answers false, which is the direct route.
+    private static let trustProbeSeconds: TimeInterval = 4
 
     // MARK: - Admission
 
@@ -101,16 +161,37 @@ final class HLSOriginRelay: @unchecked Sendable {
     }
 
     /// The origin a relay request names, or nil when the query does not carry one.
+    ///
+    /// Every other field the client put on the URL is carried onto the origin's own query rather
+    /// than dropped. AVPlayer appends `_HLS_msn` / `_HLS_part` / `_HLS_skip` to a playlist URL when
+    /// the playlist advertises `CAN-BLOCK-RELOAD` (#441), and a reload that should have blocked
+    /// until the next segment exists answers immediately without them, so the player asks again at
+    /// once and the origin is polled as fast as the loopback can answer.
     static func originURL(fromQuery query: String) -> URL? {
+        var origin: URL?
+        var carried: [String] = []
         for field in query.split(separator: "&") {
             let pair = field.split(separator: "=", maxSplits: 1)
-            guard pair.count == 2, pair[0] == originQueryKey else { continue }
+            guard pair.count == 2, pair[0] == originQueryKey else {
+                carried.append(String(field))
+                continue
+            }
             guard let decoded = String(pair[1]).removingPercentEncoding, !decoded.isEmpty else {
                 return nil
             }
-            return URL(string: decoded)
+            origin = URL(string: decoded)
         }
-        return nil
+        guard let origin else { return nil }
+        guard !carried.isEmpty,
+            var components = URLComponents(url: origin, resolvingAgainstBaseURL: false)
+        else { return origin }
+        // percentEncoded, because both halves are already encoded: the origin's query came out of
+        // the round trip through `localURL`, and the client's fields arrived off the wire.
+        var fields: [String] = []
+        if let existing = components.percentEncodedQuery, !existing.isEmpty { fields.append(existing) }
+        fields.append(contentsOf: carried)
+        components.percentEncodedQuery = fields.joined(separator: "&")
+        return components.url ?? origin
     }
 
     /// The authority a rewritten playlist should point its sub-resources at: whatever the
@@ -131,9 +212,31 @@ final class HLSOriginRelay: @unchecked Sendable {
 
     // MARK: - Serving
 
+    /// How a streamed answer reaches the socket. `head` is called once, then `body` for every chunk
+    /// as it arrives off the wire. Both answer false when the write failed, which ends the transfer.
+    struct Sink {
+        let head: @Sendable (_ status: Int, _ contentType: String, _ contentRange: String?,
+                             _ contentLength: Int) -> Bool
+        let body: @Sendable (Data) -> Bool
+    }
+
+    /// What the relay did with one request.
+    enum Outcome {
+        /// A complete answer for the server to write.
+        case answer(Response)
+        /// Already written through the sink as it arrived. The flag is whether the writes held.
+        case streamed(ok: Bool)
+    }
+
     /// Answers one relay request. Nil when the query names no origin the relay could fetch.
-    func respond(query: String, host: String?, range: String?, port: UInt16, token: String)
-        -> Response?
+    ///
+    /// A body that has to be rewritten (a playlist) or read as a whole (anything the origin refused)
+    /// is held and comes back as `.answer`. Everything else, which is every media byte, is handed to
+    /// the sink as it arrives: buffering a segment would put its whole download time in front of the
+    /// player's first byte, and hand AVPlayer's throughput estimate a loopback burst to size the next
+    /// rendition from.
+    func respond(query: String, host: String?, range: String?, port: UInt16, token: String,
+                 sink: Sink) -> Outcome?
     {
         guard let origin = Self.originURL(fromQuery: query) else { return nil }
         guard let key = Self.originKey(for: origin) else { return nil }
@@ -145,28 +248,42 @@ final class HLSOriginRelay: @unchecked Sendable {
         guard permitted else {
             EngineLog.emit(
                 "[HLSOriginRelay] -> 403 origin was never advertised: \(key)", category: .hlsServer)
-            return Response(status: 403, body: Data(), contentType: "text/plain", contentRange: nil)
+            return .answer(
+                Response(status: 403, body: Data(), contentType: "text/plain", contentRange: nil))
         }
 
-        guard let fetched = fetch(origin: origin, headers: headers, range: range) else {
-            return Response(status: 502, body: Data(), contentType: "text/plain", contentRange: nil)
+        switch fetch(origin: origin, headers: headers, range: range, sink: sink) {
+        case .failed:
+            return .answer(
+                Response(status: 502, body: Data(), contentType: "text/plain", contentRange: nil))
+        case .streamed(let ok):
+            return .streamed(ok: ok)
+        case .held(let fetched):
+            // A body is only rewritten when the origin said it served one AND it is a playlist. An
+            // answer that is not a success is passed through as it stands: rewriting a 404 page and
+            // framing it as a 200 playlist hands AVPlayer a parse error where the origin had said,
+            // in the one word the player can act on, that the resource is gone. The playlist test is
+            // asked again here rather than inferred from the hold, because a body of unstated length
+            // is held too and a chunked segment is not text to rewrite.
+            guard (200..<300).contains(fetched.status),
+                Self.looksLikePlaylist(url: origin, contentType: fetched.contentType)
+            else {
+                return .answer(
+                    Response(
+                        status: fetched.status, body: fetched.body,
+                        contentType: fetched.contentType ?? "application/octet-stream",
+                        contentRange: fetched.contentRange))
+            }
+            let rewritten = rewritePlaylist(
+                String(decoding: fetched.body, as: UTF8.self), relativeTo: origin,
+                authority: Self.rewriteAuthority(host: host), port: port, token: token)
+            // A rewritten body has a different length than the range that produced it, so the
+            // partial framing cannot survive. Playlists are small and nothing ranges them.
+            return .answer(
+                Response(
+                    status: 200, body: Data(rewritten.utf8),
+                    contentType: "application/vnd.apple.mpegurl", contentRange: nil))
         }
-
-        guard Self.looksLikePlaylist(url: origin, contentType: fetched.contentType) else {
-            return Response(
-                status: fetched.status, body: fetched.body,
-                contentType: fetched.contentType ?? "application/octet-stream",
-                contentRange: fetched.contentRange)
-        }
-
-        let rewritten = rewritePlaylist(
-            String(decoding: fetched.body, as: UTF8.self), relativeTo: origin,
-            authority: Self.rewriteAuthority(host: host), port: port, token: token)
-        // A rewritten body has a different length than the range that produced it, so the
-        // partial framing cannot survive. Playlists are small and nothing ranges them.
-        return Response(
-            status: 200, body: Data(rewritten.utf8),
-            contentType: "application/vnd.apple.mpegurl", contentRange: nil)
     }
 
     private static func looksLikePlaylist(url: URL, contentType: String?) -> Bool {
@@ -186,6 +303,15 @@ final class HLSOriginRelay: @unchecked Sendable {
         let contentRange: String?
     }
 
+    private enum Upstream {
+        /// Written through the sink already; the flag is whether the writes held.
+        case streamed(ok: Bool)
+        /// Read whole, because it has to be rewritten or because the origin refused.
+        case held(Fetched)
+        /// Never got a response head. The trust refusal, if that is what it was, is already recorded.
+        case failed
+    }
+
     /// The answers that mean "you are asking too often", which arm the pacer for this origin.
     private static let refusalStatuses: Set<Int> = [429, 503, 509]
 
@@ -196,13 +322,17 @@ final class HLSOriginRelay: @unchecked Sendable {
     private static let slotWaitSeconds: TimeInterval = 2.5
 
     /// Synchronous because the server answers a request on its own worker thread and the
-    /// response has to be written before it returns.
+    /// response has to be written before it returns. That thread does the writing too: the
+    /// delegate queue is serial across every task on this session, so a socket the player has
+    /// stopped reading would otherwise hold up the delivery of the other fetches in flight.
     ///
     /// The request is charged to `OriginRequestBudget` (#377, #465) like every other fetch the
     /// engine makes. Without that, an origin metering the reader would be paced on one path and
     /// asked freely on this one, and a 429 answered to the player would never arm the pacer that
     /// the reader and the subtitle prefetcher already read.
-    private func fetch(origin: URL, headers: [String: String], range: String?) -> Fetched? {
+    private func fetch(origin: URL, headers: [String: String], range: String?, sink: Sink)
+        -> Upstream
+    {
         var request = URLRequest(url: origin)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         // Forwarded verbatim rather than parsed and rebuilt: the remote HLS path leans on byte
@@ -214,34 +344,81 @@ final class HLSOriginRelay: @unchecked Sendable {
             for: origin, label: "relay", timeout: Self.slotWaitSeconds)
         defer { OriginRequestBudget.shared.release(ticket) }
 
-        var out: Fetched?
-        let done = DispatchSemaphore(value: 0)
-        session.dataTask(with: request) { data, response, error in
-            defer { done.signal() }
-            if let error {
-                EngineLog.emit(
-                    "[HLSOriginRelay] upstream failed for \(origin.host ?? "origin"): "
-                        + "\(error.localizedDescription)", category: .hlsServer)
-                return
+        let pump = UpstreamPump()
+        let task = session.dataTask(with: request)
+        task.delegate = pump
+        task.resume()
+        // abandon before cancel: a body parked at the high-water mark is waiting on a consumer, and
+        // cancelling the task does not wake it.
+        defer { pump.abandon(); task.cancel() }
+
+        guard let http = pump.awaitHead() else {
+            note(failure: pump.awaitFailure(), origin: origin)
+            return .failed
+        }
+        // #388: a portal that redirects to the host serving the bytes is one origin as far
+        // as requests are concerned, so the chain is folded rather than book-kept per hop.
+        if let finalURL = http.url, finalURL != origin {
+            OriginRequestBudget.shared.noteRedirect(from: origin, to: finalURL)
+        }
+        if Self.refusalStatuses.contains(http.statusCode) {
+            OriginRequestBudget.shared.noteRefusal(
+                for: http.url ?? origin, status: http.statusCode,
+                retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
+        }
+
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")
+        let contentRange = http.value(forHTTPHeaderField: "Content-Range")
+        // A length the origin did not state cannot be framed for the player without buffering the
+        // body to measure it, and a playlist has to be read whole to be rewritten at all.
+        let declaredLength = http.expectedContentLength
+        let mustHold = declaredLength < 0
+            || !(200..<300).contains(http.statusCode)
+            || Self.looksLikePlaylist(url: origin, contentType: contentType)
+        guard !mustHold else {
+            let body = pump.awaitWholeBody()
+            if let error = pump.awaitFailure() {
+                // A playlist read halfway is not a playlist, and the framing of a held answer is its
+                // own length, so there is nothing here worth passing on.
+                note(failure: error, origin: origin)
+                return .failed
             }
-            guard let http = response as? HTTPURLResponse else { return }
-            // #388: a portal that redirects to the host serving the bytes is one origin as far
-            // as requests are concerned, so the chain is folded rather than book-kept per hop.
-            if let finalURL = http.url, finalURL != origin {
-                OriginRequestBudget.shared.noteRedirect(from: origin, to: finalURL)
-            }
-            if Self.refusalStatuses.contains(http.statusCode) {
-                OriginRequestBudget.shared.noteRefusal(
-                    for: http.url ?? origin, status: http.statusCode,
-                    retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
-            }
-            out = Fetched(
-                status: http.statusCode, body: data ?? Data(),
-                contentType: http.value(forHTTPHeaderField: "Content-Type"),
-                contentRange: http.value(forHTTPHeaderField: "Content-Range"))
-        }.resume()
-        done.wait()
-        return out
+            return .held(
+                Fetched(status: http.statusCode, body: body, contentType: contentType,
+                        contentRange: contentRange))
+        }
+
+        guard sink.head(http.statusCode, contentType ?? "application/octet-stream", contentRange,
+                        Int(declaredLength))
+        else { return .streamed(ok: false) }
+        let written = pump.drain(into: sink.body)
+        // A transport error after the head is already out leaves the body short of the length that
+        // was promised, so the answer cannot be finished; the server closes the connection on false.
+        if let error = pump.awaitFailure() {
+            note(failure: error, origin: origin)
+            return .streamed(ok: false)
+        }
+        return .streamed(ok: written)
+    }
+
+    /// Remembers a lost handshake and says so. Everything else is one line and no state: a relay
+    /// that could not reach its origin is a 502 either way, but a refused certificate is the one
+    /// failure whose reason cannot be read anywhere else once the player is talking to loopback.
+    private func note(failure: Error?, origin: URL) {
+        guard let failure else { return }
+        if let code = TransportSecurityFailure.code(in: failure) {
+            stateLock.lock()
+            _upstreamTrustRefusalCode = code
+            stateLock.unlock()
+            EngineLog.emit(
+                "[HLSOriginRelay] upstream TLS refused for \(origin.host ?? "origin") "
+                    + "(NSURLError \(code)): \(TransportSecurityFailure.sentence(for: code))",
+                category: .hlsServer)
+            return
+        }
+        EngineLog.emit(
+            "[HLSOriginRelay] upstream failed for \(origin.host ?? "origin"): "
+                + "\(failure.localizedDescription)", category: .hlsServer)
     }
 
     // MARK: - Playlist rewriting
@@ -303,5 +480,136 @@ final class HLSOriginRelay: @unchecked Sendable {
         let value = String(line[afterQuote..<closing])
         guard !value.isEmpty else { return line }
         return line.replacingCharacters(in: afterQuote..<closing, with: rewrite(value))
+    }
+}
+
+/// AE#495: one upstream relay fetch, delivered to whoever is waiting on it rather than collected.
+///
+/// The server's worker thread is blocked for the whole of a relayed request anyway, so it is the
+/// thread that writes: this only has to hand it the head as soon as it exists and the bytes as they
+/// land. Holding them here instead, and writing from the delegate callback, would put a socket the
+/// player has stopped reading in front of every other task on this session's serial delegate queue.
+///
+/// The bound is what makes the handoff backpressure rather than an unbounded copy of the body: the
+/// producer waits once the consumer is that far behind, which is the same shape the direct route has
+/// when a socket stops draining.
+private final class UpstreamPump: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+
+    /// One segment's worth of slack. Enough that a fast origin never waits on a loopback write, small
+    /// enough that a stalled player cannot turn a session into a heap of parked segments.
+    private static let highWaterBytes = 4 * 1024 * 1024
+
+    private let condition = NSCondition()
+    private var head: HTTPURLResponse?
+    private var pending = Data()
+    private var finished = false
+    private var failure: Error?
+    private var consumerGaveUp = false
+
+    // MARK: - Consumer, on the server's worker thread
+
+    /// The response head, or nil when the fetch failed before there was one.
+    func awaitHead() -> HTTPURLResponse? {
+        condition.lock()
+        defer { condition.unlock() }
+        while head == nil && !finished { condition.wait() }
+        return head
+    }
+
+    /// Every byte of the body, for the answers that have to be read whole.
+    func awaitWholeBody() -> Data {
+        var body = Data()
+        _ = drain { chunk in
+            body.append(chunk)
+            return true
+        }
+        return body
+    }
+
+    /// Hands each chunk to `write` as it arrives, until the body ends or a write fails. Returns
+    /// whether every write held.
+    ///
+    /// Once `finished` is visible under the lock the producer has nothing more to add, because the
+    /// completion callback is ordered behind every data callback on the delegate queue, so the copy
+    /// taken with it is the tail of the body.
+    func drain(into write: (Data) -> Bool) -> Bool {
+        while true {
+            condition.lock()
+            while pending.isEmpty && !finished { condition.wait() }
+            let chunk = pending
+            pending.removeAll(keepingCapacity: true)
+            let ended = finished
+            condition.broadcast()
+            condition.unlock()
+
+            if !chunk.isEmpty, !write(chunk) {
+                abandon()
+                return false
+            }
+            if ended { return true }
+        }
+    }
+
+    /// Stops the producer waiting on a consumer that is no longer there. Without it a body parked at
+    /// the high-water mark holds the delegate queue for the life of the session.
+    func abandon() {
+        condition.lock()
+        consumerGaveUp = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    /// The transport error, once the fetch has finished. Only meaningful after a drain.
+    func awaitFailure() -> Error? {
+        condition.lock()
+        defer { condition.unlock() }
+        while !finished { condition.wait() }
+        return failure
+    }
+
+    // MARK: - Producer, on the session's delegate queue
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        condition.lock()
+        head = http
+        condition.broadcast()
+        condition.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        condition.lock()
+        while pending.count >= Self.highWaterBytes && !consumerGaveUp { condition.wait() }
+        let abandoned = consumerGaveUp
+        if !abandoned {
+            pending.append(data)
+            condition.broadcast()
+        }
+        condition.unlock()
+        if abandoned { dataTask.cancel() }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        condition.lock()
+        failure = error
+        finished = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    /// A task delegate answers for its own task, and a relay fetch is the one place the trust
+    /// evaluator has to be reached on the player's behalf.
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        EngineTLS.resolve(challenge, completionHandler: completionHandler)
     }
 }

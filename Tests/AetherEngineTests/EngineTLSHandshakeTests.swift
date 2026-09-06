@@ -185,6 +185,23 @@
                     "an origin the evaluator declined was served anyway")
         }
 
+        @Test("A self-signed origin is what the relay is mounted for")
+        func trustProbeNamesTheSelfSignedOrigin() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            // The probe asks the system, not the evaluator, so an answer already given here must not
+            // change what it reads: what is being measured is whether AVPlayer could reach the origin
+            // unaided, and AVPlayer never sees the evaluator.
+            let previous = EngineTLS.serverTrustEvaluator
+            defer { EngineTLS.serverTrustEvaluator = previous }
+            EngineTLS.serverTrustEvaluator = { _ in true }
+
+            let refused = await HLSOriginRelay.systemTrustRefuses(
+                URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!)
+            #expect(refused, "the origin the relay exists for was read as one AVPlayer could reach")
+        }
+
         private static func relayServer() throws -> HLSLocalServer {
             let server = HLSLocalServer(relay: HLSOriginRelay())
             try server.start()

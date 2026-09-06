@@ -55,6 +55,56 @@ the public-API contract.
   `URLSession.shared`, which cannot carry a delegate and was the one engine
   fetch no host trust decision could reach.
 
+### Changed (relay)
+
+- **The relay is mounted for the origins that need it, not for every https
+  origin a host with an evaluator plays.** Whether one is wanted is decided by
+  a single handshake with the origin, made the way AVPlayer makes its own, and
+  an origin the system trusts is one the native route reaches unaided. The
+  evaluator cannot answer this at load time (no protection space, no
+  `serverTrust`), and "an evaluator exists" says very little about the origin in
+  hand: a host commonly answers for a LAN address and holds a WAN address with a
+  real certificate. Without this, opting one server in moved every byte of every
+  remote-HLS session through the process. The evaluator's own answer is still
+  put at the handshake the relay makes.
+
+### Fixed
+
+- **A relayed segment reaches the player while the origin is still sending
+  it.** The relay read each body to its last byte before writing anything, which
+  put a segment's whole download in front of the player's first byte: AVPlayer
+  abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
+  and it sizes the next rendition off what it measured, which behind a buffer is
+  a loopback burst rather than the link. Media is now handed to the socket as it
+  arrives, written by the thread that is already parked on the request so a
+  socket the player stopped reading cannot hold up the other fetches on the
+  session. Playlists, refusals and bodies of unstated length are still read
+  whole, because they have to be rewritten, or framed by measuring.
+
+- **A refused certificate stays legible behind the relay.** 6.69.0 reads the
+  refusal off the failed item's `NSUnderlyingErrorKey` chain, and with a relay
+  in front the player's request went to loopback and came back a plain 502, so
+  that chain no longer carries one. The relay remembers the handshake it lost
+  and the item classification asks it, which is how the session error goes back
+  to naming the certificate instead of a bad gateway.
+
+- **A blocking reload through the relay keeps blocking.** AVPlayer appends
+  `_HLS_msn` / `_HLS_part` to a playlist URL that advertises
+  `CAN-BLOCK-RELOAD` (#441), and the relay read its own `origin` field out of
+  the query and dropped the rest, so the reload answered at once and the player
+  asked again immediately. Every field the client added is now carried onto the
+  origin's own query.
+
+- **An origin that refuses a playlist is not rewritten into a served one.** A
+  404 or a 5xx on a `.m3u8` was rewritten and framed as 200, which reaches
+  AVPlayer as a parse error rather than as the one word it can act on. Only a
+  success is rewritten; anything else is passed through as it stands.
+
+- A `Content-Type` or `Content-Range` the origin sends is written into the
+  relayed response with its control characters removed. A CR or LF in one of
+  them ends the header early, so an origin could write a second response into
+  the first.
+
 ## [6.70.0] - 2026-09-06
 
 ### Added
