@@ -243,16 +243,20 @@ struct HLSOriginRelayAddressingTests {
     }
 
     @Test("A segment reaches the player while the origin is still sending it")
-    func mediaIsRelayedAsItArrives() async throws {
+    func mediaIsRelayedAsItArrives() throws {
         // Held to the last byte, a segment puts its whole download in front of the player's first
         // byte: AVPlayer abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
         // and it sizes the next rendition off what it measured, which behind a buffer is a loopback
         // burst rather than the link.
         //
         // The origin sends its head and one slice and then holds the rest for far longer than this
-        // client will wait. A relay that streams answers in milliseconds; one that reads the body
-        // first cannot answer at all until the origin is done, so the wait is the whole discriminator
-        // and it does not turn on how loaded the machine is.
+        // reader will wait, so the discriminator is whether an answer begins at all rather than a
+        // ratio of two durations on a loaded machine.
+        //
+        // Read off a socket rather than through URLSession: what is being timed is when the relay
+        // put an answer on the wire, and a client stack that batches its own delivery would be timed
+        // instead. Measured that way this failed on CI while passing here, which is exactly the
+        // reading a client in the middle can produce.
         let upstream = try #require(TricklingOrigin(slices: 2, pauseSeconds: 20))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
@@ -263,24 +267,47 @@ struct HLSOriginRelayAddressingTests {
         let origin = URL(string: "http://127.0.0.1:\(upstream.port)/movie.ts")!
         let entry = try #require(server.relayURL(for: origin))
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 8
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
+        let answer = try #require(Self.firstBytesOffTheWire(from: entry, waitingUpTo: 10))
+        #expect(answer.elapsed < 8,
+                "the answer only began after the origin had finished (\(answer.elapsed)s)")
+        #expect(answer.text.hasPrefix("HTTP/1.1 200"), "answered: \(answer.text.prefix(64))")
+        #expect(answer.text.contains("Content-Length: \(TricklingOrigin.totalBytes(slices: 2))"),
+                "the length the origin stated did not survive")
+    }
+
+    /// One request on a raw socket, and the moment the first byte of the answer lands.
+    private static func firstBytesOffTheWire(from url: URL, waitingUpTo seconds: Int)
+        -> (elapsed: TimeInterval, text: String)?
+    {
+        guard let host = url.host, let port = url.port else { return nil }
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else { return nil }
+        let connected = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        let target = url.path + (url.query.map { "?\($0)" } ?? "")
+        let request = "GET \(target) HTTP/1.1\r\nHost: \(host):\(port)\r\n\r\n"
+        let wire = Array(request.utf8)
+        let sent = wire.withUnsafeBufferPointer { send(fd, $0.baseAddress, $0.count, 0) }
+        guard sent == wire.count else { return nil }
 
         let started = Date()
-        let (bytes, response) = try await session.bytes(for: URLRequest(url: entry))
-        let headAt = Date().timeIntervalSince(started)
-        #expect((response as? HTTPURLResponse)?.statusCode == 200)
-        #expect(response.expectedContentLength == Int64(TricklingOrigin.totalBytes(slices: 2)),
-                "the length the origin stated did not survive")
-        #expect(headAt < 5, "the answer only began after the origin had finished (\(headAt)s)")
-
-        for try await byte in bytes {
-            #expect(byte == 0x47, "not an MPEG-TS sync byte")
-            break
-        }
-        #expect(Date().timeIntervalSince(started) < 5, "the first byte waited for the whole body")
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let read = buffer.withUnsafeMutableBufferPointer { recv(fd, $0.baseAddress, $0.count, 0) }
+        guard read > 0 else { return nil }
+        return (Date().timeIntervalSince(started), String(decoding: buffer[0..<read], as: UTF8.self))
     }
 
     @Test("A body of unstated length is held, and held is not the same as rewritten")
