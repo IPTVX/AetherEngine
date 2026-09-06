@@ -260,6 +260,28 @@ public struct DisplayCapabilities: Sendable, Equatable {
             supportsHDR10: hdrEligible,
             supportsHLG: hdrEligible)
     }
+
+    /// AE#493 / AE#459: the capability a host asserts, because this one cannot be observed.
+    ///
+    /// `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode table to read,
+    /// and eligibility deliberately does not stand in for one: it proves EDR, not that AVFoundation will
+    /// accept a Dolby Vision variant on this display. Whoever knows the hardware is the host, so the claim
+    /// is the host's (`LoadOptions.panelPresentsDolbyVision`).
+    ///
+    /// An assertion only ever ADDS. A display the system already reports DV-capable is not un-asserted by
+    /// a `false`, so the flag can claim a capability and never hide one. `supportsHDR` rides along because
+    /// Dolby Vision is an HDR format: a display presenting DV presents HDR, and without that term the
+    /// session would build a DV master for a route `displaySupportsHDR == false` had already sent
+    /// media-direct. HDR10 and HLG are NOT implied; that every DV television also takes HDR10 is a fact
+    /// about the market, not an entailment of the claim.
+    func assertingDolbyVision(_ asserted: Bool) -> DisplayCapabilities {
+        guard asserted else { return self }
+        return DisplayCapabilities(
+            supportsHDR: true,
+            supportsDolbyVision: true,
+            supportsHDR10: supportsHDR10,
+            supportsHLG: supportsHLG)
+    }
 }
 
 /// Deinterlacer selection for the software-decode path (interlaced MPEG-2 / VC-1 / MPEG-4, and
@@ -342,8 +364,32 @@ public struct LoadOptions: Sendable, Equatable {
     /// Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. Default `true`. When `false`, engine routes HDR sources through the media playlist (auto-tonemap path) because AVKit cannot switch the panel.
     public var matchContentEnabled: Bool
 
-    /// Mirror of `UIScreen.main.currentEDRHeadroom > 1`. Default `false` (conservative SDR branch). When in HDR, master playlist VIDEO-RANGE=PQ and SUPPLEMENTAL-CODECS=dvh1 are accepted upfront for the HDR10-to-DV upgrade.
+    /// Host assertion that the panel is presenting HDR right now. Default `false` (conservative SDR branch).
+    /// When set, master playlist VIDEO-RANGE=PQ and SUPPLEMENTAL-CODECS=dvh1 are accepted upfront for the
+    /// HDR10-to-DV upgrade.
+    ///
+    /// AE#459: this is an OR term over the engine's own readout, not a replacement for it, and it counts on
+    /// every platform rather than only where the host suppresses display criteria. The readout it backs up
+    /// is `UIScreen.currentEDRHeadroom > 1`, which answers only around a dynamic-range TRANSITION: an Apple
+    /// TV whose output format is locked to HDR never makes one, so it reads as an SDR panel forever, and on
+    /// tvOS 27 the property has stopped answering at all on at least one box. A host that knows the panel is
+    /// in HDR (a user setting, its own probe) says so here.
     public var panelIsInHDRMode: Bool
+
+    /// Host assertion that this display presents Dolby Vision. Default `false`. Not a capability the engine
+    /// observed, a claim the host makes about hardware it knows.
+    ///
+    /// AE#493: `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode capability
+    /// table at all, and `eligibleForHDRPlayback` answers HDR10 and HLG but cannot answer this one. Setting
+    /// it serves the source the way a DV display is served (`dvh1` sample entry, `SUPPLEMENTAL-CODECS`,
+    /// master playlist) and publishes `videoFormat = .dolbyVision`. HDR support rides along because DV is an
+    /// HDR format; HDR10 and HLG capability are not implied.
+    ///
+    /// Asserting on a display that cannot present DV costs a reload, not the item: AVPlayer refuses the
+    /// master with -11868 / -11848 and the engine falls back to the media playlist once, in place, at the
+    /// same position, where AVPlayer tone-maps the base layer. Correctable mid-session through
+    /// `reloadAtCurrentPosition(applying:)`.
+    public var panelPresentsDolbyVision: Bool
 
     /// Bridge encoder for codecs that cannot stream-copy into fMP4 (TrueHD, DTS, DTS-HD MA, MP3, Opus, EAC3-from-MKV-without-dec3-extradata).
     ///
@@ -649,6 +695,7 @@ public struct LoadOptions: Sendable, Equatable {
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
+        panelPresentsDolbyVision: Bool = false,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLive: Bool = false,
         audioOnly: Bool = false,
@@ -687,6 +734,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
+        self.panelPresentsDolbyVision = panelPresentsDolbyVision
         self.audioBridgeMode = audioBridgeMode
         self.isLive = isLive
         self.audioOnly = audioOnly

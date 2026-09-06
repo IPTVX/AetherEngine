@@ -483,9 +483,20 @@ playerVC.appliesPreferredDisplayCriteriaAutomatically = false
 try await engine.load(url: url, options: LoadOptions(
     suppressDisplayCriteria: false,      // default; engine writes criteria
     matchContentEnabled: matchContent,   // tvOS Match Content master toggle
-    panelIsInHDRMode: panelInHDRMode     // current EDR-headroom > 1.0
+    panelIsInHDRMode: panelInHDRMode,    // assertion: the panel is presenting HDR now
+    panelPresentsDolbyVision: false      // assertion: this display presents Dolby Vision
 ))
 ```
+
+**Both panel flags are assertions, not readings, and both default to `false`.** `panelIsInHDRMode` is an
+OR term over the engine's own EDR-headroom readout rather than a replacement for it: that readout answers
+only around a dynamic-range transition, so an Apple TV whose output format is locked to HDR never makes one
+and reads as an SDR panel forever ([#459](https://github.com/superuser404notfound/AetherEngine/issues/459)).
+`panelPresentsDolbyVision` covers the capability the engine cannot observe at all on macOS, where
+`AVPlayer.availableHDRModes` does not exist and HDR eligibility answers HDR10 and HLG but not Dolby Vision
+([#493](https://github.com/superuser404notfound/AetherEngine/issues/493)). An assertion only ever adds, so
+neither flag can hide a capability the system reports, and a wrong one costs a single in-place
+media-playlist fallback (`-11868` / `-11848`) at the same position rather than the item.
 
 `suppressDisplayCriteria` defaults to `false`, so the engine-driven path is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or 5 s timeout), then `replaceCurrentItem` runs against an already-correct panel.
 
