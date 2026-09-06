@@ -10,7 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`EngineTLS.serverTrustEvaluator`: host opt-in to accept server
+  certificates that fail system trust evaluation.** Every engine fetch runs
+  over URLSession, which enforces system certificate trust that the
+  in-demuxer network stacks the engine replaces never did. A media server
+  fronted by a self-signed or private-CA certificate therefore keeps working
+  in a host whose own API layer bypasses trust, while the engine's open fails
+  its handshake before a byte is read. The evaluator is asked per challenge
+  about the origin it came from, so a host holding a LAN address behind a
+  private certificate and a WAN address with a real one answers for each, and
+  one that pins an SPKI hash decides for itself. nil by default; while nil,
+  and for every non-server-trust challenge, handling is unchanged. Covers
+  every session the engine owns: the AVIOReader probe, chunk, persistent and
+  streaming paths, the disc reader, both HLS ingest readers, the audio tap
+  fetcher, the carriage probe and the remote HLS subtitle proxy.
+
+### Changed
+
+- The live subtitle rendition fetch owns its session instead of borrowing
+  `URLSession.shared`, which cannot carry a delegate and was the one engine
+  fetch no host trust decision could reach.
 
 ## [6.70.0] - 2026-09-06
 

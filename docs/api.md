@@ -620,6 +620,30 @@ reports an intention rather than an outcome.
 | `vodScrubThumbnail(atSeconds:maxWidth:)`, `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | The two arms, for callers that know which axis they hold. |
 | `supportsCacheBackedStills` | True while a native session exists. Gate the scrub-preview affordance on it: it reports capability, not per-frame availability, so a transient nil from `scrubThumbnail` while a segment is still being produced is expected and means "time only, no image". |
 
+## Certificate trust
+
+A media server behind a self-signed or private-CA certificate is common in self-hosted setups, and
+URLSession refuses it where the in-demuxer network stacks the engine replaces never did. A host whose
+own API layer bypasses trust therefore lands in a split state: browsing works and every engine fetch
+fails its handshake before a byte is read.
+
+| Symbol | Notes |
+| --- | --- |
+| `EngineTLS` | Trust policy for the engine's outbound HTTP connections. Off by default, in the sense that no evaluator is set and every challenge keeps the system's default handling. |
+| `EngineTLS.serverTrustEvaluator` | `(@Sendable (URLProtectionSpace) -> Bool)?`, asked per challenge about the origin the challenge came from. nil, the default, keeps default handling everywhere. Read per challenge, so replacing it applies from the next connection without rebuilding sessions. Called off the main actor from whichever queue raised the challenge, so it has to be thread-safe. |
+
+```swift
+EngineTLS.serverTrustEvaluator = { $0.host == "media.lan" }
+```
+
+Answering per origin is the point of the closure rather than a flag: a host commonly holds a LAN
+address behind a private certificate and a WAN address with a real one, and accepting the first must
+not quietly relax the second. A host that pins an SPKI hash reads the protection space and decides.
+Returning true for everything is the blunt version and is one line.
+
+This governs the sessions the engine owns. A certificate the host does not accept still reaches the
+host as `PlaybackErrorKind.sourceCertificateRejected` rather than as unreadable media.
+
 ## Diagnostics
 
 | Symbol | Notes |

@@ -109,7 +109,8 @@ enum RemoteHLSSubtitleProxy {
         config.timeoutIntervalForRequest = budgetSeconds / 2
         config.timeoutIntervalForResource = budgetSeconds
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config)
+        return URLSession(
+            configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
     }
 
     /// Returns the body and the URL it finally came from; every relative URI in the playlist resolves
