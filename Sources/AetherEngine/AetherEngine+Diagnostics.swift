@@ -488,10 +488,16 @@ extension AetherEngine {
         softwareHost?.ioWindowDiagnostics ?? nativeVideoSession?.demuxer?.ioWindowDiagnostics
     }
 
-    /// Resident bytes in the loopback HLS segment cache. nil when no native session is active.
+    /// Compressed resident bytes: software packet spool or native loopback segment cache.
     var cachedBytes: Int64? {
+        if let bytes = softwareHost?.cachedVODBytes { return bytes }
         guard let bytes = nativeVideoSession?.segmentCacheTotalBytes else { return nil }
         return Int64(bytes)
+    }
+
+    /// Short metadata lock only; never reads the packet store from the main actor.
+    var softwarePacketCacheSnapshot: SoftwarePacketReadAhead.Snapshot? {
+        softwareHost?.vodPacketCacheSnapshot
     }
 
     /// Freshly stat-ed on-disk footprint of the segment cache. nil when no native session is active. Used by `aetherctl live --report-cache-bytes`.

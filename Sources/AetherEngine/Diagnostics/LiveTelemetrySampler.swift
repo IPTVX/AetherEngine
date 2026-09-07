@@ -329,6 +329,7 @@ final class LiveTelemetrySampler {
             evaluateEndOfMediaPark(engine: engine, readings: readings)
         }
 
+        let softwareCache = engine.softwarePacketCacheSnapshot
         let snapshot = LiveTelemetry(
             instantBitrateMbps: instantBitrateMbps,
             averageBitrateMbps: averageBitrateMbps,
@@ -340,6 +341,9 @@ final class LiveTelemetrySampler {
             readerWindowAheadBytes: readerWindowAheadBytes,
             accumulatedFrameDelaySeconds: accumulatedFrameDelaySeconds,
             cachedBytes: engine.cachedBytes,
+            softwareCacheSeekHits: softwareCache?.cacheSeekHits,
+            softwareCacheSeekMisses: softwareCache?.cacheSeekMisses,
+            softwareCacheSourceEpoch: softwareCache?.sourceEpoch,
             networkThroughputMbps: networkThroughputMbps,
             networkTransferredBytes: networkTransferredBytes,
             avSyncGapMs: avSyncGapMs,

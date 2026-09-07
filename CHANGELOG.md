@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Software VOD now reads compressed packets ahead independently of the decoded
+  display queue and publishes a continuous selected A/V cache frontier from
+  startup. Retained packet chunks support forward and backward cache-local
+  seeks without discarding their existing frontier. H.264 variable-frame-rate
+  coverage follows presentation successors rather than packet decode duration.
+  Byte/time limits, disk cleanup, and seek-generation admission bound the store
+  and reject stale packets, EOF, errors and delayed end-of-media callbacks.
 
 ## [6.71.0] - 2026-09-06
 
