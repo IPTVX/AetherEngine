@@ -1243,10 +1243,13 @@ public final class Demuxer: @unchecked Sendable {
         return result
     }
 
-    func readPacket() throws -> UnsafeMutablePointer<AVPacket>? {
+    func readPacket(isCurrent: @Sendable () -> Bool = { true }) throws -> UnsafeMutablePointer<AVPacket>? {
         accessLock.lock()
         defer { accessLock.unlock() }
         while true {
+            // A read-ahead decision made before a seek cannot start a NEW-position read after
+            // the seek releases this lock, then throw that first new packet away as stale.
+            guard isCurrent() else { throw CancellationError() }
             // #409: a packet the repair held during its sampling window is handed back before any
             // new read, so the container's own order survives the verdict. Checked every pass, not
             // once on entry: the packet that completes the sample flips the phase, and the queue

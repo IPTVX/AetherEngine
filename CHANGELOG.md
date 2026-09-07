@@ -12,6 +12,28 @@ the public-API contract.
 
 ### Fixed
 
+- **Software VOD reads compressed packets ahead of the decoder, and keeps what
+  it has read across a seek that lands inside it.** The software path had no
+  reservoir of its own: the demux loop read on renderer backpressure alone, so
+  arrived-but-unplayed media was the fraction of a second the decode queue held
+  (measured 0.33 s to 0.36 s on real hardware), and a seek backwards out of the
+  byte reader's resident window paid for the same bytes twice over the network,
+  blocking the demux thread while it did. A worker now fills a session-owned
+  disk FIFO of lossless packet envelopes ahead of the consumer, bounded by the
+  session's existing `forwardBufferSegments` window and volume-safety budget,
+  and a seek whose target is still retained moves only the consumer cursor: the
+  source reader stays at its own frontier and nothing already downloaded is
+  discarded. Measured on a 600 s H.264 source over a 16 Mbit origin, seeking
+  back 198 s after 200 s of playback: before, two 4 MB detour fetches and two
+  blocking reads of 2658 ms and 2623 ms with the display cushion at 0.00 s;
+  after, no request at all and the cushion untouched. `bufferedPosition` on a
+  software VOD session is that cache frontier instead of the decoded cushion,
+  the intersection of the selected audio and video presentation coverage
+  containing the playhead; H.264 measures a picture's hold from its
+  presentation successor rather than from `AVPacket.duration`, which on a
+  variable-rate source describes decode cadence. Live, DVR and the native path
+  are untouched. Contributed by @orut34iop in PR #512.
+
 - **A Matroska H.264 stream whose block timestamps rise in coding order is
   presented in display order again.** Matroska stores presentation timestamps,
   so a writer that fills them packet by packet hands every slot to the picture
