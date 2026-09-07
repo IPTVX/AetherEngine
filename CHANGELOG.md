@@ -12,6 +12,38 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.72.0] - 2026-09-07
+
+### Changed
+
+- **A Dolby Vision Profile 8.1 or 8.4 served to a display without Dolby
+  Vision keeps its `dvcC` instead of having it stripped.** The strip was added
+  on 2026-05-26 against a measured failure (an HDR10-only panel refused the
+  asset open with `-11868` / `-17223` even behind a clean master with no
+  `SUPPLEMENTAL-CODECS`), and that failure does not reproduce on tvOS 26.6.
+  Re-measured on an Apple TV 4K 3rd generation at a Samsung HDR10+ panel with
+  no Dolby Vision of its own, using Dolby's Browser Test Kit, where the same
+  grade exists as Profile 5, 8.1 and 8.4 and the Profile 5 cut is the control
+  for whether anything composed: eleven sessions across both routes and both
+  panel states, not one error log entry among them.
+
+  Keeping the record is not only harmless, it is what puts the RPU on the
+  pixels wherever AVPlayer has to convert the base layer, which on tvOS is
+  every HDR source while the panel is not in HDR mode. On that path a kept
+  record composes, measured for 8.1 and separately for 8.4, and a stripped one
+  hands the panel the flat base layer with its single static grade. On a panel
+  that is in HDR nothing composes either way, so the change costs that route
+  nothing.
+
+  `SUPPLEMENTAL-CODECS` stays gated on the display's own Dolby Vision
+  capability. The same run resolved both arms to `hdr10` on a panel without
+  Dolby Vision, so the upgrade signal is inert there, and it carries its own
+  history of a black picture on that panel class. Reported by DrHurt (#493).
+
+- **A malformed Profile 8 compatibility id ("P8.6", #53) normalizes on both
+  branches.** Dropping the record used to hide it on the non-Dolby-Vision
+  branch; a record that is kept has to be a truthful one.
+
 ## [6.71.0] - 2026-09-06
 
 ### Added
