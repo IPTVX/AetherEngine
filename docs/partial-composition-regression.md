@@ -39,6 +39,16 @@ After normal package resolution it defaults to `.build/checkouts/FFmpegBuild`;
 set `AETHER_FFMPEG_CHECKOUT` to an existing checkout at that exact revision when
 needed. It does not resolve or update dependencies itself.
 
+A third fixture is scene-cut shaped: a 30-picture zero-offset sequence followed
+by one of 420. A uniform one-second GOP cannot reach the ceiling of a policy that
+holds a sequence, so it also cannot show that ceiling gone. Measured at 30 fps
+with one stereo AAC track, a sequence-wide hold was ended by its interleaved
+packet budget at between 390 and 420 pictures, because 420 video packets carry
+about 656 audio packets with them. Reading the slot instead of holding a plan
+removes the ceiling rather than raising it: the deepest wait on that fixture is
+6 packets, and the whole 1200-picture file comes back identical to its healthy
+twin.
+
 The fixture is generated solid colour plus tone, not an excerpt of any private
 film. The generator keeps a healthy prefix and clears only later `ctts` offset
 fields, without changing box lengths, DTS, compressed packets or audio. A second
@@ -66,6 +76,11 @@ post-review malformed-timestamp guard; it does not include the host's diagnostic
 framework, UI customizations, Matroska repair or software cache changes. The
 generated fixture proves the packet/decoder regression; it is not claimed to
 visually reproduce the original movie's native judder.
+
+A refusal costs the repair and never the session: every held packet is handed
+back exactly as it arrived and the rest of that sequence streams through, with
+the next IDR a fresh candidate. The judder this policy removes is a far smaller
+failure than a source read that stops.
 
 This is a narrow compatibility policy, not a general VFR timestamp reconstructor.
 It requires a corroborated healthy origin and complete closed progressive POC
