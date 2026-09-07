@@ -10,6 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`aetherctl play --present-times`: how many frames actually reached the
+  screen on the native path.** `--frame-times` reads the software renderer's own
+  reports, so the AVPlayer route had no frame observable at all and every judder
+  report against it could only be argued about from a track-rate estimate. The
+  flag attaches an `AVPlayerItemVideoOutput` to the engine's item, counts
+  distinct presentation times, and reports the largest gap between two of them,
+  which is what separates a late picture from a session presenting nothing but
+  its random access points.
+
 ### Fixed
 
 - **An MP4 that carries valid composition offsets at its head and none in a

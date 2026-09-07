@@ -635,6 +635,7 @@ if first == "play" {
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
     let frameTimes = takeFlag("--frame-times", from: &rest)
+    let presentTimes = takeFlag("--present-times", from: &rest)
     let pictureProbe = takeFlag("--picture-probe", from: &rest)
     // #316: declare sidecar subtitles at load, the LoadOptions.externalSubtitles a host passes.
     // Comma-separated `lang=path-or-url` entries, e.g. --sidecar en=/tmp/en.srt,de=/tmp/de.srt.
@@ -766,7 +767,7 @@ if first == "play" {
         exit(64)
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
                  audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
