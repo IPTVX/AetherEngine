@@ -257,7 +257,8 @@ enum SessionOptionCorrection {
     static let knownFields: [String] = [
         "omitCriteriaColorExtensions", "suppressDisplayCriteria", "httpHeaders",
         "keepDvh1TagWithoutDV", "forceDolbyVisionOnNonDVDisplay", "matchContentEnabled",
-        "panelIsInHDRMode", "audioBridgeMode", "isLive", "audioOnly", "dvrWindowSeconds",
+        "panelIsInHDRMode", "panelPresentsDolbyVision", "audioBridgeMode", "isLive", "audioOnly",
+        "dvrWindowSeconds",
         "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "confirmAtmos",

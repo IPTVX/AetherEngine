@@ -1287,6 +1287,15 @@ public final class AetherEngine: ObservableObject {
             supportsHDR10: modes.contains(.hdr10),
             supportsHLG: modes.contains(.hlg)
         )
+        #elseif os(macOS)
+        // AE#493: `availableHDRModes` is `API_UNAVAILABLE(macos)`, so there is no per-mode table to read
+        // here. The old all-false stub was not a hedge, it was an assertion, and `effectiveVideoFormat`
+        // clamped every PQ and HLG source to SDR against it. Eligibility answers the two that only need
+        // EDR; Dolby Vision stays unclaimed. `NSScreen.maximumPotentialExtendedDynamicRangeColorComponentValue`
+        // would be the other candidate and is not used: eligibility already reads true on the reported
+        // display and false on an SDR-only Mac (#98), and NSScreen is main-actor isolated while this is
+        // read per load off the main actor.
+        return DisplayCapabilities.onDemandEDRDisplay(hdrEligible: AVPlayer.eligibleForHDRPlayback)
         #else
         return DisplayCapabilities(
             supportsHDR: AVPlayer.eligibleForHDRPlayback,
@@ -3430,6 +3439,12 @@ public final class AetherEngine: ObservableObject {
         var probedAudioTracks: [TrackInfo] = []
         var probedSubtitleTracks: [TrackInfo] = []
         var probedDefaultAudioIndex: Int32 = -1
+        // AE#493: what this session takes the display to be. The observed table is what the platform
+        // could answer; the session table adds what the host asserted, because Dolby Vision has no
+        // public capability API on macOS and eligibility deliberately does not claim it. Composed once,
+        // so the format clamp below and the served DV route cannot disagree about the same display.
+        let observedDisplayCaps = Self.displayCapabilities
+        let sessionDisplayCaps = observedDisplayCaps.assertingDolbyVision(options.panelPresentsDolbyVision)
         let probe = Demuxer()
         // Register so stopInternal can markClosed(): avformat_open_input/find_stream_info can block for the
         // full AVIOReader reconnect budget (device repro: a 500-looping channel kept reconnecting across three
@@ -3473,7 +3488,8 @@ public final class AetherEngine: ObservableObject {
             let videoIdx = probe.videoStreamIndex
             if videoIdx >= 0, let stream = probe.stream(at: videoIdx) {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
-                effectiveFormat = Self.effectiveVideoFormat(detected: detectedFormat, stream: stream)
+                effectiveFormat = Self.effectiveVideoFormat(detected: detectedFormat, stream: stream,
+                                                           capabilities: sessionDisplayCaps)
                 detectedRate = Self.detectFrameRate(stream: stream)
                 // DrHurt #4 (2026-05-26): use source-detected DV, not effective-format, so codecTag=dvh1
                 // asks AVDisplayManager for DV mode on every DV source. AVPlayer's HLS tone-mapper downgrades
@@ -3811,18 +3827,37 @@ public final class AetherEngine: ObservableObject {
         //
         //      Suppressed-criteria hosts fall back to the caller's pre-load panelIsInHDRMode snapshot
         //      (AVKit fires criteria later from the AVPlayerItem formatDescription).
-        let panelHDRAfterHandshake: Bool
-        if options.suppressDisplayCriteria {
-            panelHDRAfterHandshake = options.panelIsInHDRMode
-        } else {
-            panelHDRAfterHandshake = displayCriteria.currentPanelIsHDR()
+        //      AE#459: the host's assertion is an OR term over that readout on every platform, not just
+        //      where criteria are suppressed. The readout answers only around a dynamic-range transition,
+        //      so a panel parked in HDR never proves itself and one tvOS 27 box stopped answering at all;
+        //      a host that knows better says so, and a wrong claim costs the -11848 fallback, not the item.
+        let criteriaPanelReadout: Bool? =
+            options.suppressDisplayCriteria ? nil : displayCriteria.currentPanelIsHDR()
+        let panelHDRAfterHandshake = Self.sessionPanelPresentsHDR(
+            hostAsserts: options.panelIsInHDRMode, criteriaReadout: criteriaPanelReadout)
+        // Only when an assertion actually claims something: a line that fires on every load stops being
+        // read, and this one has to be legible next to the rejection a wrong claim can produce.
+        if options.panelIsInHDRMode || options.panelPresentsDolbyVision {
+            EngineLog.emit(
+                "[DisplayCriteria] host assertion in force: panelIsInHDRMode="
+                + "\(options.panelIsInHDRMode) panelPresentsDolbyVision=\(options.panelPresentsDolbyVision)"
+                + " (observed: panelReadout="
+                + (criteriaPanelReadout.map { "\($0)" } ?? "suppressed")
+                + " supportsDolbyVision=\(observedDisplayCaps.supportsDolbyVision))",
+                category: .session)
         }
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         // The iPhone built-in display has no HDMI Match-Content handshake; it renders HDR/DV natively
         // whenever the system reports it eligible. effectiveFormat is already clamped to displayCapabilities
         // (the same signal that drives the served DV/HDR stream), so publish it directly. Gating on
         // panelHDRAfterHandshake (false on iOS, kept for media-playlist routing) wrongly relabelled every
         // HDR/DV title as SDR in Stats for Nerds.
+        //
+        // AE#493: macOS belongs on this branch for the same reason and was on the tvOS one. It composites
+        // EDR per window with no display mode switch, so there is no handshake to read and
+        // `currentPanelIsHDR()` is a hard `false` off tvOS, which labelled every HDR title on an XDR
+        // display SDR. `panelIsInHDRMode` is not the fix there: the panel-mode question is the tvOS
+        // question, and asking it of a window is the wrong question.
         videoFormat = effectiveFormat
         #else
         videoFormat = Self.presentedVideoFormat(

@@ -49,6 +49,8 @@ So the string is a payload, not a key, and `$errorInfo` is the key. It publishes
 
 Two kinds carry a number a host will want to read, and both mean the same thing happened: the origin answered the source request with an HTTP status instead of media, and `underlyingCode` is that status. `.sourceRefused` is the origin's verdict on the resource or on itself (a 401/403 refusal, which on a connection-capped IPTV panel most often means "the slot is still held", a 404, a 5xx). `.sourceRateLimited` is the same answer in the rate-limit shapes (429/503/509), split off because the recovery differs: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player meets the same meter (AE#377). Both are distinct from `.sourceOpenFailed`, which is what a corrupt or unreadable source produces; before `.sourceRefused` existed a refusal and a corrupt file arrived alike as "Invalid data found when processing input".
 
+`.sourceCertificateRejected` is the same argument one layer lower: the transport was refused over certificate trust, so there was never a response to carry a status. `underlyingCode` is the `NSURLErrorDomain` code (-1200 through -1206), and the message is the engine's own English sentence rather than the OS one, so a pasted report says the same thing on every device. It reaches a host from either path: on the FFmpeg path the reader types the failed open, and on the native path the URL error is found under AVFoundation's own error, which is where it sits and where nothing used to look. Nothing about the media is wrong and no retry helps; a self-signed or private-CA origin needs a trust decision the host makes (AE#495).
+
 ```swift
 player.$state
     .sink { state in
@@ -266,7 +268,7 @@ arrive together.
 | `ownsVideoNowPlayingSession` | read when the native host is created; a host preserved across a native to native reload keeps what it was created with |
 | `LoadOptions.preferredAudioLanguages` | the picked audio track is muxed at the first frame; a later `selectAudioTrack` costs a reload |
 | `LoadOptions.prepareNativeSubtitles`, `externalSubtitles` | the native renditions are declared in the init segment |
-| `LoadOptions.panelIsInHDRMode`, `matchContentEnabled` | the display-criteria handshake runs synchronously inside `load` |
+| `LoadOptions.panelIsInHDRMode`, `panelPresentsDolbyVision`, `matchContentEnabled` | the display-criteria handshake and the format clamp both run synchronously inside `load` |
 | `pictureInPictureActive` | governs the background teardown decision at the moment it happens |
 
 ### Isolation, and what runs off the main actor
@@ -428,7 +430,7 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$metadata` | `MediaMetadata` parsed at load (title / artist / album / cover). |
 | `$mediaChapters`, `$discChapters`, `$discTitles`, `$selectedDiscTitle` | Container chapters, and disc titles / chapters for DVD and Blu-ray ISO sources. |
 | `$currentAVPlayer`, `$currentAVPlayerItem` | The live AVFoundation objects, re-emitted on every reload. Both nil on `.software`, which renders into its own layer. A host that only ever hands `currentAVPlayer` to an `AVPlayerViewController` gets audio over an empty video plane on that route (#298). |
-| `AetherEngine.displayCapabilities` | `static DisplayCapabilities`: `supportsHDR`, `supportsDolbyVision`, `supportsHDR10`, `supportsHLG` for the current display. What a settings screen should read instead of guessing from the device model. |
+| `AetherEngine.displayCapabilities` | `static DisplayCapabilities`: `supportsHDR`, `supportsDolbyVision`, `supportsHDR10`, `supportsHLG` for the current display. What a settings screen should read instead of guessing from the device model. On macOS the table comes from `AVPlayer.eligibleForHDRPlayback` (there is no per-mode API there) and leaves Dolby Vision unclaimed, which is what `LoadOptions.panelPresentsDolbyVision` is for. |
 
 `StartupProgress` carries `checkpoint`, `completed`, `total`, `fraction`, `stage` (a `StartupStage` naming the work in flight, for a label beside the bar), `generation`, `isComplete`. Every value is work some part of the load finished, never a timer and never an estimate, so a slow stretch holds and a skipped one jumps. The ladder, in order:
 
@@ -618,6 +620,40 @@ reports an intention rather than an outcome.
 | `vodScrubThumbnail(atSeconds:maxWidth:)`, `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | The two arms, for callers that know which axis they hold. |
 | `supportsCacheBackedStills` | True while a native session exists. Gate the scrub-preview affordance on it: it reports capability, not per-frame availability, so a transient nil from `scrubThumbnail` while a segment is still being produced is expected and means "time only, no image". |
 
+## Certificate trust
+
+A media server behind a self-signed or private-CA certificate is common in self-hosted setups, and
+URLSession refuses it where the in-demuxer network stacks the engine replaces never did. A host whose
+own API layer bypasses trust therefore lands in a split state: browsing works and every engine fetch
+fails its handshake before a byte is read.
+
+| Symbol | Notes |
+| --- | --- |
+| `EngineTLS` | Trust policy for the engine's outbound HTTP connections. Off by default, in the sense that no evaluator is set and every challenge keeps the system's default handling. |
+| `EngineTLS.serverTrustEvaluator` | `(@Sendable (URLProtectionSpace) -> Bool)?`, asked per challenge about the origin the challenge came from. nil, the default, keeps default handling everywhere. Read per challenge, so replacing it applies from the next connection without rebuilding sessions. Called off the main actor from whichever queue raised the challenge, so it has to be thread-safe. |
+
+```swift
+EngineTLS.serverTrustEvaluator = { $0.host == "media.lan" }
+```
+
+Answering per origin is the point of the closure rather than a flag: a host commonly holds a LAN
+address behind a private certificate and a WAN address with a real one, and accepting the first must
+not quietly relax the second. A host that pins an SPKI hash reads the protection space and decides.
+Returning true for everything is the blunt version and is one line.
+
+This governs the sessions the engine owns, and the one route where AVPlayer does its own networking
+is covered too. On native remote HLS the origin URL would go to `AVURLAsset`, which asks no delegate
+about the certificate and which an ATS exception does not reach, so the engine stands a loopback
+relay in front of the origin and makes the request itself. That happens only for an origin the
+system actually refuses (one handshake decides, since an origin the system trusts is one AVPlayer
+reaches unaided), and media is relayed as it arrives rather than read whole, so the player's first
+byte and its throughput estimate are the origin's rather than the loopback's. Nothing about this is
+configurable: setting an evaluator is the whole opt-in.
+
+A certificate the host does not accept still reaches the host as
+`PlaybackErrorKind.sourceCertificateRejected` rather than as unreadable media, on the relayed route
+as well.
+
 ## Diagnostics
 
 | Symbol | Notes |
@@ -659,7 +695,8 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `audioDelaySeconds` | 0 | Start the session with a lip-sync offset already in force; positive presents audio later. Same value `setAudioDelay(_:)` reads and writes, and a `reloadAtCurrentPosition(applying:)` can correct it. |
 | `suppressDisplayCriteria` | false | Skip the display-criteria handshake entirely. For previews and headless runs. |
 | `matchContentEnabled` | true | Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. False routes HDR through the auto-tonemap path. |
-| `panelIsInHDRMode` | false | Mirror of `currentEDRHeadroom > 1`. Governs whether the HDR10-to-DV upgrade is accepted upfront. |
+| `panelIsInHDRMode` | false | **Host assertion** that the panel is presenting HDR right now, and the gate on whether the HDR10-to-DV upgrade is accepted upfront. It is an OR term over the engine's own readout on every platform, not a replacement for it and no longer confined to `suppressDisplayCriteria` hosts (AE#459). The readout it backs up is `currentEDRHeadroom > 1`, which answers only around a dynamic-range transition: an Apple TV whose output format is locked to HDR never makes one and reads as an SDR panel forever, and on tvOS 27 the property has stopped answering at all on at least one box. A wrong assertion costs one in-place media-playlist fallback (`-11848`), not the item. |
+| `panelPresentsDolbyVision` | false | **Host assertion** that this display presents Dolby Vision, for the platforms where the engine cannot observe it (AE#493). `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode table at all, and `eligibleForHDRPlayback` answers HDR10 and HLG but not this: it proves EDR, not that AVFoundation will accept a DV variant here. Setting it serves the DV route (`dvh1` sample entry, `SUPPLEMENTAL-CODECS`, master playlist) and publishes `videoFormat = .dolbyVision`; HDR support rides along because DV is an HDR format, while HDR10 and HLG capability are not implied. An assertion only ever adds, so `false` cannot hide a capability the system reports. A wrong assertion costs one in-place media-playlist fallback (`-11868` / `-11848`) at the same position, where AVPlayer tone-maps the base layer, and it is correctable mid-session through `reloadAtCurrentPosition(applying:)`. |
 | `omitCriteriaColorExtensions` | false | Diagnostic lever: leave colour out of `AVDisplayCriteria` so AVPlayer re-reads it from the bitstream. |
 | `keepDvh1TagWithoutDV` | false | Diagnostic lever: force dvh1 tags and a master playlist regardless of display capability. |
 | `forceDolbyVisionOnNonDVDisplay` | false | **Experimental (AE#455).** On a display with no Dolby Vision of its own, serve an HEVC Profile 8.1 source the way a Profile 5 source is served (`dvh1` sample entry, `dvcC` rewritten to profile 5 / compatibility 0, `CODECS="dvh1.05.LL"`), so AVPlayer composes the RPU itself instead of handing the panel the static-metadata HDR10 base layer. The bitstream is untouched; only the container's claim about it changes. Ignored on a display that does Dolby Vision, and Profile 8.1 only. See [formats.md](formats.md#dolby-vision-signaling) for what it buys and what it risks. |
@@ -691,7 +728,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `AudioTapBuffer` | `buffer` (`AVAudioPCMBuffer`), `sourceTime`, `discontinuity`. Non-discontinuity buffers are strictly increasing and non-overlapping, which is what SpeechAnalyzer's input timeline requires. |
 | `LiveTelemetry` | The 1 Hz snapshot: bitrates, observed fps, dropped frames, cache and network bytes, A/V gap, RSS. |
 | `PlaybackErrorInfo` | `kind`, `underlyingDomain`, `underlyingCode`, `message`. Published as `$errorInfo` beside a `.error` state. |
-| `PlaybackErrorKind` | The stable token inside it: `.sourceOpenFailed`, `.sourceRefused` (the origin answered an HTTP status other than a rate limit instead of media; `underlyingCode` is the status), `.customSourceProbeFailed`, `.liveSourceUnavailable`, `.hlsPlaylistOnRawLivePath`, `.dolbyVisionRequiresHardware`, `.demuxedAudioLiveUnsupported`, `.nativeItemFailed`, `.noPlayableTrackWithinBudget`, `.masterPlaylistRejected`, `.vodSourceFailed`, `.sourceRateLimited`, `.softwarePipelineFailed`, `.audioSessionFailed`, `.reloadFailed`, `.liveReloadNeverReady`, `.audioTrackSwitchFailed`, `.audioBridgeProducedNoOutput`. `.sourceRateLimited` is the one to branch on separately: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player will meet the same refusal (AE#377). `.audioBridgeProducedNoOutput` is the other: a source whose audio has to be transcoded into fMP4 (MP3, MP2, DTS, TrueHD, Vorbis, PCM) produced no encoded audio at all, so the mp4 muxer could not build the sample entry it derives from a written packet (AE#396). It used to arrive as `.vodSourceFailed`, which reads as a dead source and ends a fallback ladder; the source is neither gone nor unreadable here, and a second player that decodes the track itself plays the file, so this is a DEMOTE, not a stop. A string-backed struct rather than an enum, so a kind added in a minor release cannot break a host's switch; raw values are API and do not change. |
+| `PlaybackErrorKind` | The stable token inside it: `.sourceOpenFailed`, `.sourceRefused` (the origin answered an HTTP status other than a rate limit instead of media; `underlyingCode` is the status), `.customSourceProbeFailed`, `.liveSourceUnavailable`, `.hlsPlaylistOnRawLivePath`, `.dolbyVisionRequiresHardware`, `.demuxedAudioLiveUnsupported`, `.nativeItemFailed`, `.noPlayableTrackWithinBudget`, `.masterPlaylistRejected`, `.vodSourceFailed`, `.sourceRateLimited`, `.softwarePipelineFailed`, `.audioSessionFailed`, `.reloadFailed`, `.liveReloadNeverReady`, `.audioTrackSwitchFailed`, `.audioBridgeProducedNoOutput`, `.sourceCertificateRejected` (the transport was refused over certificate trust; `underlyingCode` is the `NSURLErrorDomain` code, AE#495). `.sourceRateLimited` is the one to branch on separately: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player will meet the same refusal (AE#377). `.audioBridgeProducedNoOutput` is the other: a source whose audio has to be transcoded into fMP4 (MP3, MP2, DTS, TrueHD, Vorbis, PCM) produced no encoded audio at all, so the mp4 muxer could not build the sample entry it derives from a written packet (AE#396). It used to arrive as `.vodSourceFailed`, which reads as a dead source and ends a fallback ladder; the source is neither gone nor unreadable here, and a second player that decodes the track itself plays the file, so this is a DEMOTE, not a stop. A string-backed struct rather than an enum, so a kind added in a minor release cannot break a host's switch; raw values are API and do not change. |
 | `DisplayCapabilities`, `StartupProgress`, `SeekEvent`, `PresentationAxisMap`, `NativeVideoFrameTime`, `SoftwareVideoFrameTime`, `SoftwarePiPSource`, `SystemCaptionRequest`, `AetherEngineError`, `HLSIngestError` | Covered in their sections above. |
 | `FontAttachment` | Attached font files for authored ASS rendering: `filename`, `mimeType`, `data`. |
 

@@ -590,19 +590,33 @@ extension AetherEngine {
     }
 
     /// Clamp source format to what the panel can present. On non-DV panels, publishes the HDR10/HLG base layer format (hvc1 path); SDR-base DV (P8.2) collapses to .sdr (HLSVideoEngine refuses to serve it).
-    static func effectiveVideoFormat(
+    ///
+    /// The capability table is passed in rather than read here: on the platforms with no per-mode API it
+    /// carries the host's own assertion (AE#493), and the caller is the one holding this session's options.
+    nonisolated static func effectiveVideoFormat(
         detected: VideoFormat,
-        stream: UnsafeMutablePointer<AVStream>
+        stream: UnsafeMutablePointer<AVStream>,
+        capabilities: DisplayCapabilities
+    ) -> VideoFormat {
+        effectiveVideoFormat(detected: detected,
+                             baseTransfer: stream.pointee.codecpar.pointee.color_trc,
+                             capabilities: capabilities)
+    }
+
+    /// The clamp itself, off the stream so it can be exercised against a capability table the test machine
+    /// does not have. AE#493 turned on what a table of `false` does to a source, and nothing pinned it.
+    nonisolated static func effectiveVideoFormat(
+        detected: VideoFormat,
+        baseTransfer: AVColorTransferCharacteristic,
+        capabilities: DisplayCapabilities
     ) -> VideoFormat {
         guard detected == .dolbyVision else { return detected }
-        let caps = displayCapabilities
-        if caps.supportsDolbyVision { return .dolbyVision }
-        let trc = stream.pointee.codecpar.pointee.color_trc
-        if trc == AVCOL_TRC_ARIB_STD_B67 {
-            return caps.supportsHLG ? .hlg : .sdr
+        if capabilities.supportsDolbyVision { return .dolbyVision }
+        if baseTransfer == AVCOL_TRC_ARIB_STD_B67 {
+            return capabilities.supportsHLG ? .hlg : .sdr
         }
         // SMPTE2084 base (P5/P7/P8.1) or unspecified trc (P5 with empty VUI): AVPlayer tonemaps via dvh1 on non-DV panel.
-        return caps.supportsHDR10 ? .hdr10 : .sdr
+        return capabilities.supportsHDR10 ? .hdr10 : .sdr
     }
 
     /// The format to publish as `videoFormat`: what the panel is presenting, not what the file carries
@@ -622,6 +636,23 @@ extension AetherEngine {
         guard effectiveFormat != .sdr, panelPresentsHDR else { return .sdr }
         if effectiveFormat == .hdr10, sourceVideoFormat == .hdr10Plus { return .hdr10Plus }
         return effectiveFormat
+    }
+
+    /// AE#459: what this session takes the panel to be presenting, from the host's assertion and the
+    /// engine's own criteria readout.
+    ///
+    /// The assertion is an OR term over the readout, never a replacement for it, and it defaults to
+    /// `false`, so a host that asserts nothing is where it was. Both halves are here because each one goes
+    /// silent somewhere. `currentPanelIsHDR()` rests on the EDR headroom, which only answers around a
+    /// dynamic-range TRANSITION: an Apple TV whose output is locked to HDR never makes one and reads as an
+    /// SDR panel forever, and on tvOS 27 the property stopped moving on at least one box even across a real
+    /// switch. A suppressed-criteria host has no readout to take at all, which is why the assertion used to
+    /// count only there.
+    ///
+    /// `nil` readout means suppressed, not false: the difference matters in the log, where a suppressed
+    /// session has nothing to compare the assertion against.
+    nonisolated static func sessionPanelPresentsHDR(hostAsserts: Bool, criteriaReadout: Bool?) -> Bool {
+        hostAsserts || (criteriaReadout ?? false)
     }
 
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {

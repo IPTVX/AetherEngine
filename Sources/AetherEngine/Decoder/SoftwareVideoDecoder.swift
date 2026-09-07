@@ -78,6 +78,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// applied to the filter there (mutating it mid-stream would need a graph rebuild).
     var deinterlaceConfig = DeinterlaceConfig()
 
+    /// AE#499: what the container declared about colour, captured at `open` before a single frame
+    /// exists. A decoded frame carries the VUI alone, and a remux whose VUI is empty would otherwise
+    /// reach `attachColorSpace` as an untagged picture, so an HDR10 file decoded in software lost its
+    /// PQ / BT.2020 attachments while the same file through the hardware decoder (which reads
+    /// `codecpar`) kept them. Written once in `open`, before the host can feed a packet, and read on
+    /// the decode thread afterwards, the same discipline `use10Bit` and the other open-time fields keep.
+    private var containerColor = ColorDescription.unspecified
+
     /// Deinterlaced frames dropped for carrying no PTS (see the drop site in decode()). Guarded by `lock`.
     private var droppedUntimestampedFields = 0
 
@@ -158,6 +166,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         av_dict_free(&opts)
 
+        containerColor = ColorDescription(codecpar: codecpar)
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
         use10Bit = bitsPerSample > 8 || isHDRTransfer
@@ -245,6 +254,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             guard codecContext != nil else { lock.unlock(); break }
             let ret = avcodec_receive_frame(ctx, f)
             guard ret >= 0 else { lock.unlock(); break }
+
+            // AE#499: fill the fields the VUI left open from the container's declaration BEFORE any
+            // consumer reads the frame, for the same reason the timestamp repair below runs here.
+            ColorDescription.backfill(frame: f, container: containerColor)
 
             // #407: repair the frame's own timestamp BEFORE anything reads it. A frame that reaches
             // the renderer with no PTS is unschedulable and gets dropped there, so every consumer

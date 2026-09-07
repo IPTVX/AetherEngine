@@ -43,6 +43,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 - [KIPTV](https://kiptv.app): Premium, cross-platform IPTV Player.
 - [Silo](https://github.com/Silo-Server/silo-apple): native iOS, tvOS and macOS client for the Silo self-hosted media server.
 - [File Box](https://apps.apple.com/app/id6765818194): File Box is a simple and practical local file manager that makes it easy to manage, view, organize, and process your files on iPhone and iPad.
+- [Moonfin](https://github.com/Moonfin-Client/Moonfin-Core): A multi-platform third party Jellyfin client.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
@@ -73,6 +74,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
 | Custom input | Play any byte source via the `IOReader` protocol (`load(source:)`) |
 | Network | SMB2/3 shares via the optional `AetherEngineSMB` product (NTLMv2 / guest, read-only) |
+| Certificate trust | A media server behind a self-signed or private-CA certificate plays once the host answers for it: `EngineTLS.serverTrustEvaluator` is asked per challenge about the origin the challenge came from, so a LAN address behind a private certificate and a WAN address with a real one are decided separately. Covers every session the engine owns, and the native remote-HLS route too, where AVPlayer asks no delegate of its own: there the engine stands a loopback relay in front of the origin so the handshake runs where the evaluator is asked. The relay is mounted only for an origin the system actually refuses, and media is relayed as it arrives rather than read whole |
 
 ## How it compares
 
@@ -337,7 +339,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.68.4")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -482,9 +484,20 @@ playerVC.appliesPreferredDisplayCriteriaAutomatically = false
 try await engine.load(url: url, options: LoadOptions(
     suppressDisplayCriteria: false,      // default; engine writes criteria
     matchContentEnabled: matchContent,   // tvOS Match Content master toggle
-    panelIsInHDRMode: panelInHDRMode     // current EDR-headroom > 1.0
+    panelIsInHDRMode: panelInHDRMode,    // assertion: the panel is presenting HDR now
+    panelPresentsDolbyVision: false      // assertion: this display presents Dolby Vision
 ))
 ```
+
+**Both panel flags are assertions, not readings, and both default to `false`.** `panelIsInHDRMode` is an
+OR term over the engine's own EDR-headroom readout rather than a replacement for it: that readout answers
+only around a dynamic-range transition, so an Apple TV whose output format is locked to HDR never makes one
+and reads as an SDR panel forever ([#459](https://github.com/superuser404notfound/AetherEngine/issues/459)).
+`panelPresentsDolbyVision` covers the capability the engine cannot observe at all on macOS, where
+`AVPlayer.availableHDRModes` does not exist and HDR eligibility answers HDR10 and HLG but not Dolby Vision
+([#493](https://github.com/superuser404notfound/AetherEngine/issues/493)). An assertion only ever adds, so
+neither flag can hide a capability the system reports, and a wrong one costs a single in-place
+media-playlist fallback (`-11868` / `-11848`) at the same position rather than the item.
 
 `suppressDisplayCriteria` defaults to `false`, so the engine-driven path is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or 5 s timeout), then `replaceCurrentItem` runs against an already-correct panel.
 
@@ -540,10 +553,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.68.4")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.68.4")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "6.71.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 

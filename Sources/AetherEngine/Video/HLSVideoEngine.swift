@@ -1002,12 +1002,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// reroute (`hlsPlaylistOnVODPath`) or the live-path classification (`hlsPlaylistOnRawLivePath`,
     /// which AE#363 routes onto the live ingest for a URL source and rejects for a custom reader).
     /// A refused source (`httpStatus`) keeps its status the same way, so `load()` can publish it as
-    /// `PlaybackErrorKind.sourceRefused` instead of a wrapped "invalid data". Every other failure
-    /// keeps the historical wrapped shape.
+    /// `PlaybackErrorKind.sourceRefused` instead of a wrapped "invalid data", and a refused handshake
+    /// (`transportSecurityFailed`, AE#495) keeps its `NSURLError` code so it can publish as
+    /// `sourceCertificateRejected` rather than as a source that is merely unreadable. Every other
+    /// failure keeps the historical wrapped shape.
     static func openFailure(from error: Error) -> Error {
         if let readerError = error as? AVIOReaderError {
             switch readerError {
-            case .hlsPlaylistOnVODPath, .hlsPlaylistOnRawLivePath, .httpStatus:
+            case .hlsPlaylistOnVODPath, .hlsPlaylistOnRawLivePath, .httpStatus,
+                 .transportSecurityFailed:
                 return readerError
             default:
                 break
