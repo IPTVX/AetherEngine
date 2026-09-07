@@ -1274,7 +1274,8 @@ final class NativeAVPlayerHost {
                         + "stall-avoidance wait alone (buffer ahead "
                         + String(format: "%.2f", reading.aheadSeconds)
                         + "s, empty=\(reading.bufferEmpty), floor "
-                        + String(format: "%.2f", Self.minimumLiveJoinBufferAhead) + "s)",
+                        + String(format: "%.2f", Self.minimumLiveJoinBufferAhead) + "s)"
+                        + (Self.liveJoinPlacementClause(reading: reading).map { "; " + $0 } ?? ""),
                         category: .engine
                     )
                 }
@@ -1419,6 +1420,7 @@ final class NativeAVPlayerHost {
         let seen: String = reading.map {
             "last reading ahead \(String(format: "%.2f", $0.aheadSeconds))s, "
             + "empty=\($0.bufferEmpty), floor \(floor)s"
+            + (liveJoinPlacementClause(reading: $0).map { "; " + $0 } ?? "")
         } ?? "no reading of its own was taken before it ended, so the cushion named at the refusal is "
             + "the last one measured (floor \(floor)s)"
         let ahead = reading.map { String(format: "%.2f", $0.aheadSeconds) } ?? "n/a"
@@ -1487,13 +1489,70 @@ final class NativeAVPlayerHost {
             // Contiguous from the playhead, not the sum of every loaded range: an island past a gap
             // cannot sustain a rate that has to cross the gap to reach it.
             let ahead = NativeAVPlayerHost.contiguousBufferedEnd(ranges: ranges, now: now) - now
-            return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead)
+            let placement = NativeAVPlayerHost.liveJoinPlacement(ranges: ranges, now: now)
+            return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead,
+                                         playheadSeconds: now,
+                                         loadedRangeCount: placement.count,
+                                         nearestRangeOffsetSeconds: placement.nearestOffset)
         }
     }
 
     struct LiveJoinBufferReading: Sendable {
         let bufferEmpty: Bool
         let aheadSeconds: Double
+        /// Where the item says it is, which is the axis every other number here is measured against.
+        var playheadSeconds: Double = .nan
+        /// How many loaded ranges the item holds at all.
+        var loadedRangeCount: Int = 0
+        /// Signed distance from the playhead to the nearest loaded range that does not contain it:
+        /// positive when the nearest one STARTS that far ahead, negative when the nearest one ENDED
+        /// that far behind. nil when a range contains the playhead, or when there are none.
+        var nearestRangeOffsetSeconds: Double? = nil
+    }
+
+    /// AE#447 follow-up: `ahead 0.00s` is two different facts and the line printed one word for both.
+    ///
+    /// `contiguousBufferedEnd` returns the playhead itself whenever no range touches it, so an item
+    /// that has placed NOTHING AT ALL and an item that holds media somewhere else entirely read
+    /// identically, while `empty=false` (AVPlayer's own answer about the item) is true in both. Those
+    /// two need opposite investigations: nothing placed points at the fetch, placed elsewhere points at
+    /// the item and the playlist disagreeing about where the media sits. A field report that has to be
+    /// cross-referenced against a 1 Hz verbose `[LagDiag] fwd=-` to tell them apart is one nobody reads
+    /// that way, which is how a 20 s wedge arrived with the discriminating fact already in the capture
+    /// and unread.
+    nonisolated static func liveJoinPlacement(ranges: [(Double, Double)],
+                                              now: Double) -> (count: Int, nearestOffset: Double?) {
+        let usable = ranges.filter { $0.0.isFinite && $0.1.isFinite }
+        guard now.isFinite, !usable.isEmpty else { return (usable.count, nil) }
+        // The same tolerance the contiguity test uses, so "contains the playhead" means the same thing
+        // in both places and a range can never be reported as both.
+        if usable.contains(where: { $0.0 <= now + 1.0 && $0.1 >= now }) { return (usable.count, nil) }
+        let offsets = usable.map { $0.0 > now ? $0.0 - now : $0.1 - now }
+        let nearest = offsets.min(by: { abs($0) < abs($1) })
+        return (usable.count, nearest)
+    }
+
+    /// The placement clause the two accounts below carry when the cushion reads zero. nil when a range
+    /// contains the playhead: there the depth is the whole story and this would only add noise.
+    nonisolated static func liveJoinPlacementClause(reading: LiveJoinBufferReading) -> String? {
+        guard reading.aheadSeconds <= 0 else { return nil }
+        let head = reading.playheadSeconds.isFinite
+            ? String(format: "%.2f", reading.playheadSeconds) + "s"
+            : "an unreadable position"
+        if reading.loadedRangeCount == 0 {
+            return "the item holds no loaded range at all, so nothing has been placed on its axis "
+                + "since it was mounted (playhead \(head))"
+        }
+        guard let offset = reading.nearestRangeOffsetSeconds else {
+            // A range does contain the playhead and the depth is simply zero: starved at the edge.
+            return "the item holds \(reading.loadedRangeCount) loaded range(s) and the playhead sits "
+                + "inside one of them with nothing ahead of it (playhead \(head))"
+        }
+        let where_ = offset > 0
+            ? "starts \(String(format: "%.2f", offset))s AHEAD of it"
+            : "ended \(String(format: "%.2f", -offset))s BEHIND it"
+        return "the item holds \(reading.loadedRangeCount) loaded range(s) but none at the playhead: "
+            + "the nearest \(where_) (playhead \(head))"
     }
 
     func play() {

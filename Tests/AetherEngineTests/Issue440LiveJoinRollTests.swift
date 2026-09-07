@@ -452,4 +452,85 @@ struct Issue440LiveJoinRollTests {
         #expect(!paused.contains("rolled"))
         #expect(paused.contains("no decision was taken"))
     }
+
+    // MARK: - What `ahead 0.00s` was hiding (AE#447 follow-up)
+
+    /// An item that has placed NOTHING is the state a wedged join is in, and it read exactly like the
+    /// one below it because `contiguousBufferedEnd` returns the playhead whenever no range touches it.
+    @Test("no loaded range at all is reported as nothing placed")
+    func noRangeIsNothingPlaced() {
+        let placement = NativeAVPlayerHost.liveJoinPlacement(ranges: [], now: 95258.48)
+        #expect(placement.count == 0)
+        #expect(placement.nearestOffset == nil)
+
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 0, nearestRangeOffsetSeconds: nil))
+        #expect(clause?.contains("no loaded range at all") == true)
+        #expect(clause?.contains("95258.48s") == true)
+    }
+
+    /// The opposite fact, printed identically before this: the item HAS media, just not where the
+    /// playhead is. That points at the item and the playlist disagreeing about placement, not at a
+    /// fetch that never landed, and the two need opposite investigations.
+    @Test("a loaded island away from the playhead names the distance and its direction")
+    func islandAwayFromPlayheadNamesTheGap() {
+        let ahead = NativeAVPlayerHost.liveJoinPlacement(
+            ranges: [(95288.0, 95293.0)], now: 95258.48)
+        #expect(ahead.count == 1)
+        #expect(abs((ahead.nearestOffset ?? 0) - 29.52) < 0.01)
+
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 1, nearestRangeOffsetSeconds: 29.52))
+        #expect(clause?.contains("AHEAD") == true)
+        #expect(clause?.contains("29.52s") == true)
+
+        // Behind the playhead is the other direction and has to read as one: a window that slid past
+        // the consumer leaves exactly this shape.
+        let behind = NativeAVPlayerHost.liveJoinPlacement(
+            ranges: [(95200.0, 95240.0)], now: 95258.48)
+        #expect(abs((behind.nearestOffset ?? 0) + 18.48) < 0.01)
+        let behindClause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 1, nearestRangeOffsetSeconds: -18.48))
+        #expect(behindClause?.contains("BEHIND") == true)
+    }
+
+    /// A range that DOES contain the playhead is starvation at the edge, which is a third state again,
+    /// and the depth is the whole story there. It must not be dressed up as a placement problem.
+    @Test("a range containing the playhead reports no gap")
+    func rangeAtPlayheadHasNoGap() {
+        let placement = NativeAVPlayerHost.liveJoinPlacement(
+            ranges: [(95250.0, 95258.48)], now: 95258.48)
+        #expect(placement.count == 1)
+        #expect(placement.nearestOffset == nil)
+
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 1, nearestRangeOffsetSeconds: nil))
+        #expect(clause?.contains("inside one of them") == true)
+    }
+
+    /// The clause exists to disambiguate a zero. A cushion that is really there needs no help from it,
+    /// and adding it everywhere would bury the number the decision is actually taken on.
+    @Test("a real cushion carries no placement clause")
+    func realCushionHasNoClause() {
+        #expect(NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 5.97, playheadSeconds: 95258.48,
+                           loadedRangeCount: 1, nearestRangeOffsetSeconds: nil)) == nil)
+    }
+
+    /// The account a 20 s field wedge actually produces has to carry it, or the reader is back to
+    /// cross-referencing a 1 Hz verbose line from another log to tell the two zeros apart.
+    @Test("the budget-spent account names which zero it measured")
+    func budgetSpentAccountCarriesPlacement() {
+        let line = NativeAVPlayerHost.liveJoinHoldAccount(
+            outcome: .budgetSpent, standingSeconds: 5.11,
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 0, nearestRangeOffsetSeconds: nil))
+        #expect(line.contains("still standing after 5.11s"))
+        #expect(line.contains("empty=false"))
+        #expect(line.contains("no loaded range at all"))
+    }
 }
