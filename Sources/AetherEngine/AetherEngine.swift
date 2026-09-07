@@ -3442,6 +3442,17 @@ public final class AetherEngine: ObservableObject {
         // so the format clamp below and the served DV route cannot disagree about the same display.
         let observedDisplayCaps = Self.displayCapabilities
         let sessionDisplayCaps = observedDisplayCaps.assertingDolbyVision(options.panelPresentsDolbyVision)
+        // What the clamp below and the served route are about to read, stated once per load. Every question
+        // this table decides (why a source resolved to SDR, why a panel was asked for one format and not
+        // another, why a route went media-direct) was previously answered by inference from the outcome,
+        // and a per-mode false is an assertion the platform made, not an absence of information (AE#493).
+        EngineLog.emit(
+            "[DisplayCapabilities] observed: hdr=\(observedDisplayCaps.supportsHDR) "
+            + "hdr10=\(observedDisplayCaps.supportsHDR10) hlg=\(observedDisplayCaps.supportsHLG) "
+            + "dv=\(observedDisplayCaps.supportsDolbyVision)"
+            + (options.panelPresentsDolbyVision ? " (session dv asserted true)" : ""),
+            category: .session
+        )
         let probe = Demuxer()
         // Register so stopInternal can markClosed(): avformat_open_input/find_stream_info can block for the
         // full AVIOReader reconnect budget (device repro: a 500-looping channel kept reconnecting across three

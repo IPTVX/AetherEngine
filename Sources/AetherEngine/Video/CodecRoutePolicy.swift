@@ -466,7 +466,14 @@ extension HLSVideoEngine {
             }
             let compat = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 1)
             let needsCompatRewrite = compat != 1
-            let supplemental: String? = effectiveDvMode ? "dvh1.08.\(dvLevelStr)/db1p" : nil
+            // Emitted on every display, not only a DV-capable one. The pairing of a plain `hvc1` CODECS
+            // with a DV SUPPLEMENTAL is what the HLS authoring spec asks for, and it exists precisely so a
+            // client that does not know `dvh1` reads the base layer instead of failing, which is not a
+            // hypothetical audience here: the loopback master is handed to wireless AirPlay receivers, and
+            // an AirPlay 2 television is that client. The gate that stood here was a real measurement
+            // (f7e9f77f: black picture on an HDR10-only panel) from the same afternoon as the strip above,
+            // and it does not reproduce on tvOS 26.6 either.
+            let supplemental: String? = "dvh1.08.\(dvLevelStr)/db1p"
             let doviConfig: MP4SegmentMuxer.DoviConfigPolicy =
                 needsCompatRewrite ? .rewriteToProfile81 : .keep
             if needsCompatRewrite {
@@ -496,7 +503,8 @@ extension HLSVideoEngine {
             //   different one, and the dvcC it would consult claims compat=4 rather than 1.
             // Note: dvh1 sample entry is never valid for HLG-base (AVPlayer rejects it, DrHurt#4 Build 160),
             //   so there is no P5-style masquerade here, only the record itself.
-            let supplemental: String? = effectiveDvMode ? "dvh1.08.\(dvLevelStr)/db4h" : nil
+            // Unconditional for the same reason as P8.1 above; db4h is the HLG-base brand.
+            let supplemental: String? = "dvh1.08.\(dvLevelStr)/db4h"
             let doviConfig: MP4SegmentMuxer.DoviConfigPolicy = .keep
             return CodecRoute(
                 codecTagOverride: "hvc1",
