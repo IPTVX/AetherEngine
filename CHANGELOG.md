@@ -12,6 +12,25 @@ the public-API contract.
 
 ### Fixed
 
+- **An MP4 that carries valid composition offsets at its head and none in a
+  later region gets that region's display order back.** A healthy head is not
+  proof of a healthy table: some writers fill `ctts` for the first sequences and
+  leave zeros behind them, so a whole-file verdict reads "healthy" where it looks
+  and every reordered sequence past that point is delivered in coding order for
+  the rest of the file. A corroborated healthy origin now also arms a bounded
+  watch for zero-offset IDR sequences, and a picture in one of them claims the
+  timestamp slot its own display rank owns, read from the file rather than fitted
+  to a cadence, so an interval change inside a sequence survives instead of being
+  guessed away. Decode timestamps, the published keyframe index, packet payloads
+  and audio never move, and a picture waits its mini-GOP rather than the end of
+  its sequence, so no sequence is too long to repair. Measured on a generated
+  twin whose second zero-offset sequence is 420 pictures: a deepest wait of 6
+  packets, and 1800 of 1800 packet times identical to the healthy twin's own
+  axis. Every refusal hands the held packets back exactly as they arrived and
+  lets the rest of that sequence stream through, because the judder this removes
+  is a far smaller failure than a session that stops. Diagnosed and contributed
+  by @orut34iop in PR #513.
+
 - **Software VOD reads compressed packets ahead of the decoder, and keeps what
   it has read across a seek that lands inside it.** The software path had no
   reservoir of its own: the demux loop read on renderer backpressure alone, so
