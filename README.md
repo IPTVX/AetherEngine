@@ -499,6 +499,16 @@ and reads as an SDR panel forever ([#459](https://github.com/superuser404notfoun
 neither flag can hide a capability the system reports, and a wrong one costs a single in-place
 media-playlist fallback (`-11868` / `-11848`) at the same position rather than the item.
 
+That fallback covers the failure class AVPlayer reports as an item failure, which is not the whole space,
+and the gap sits on tvOS. An asserted Profile 8.1 is served the way a DV panel is served (`dvvC` in the
+sample entry plus `SUPPLEMENTAL-CODECS`), and on an HDR10-only panel that packaging was measured to reach
+`readyToPlay`, play for a second or two and then stall with `-15628` in the item's error log
+([#4](https://github.com/superuser404notfound/AetherEngine/issues/4), 2026-05-26). A stall is not an item
+failure, so nothing catches it. On tvOS the flag for a display without Dolby Vision is
+`forceDolbyVisionOnNonDVDisplay`, which serves that source as a Profile 5 instead and is device-verified on
+exactly that panel class ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455));
+asserting DV turns it off, because it is gated on the display having none.
+
 `suppressDisplayCriteria` defaults to `false`, so the engine-driven path is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or 5 s timeout), then `replaceCurrentItem` runs against an already-correct panel.
 
 **Handoffs between items:** back-to-back `load()` calls preserve the applied criteria across the seam, so a same-mode follow-up (Dolby Vision episode to Dolby Vision episode) overwrites it in place with a single handshake instead of bouncing the panel through SDR. If your host calls `stop()` between items, pass `stop(resetDisplayCriteria: false)` to get the same behavior ([#128](https://github.com/superuser404notfound/AetherEngine/pull/128)); the plain `stop()` returns the panel to its default mode, which is what you want when leaving playback for the app UI. Audio-only sessions and suppressed hosts clear a leftover criteria automatically.
