@@ -51,6 +51,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var bytes = 0
     private var residentBytes = 0
     private var sourceClock: Double
+    /// Newest video presentation time handed to the store, and the one the consumer last took out
+    /// of it. Their distance is the reservoir the producer is filling, and unlike the coverage
+    /// frontier it survives a hole and a late timestamp, which is what keeps the forward-second
+    /// limit in force on material the coverage model cannot describe.
+    private var storedVideoSeconds: Double?
+    private var consumedVideoSeconds: Double?
     private var videoCoverage = SoftwarePacketCoverage()
     private var audioCoverage = SoftwarePacketCoverage()
     private var presentationCoverage: SoftwareVideoPacketCoverage?
@@ -158,6 +164,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                 guard token == generation, !closed else { throw ReadError.interrupted }
                 copyDiskStateLocked(state)
                 sourceClock = seconds
+                // The cursor moved, so the reservoir is measured from the target again. Left at
+                // the old high-water mark, a backward hit would read as a full reservoir and a
+                // forward one as an empty one.
+                consumedVideoSeconds = seconds
                 cacheSeekHits &+= 1
                 condition.broadcast()
                 return true
@@ -174,13 +184,17 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         }
         sourceEpoch &+= 1
         sourceRepositioning = true
-        resetPending = false
+        // Discarding the spool is the WORKER's job, not the seek's. Reset removes every retained
+        // chunk one by one, so its cost grows with what the session has kept: measured 4.5 ms at
+        // 64 MB, 18.9 ms at 256 MB, 60.9 ms at 512 MB, on a ceiling of 2 GiB. Done inline, a miss
+        // got slower the longer the session had been running, for work no seek waits on: the
+        // producer parks on `sourceRepositioning` until `endSeek`, and takes the reset first.
+        resetPending = true
         clearSourceMetadataLocked()
         sourceClock = seconds
         cacheSeekMisses &+= 1
         condition.broadcast()
         condition.unlock()
-        try fifo.reset()
         return false
     }
 
@@ -247,6 +261,9 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         defer { condition.unlock() }
         guard !closed, !seeking, token == generation, isCurrent() else { throw ReadError.interrupted }
         copyDiskStateLocked(state)
+        if packet.streamIndex == video.index, let seconds = videoSeconds(pts: packet.pts) {
+            consumedVideoSeconds = seconds
+        }
         condition.broadcast()
         return packet
     }
@@ -273,7 +290,15 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         count = 0; bytes = 0; residentBytes = 0
         ended = false; failure = nil
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
+        storedVideoSeconds = nil; consumedVideoSeconds = nil
         keyframes.removeAll(keepingCapacity: true)
+    }
+
+    /// Presentation seconds of a stored packet, or nil when this stream cannot express them.
+    private func videoSeconds(pts: Int64) -> Double? {
+        guard pts != Int64.min, video.numerator > 0, video.denominator > 0 else { return nil }
+        let seconds = Double(pts) * Double(video.numerator) / Double(video.denominator)
+        return seconds.isFinite ? seconds : nil
     }
 
     private func copyDiskStateLocked(_ state: SoftwarePacketDiskFIFO.Snapshot) {
@@ -353,10 +378,9 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                             } else {
                                 videoCoverage.insert(pts: packet.pts, duration: packet.duration)
                             }
-                            if packet.flags & 1 != 0, packet.pts != Int64.min,
-                               video.numerator > 0, video.denominator > 0 {
-                                let seconds = Double(packet.pts) * Double(video.numerator) / Double(video.denominator)
-                                if seconds.isFinite { keyframes.append(Keyframe(seconds: seconds, cursor: cursor)) }
+                            if let seconds = videoSeconds(pts: packet.pts) { storedVideoSeconds = seconds }
+                            if packet.flags & 1 != 0, let seconds = videoSeconds(pts: packet.pts) {
+                                keyframes.append(Keyframe(seconds: seconds, cursor: cursor))
                                 if keyframes.count > maximumKeyframes {
                                     keyframes.removeFirst(min(1024, keyframes.count))
                                 }
@@ -378,7 +402,19 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         // cursor rollover, so residency also includes bounded protected chunk slack (not an
         // unbounded batch). Unknown time coverage is never guessed from bitrate.
         guard count > 0 else { return false }
-        return residentBytes >= byteBudget || (frontierLocked().map { $0 - sourceClock >= forwardSeconds } ?? false)
+        if residentBytes >= byteBudget { return true }
+        // The forward limit is measured on the RESERVOIR, from the packet the consumer last took
+        // to the newest one stored, because that is what the producer is actually building and it
+        // is knowable from two timestamps. The coverage frontier answers a stricter question (is
+        // this stretch continuously playable) and returns nothing at all once a hole or one late
+        // presentation timestamp invalidates it; keyed on that alone, the seconds limit stopped
+        // existing there and only the disk budget still bounded the read-ahead. Measured on a
+        // 10 s window: 283 packets read with clean timestamps, 1316 with a single late one, which
+        // in a session is the difference between a window and the whole file.
+        if let stored = storedVideoSeconds, stored - (consumedVideoSeconds ?? sourceClock) >= forwardSeconds {
+            return true
+        }
+        return frontierLocked().map { $0 - sourceClock >= forwardSeconds } ?? false
     }
 
     private func recordFailure(_ error: Error, token: UInt64) {
