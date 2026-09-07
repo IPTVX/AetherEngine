@@ -94,13 +94,25 @@ struct Issue455ForcedDVRouteTests {
 
     // MARK: - The route
 
-    @Test("without the opt-in a non-DV display still gets the stripped HDR10 base layer")
-    func defaultRouteUnchanged() throws {
+    @Test("without the opt-in a non-DV display gets the base layer with its dvcC kept and no SUPPLEMENTAL")
+    func defaultRouteKeepsTheRecord() throws {
         let r = try Self.route(profile: 8, compat: 1, dvDisplay: false, forceDV: false)
         #expect(r.codecTagOverride == "hvc1")
         #expect(r.primaryCodecs == "hvc1.2.4.L153")
+        // Inert on a panel without DV (AVPlayer resolves the item as hdr10 either way) and it carries its
+        // own black-picture history, so the upgrade signal stays on the DV branch.
         #expect(r.supplementalCodecs == nil)
-        #expect(r.doviConfig == .strip)
+        // AE#493, tvOS 26.6: the strip that stood here defended a -11868 that no longer reproduces, and it
+        // cost the RPU on every session AVPlayer has to tone-map.
+        #expect(r.doviConfig == .keep)
+    }
+
+    @Test("the malformed \"P8.6\" compat id normalizes on a non-DV display too")
+    func p86NormalizesWithoutDVDisplay() throws {
+        let r = try Self.route(profile: 8, compat: 6, dvDisplay: false, forceDV: false)
+        #expect(r.supplementalCodecs == nil)
+        // A kept record has to be a truthful one: dropping it hid the malformed compat before.
+        #expect(r.doviConfig == .rewriteToProfile81)
     }
 
     @Test("with the opt-in a non-DV display gets the Profile 5 packaging")
@@ -142,7 +154,9 @@ struct Issue455ForcedDVRouteTests {
                                dvDisplay: false, forceDV: true)
         #expect(r.codecTagOverride == "hvc1")
         #expect(r.videoRange == .hlg)
-        #expect(r.doviConfig == .strip)
+        // No masquerade here, and since AE#493 no strip either: the record stays as the source wrote it.
+        #expect(r.doviConfig == .keep)
+        #expect(r.supplementalCodecs == nil)
     }
 
     @Test("P5 is unaffected: it was already served this way")

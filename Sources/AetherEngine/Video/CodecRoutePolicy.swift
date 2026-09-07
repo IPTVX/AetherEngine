@@ -429,9 +429,16 @@ extension HLSVideoEngine {
             // P8.1 (HDR10-compat base).
             // DV panel: hvc1 + dvvC (muxer writes dvvC automatically) + SUPPLEMENTAL dvh1.08.XX/db1p.
             //   db1p required; without it AVPlayer treats variant as plain HDR10 and DV never engages.
-            // Non-DV panel: strip dvvC (hvc1 + dvvC trips -11868 even without SUPPLEMENTAL, 2026-05-26).
-            // "P8.6" malformed compat (#53): the dvcC rewrite normalizes the container to compat=1;
-            //   on non-DV panel the strip path handles it without rewrite.
+            // Non-DV panel: keep the dvvC, no SUPPLEMENTAL. The strip that stood here was measured
+            //   against tvOS 26.0 in May 2026 (hvc1 + dvvC trips -11868 even without SUPPLEMENTAL) and no
+            //   longer reproduces: on tvOS 26.6, an Apple TV 4K 3rd gen at an HDR10-only Samsung plays the
+            //   unstripped packaging with no error log entry at all, and on the media-direct route (panel
+            //   parked in SDR) the dvvC is what makes AVPlayer put the RPU on the pixels instead of
+            //   tone-mapping the flat base layer. The box is the whole gain: the same run showed the
+            //   SUPPLEMENTAL inert on a panel without DV (AVPlayer resolves the item as hdr10 either way),
+            //   so it stays gated on effectiveDvMode where its own black-picture history is (f7e9f77f).
+            // "P8.6" malformed compat (#53): normalize the container to compat=1 on both branches now that
+            //   the non-DV branch keeps the record rather than dropping it.
             // AE#455, opt-in: on a display with no Dolby Vision of its own, serve the P8.1 the way a P5
             // is served, so AVPlayer composes the RPU itself instead of the panel receiving the bare
             // HDR10 base layer with its one static grade. The bitstream is untouched; what moves is the
@@ -459,20 +466,14 @@ extension HLSVideoEngine {
             }
             let compat = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 1)
             let needsCompatRewrite = compat != 1
-            let supplemental: String?
-            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy
-            if effectiveDvMode {
-                supplemental = "dvh1.08.\(dvLevelStr)/db1p"
-                doviConfig = needsCompatRewrite ? .rewriteToProfile81 : .keep
-            } else {
-                supplemental = nil
-                doviConfig = .strip
-            }
-            if needsCompatRewrite && effectiveDvMode {
+            let supplemental: String? = effectiveDvMode ? "dvh1.08.\(dvLevelStr)/db1p" : nil
+            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy =
+                needsCompatRewrite ? .rewriteToProfile81 : .keep
+            if needsCompatRewrite {
                 EngineLog.emit(
                     "[HLSVideoEngine] HEVC DV Profile 8 with invalid compat="
                     + "\(compat) (\"P8.6\"); normalizing container dvcC to "
-                    + "P8.1 (compat=1) for AVPlayer on DV panel",
+                    + "P8.1 (compat=1)",
                     category: .session
                 )
             }
@@ -488,17 +489,15 @@ extension HLSVideoEngine {
         case .profile84:
             // P8.4 (HLG-compat base). Mirrors P8.1 routing.
             // DV panel: hvc1 + dvvC + SUPPLEMENTAL dvh1.08.XX/db4h. db4h marks HLG-base for AVKit criteria.
-            // Non-DV panel: strip dvvC (same -11868 risk as P8.1). Plain HLG plays + tonemaps on all panels.
-            // Note: dvh1 sample entry is never valid for HLG-base (AVPlayer rejects it, DrHurt#4 Build 160).
-            let supplemental: String?
-            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy
-            if effectiveDvMode {
-                supplemental = "dvh1.08.\(dvLevelStr)/db4h"
-                doviConfig = .keep
-            } else {
-                supplemental = nil
-                doviConfig = .strip
-            }
+            // Non-DV panel: keep the dvvC, no SUPPLEMENTAL, for the reason written out on the P8.1 branch
+            //   above. The -11868 that both strips were built against was one panel on tvOS 26.0 and does
+            //   not reproduce on 26.6. P8.4 is measured separately from P8.1 rather than assumed: its base
+            //   layer is HLG, so the conversion AVPlayer performs on a panel that is not in HDR is a
+            //   different one, and the dvcC it would consult claims compat=4 rather than 1.
+            // Note: dvh1 sample entry is never valid for HLG-base (AVPlayer rejects it, DrHurt#4 Build 160),
+            //   so there is no P5-style masquerade here, only the record itself.
+            let supplemental: String? = effectiveDvMode ? "dvh1.08.\(dvLevelStr)/db4h" : nil
+            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy = .keep
             return CodecRoute(
                 codecTagOverride: "hvc1",
                 videoRange: .hlg,
