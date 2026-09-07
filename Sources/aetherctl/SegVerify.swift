@@ -25,11 +25,14 @@ func runSegVerify(url: URL, from: Int, count: Int, dvModeAvailable: Bool,
     print("segverify: engine started, playlist=\(playbackURL.absoluteString)")
     defer { engine.stop() }
 
-    guard var comps = URLComponents(url: playbackURL, resolvingAgainstBaseURL: false) else {
+    // The loopback server serves every resource under the session's own path prefix, so the base is
+    // the playlist's DIRECTORY. Clearing the path instead aimed every fetch at the server root, where
+    // nothing is published, and the run died on init.mp4 before a single segment was decoded.
+    guard var comps = URLComponents(url: playbackURL.deletingLastPathComponent(),
+                                    resolvingAgainstBaseURL: false) else {
         print("ERROR: cannot parse playback URL \(playbackURL)")
         return 1
     }
-    comps.path = ""
     comps.query = nil
     guard let base = comps.url else {
         print("ERROR: cannot derive loopback base from \(playbackURL)")
