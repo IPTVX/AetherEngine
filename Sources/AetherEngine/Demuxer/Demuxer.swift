@@ -229,6 +229,12 @@ public final class Demuxer: @unchecked Sendable {
     // Forward-only custom sources report false.
     var isSourceSeekable: Bool { avioProvider?.isSeekable ?? true }
 
+    /// True when libavformat opened the source itself, which it does only for a local path
+    /// (`openLocal`). Every network, disc and custom source is read through an `AVIOProvider`.
+    /// A caller that only wants to spend disk to avoid a re-READ asks this: re-reading a local
+    /// file costs a page-cache hit, so a second copy of it in the temporary directory buys nothing.
+    var readsSourceDirectly: Bool { avioProvider == nil }
+
     /// Timestamp of last unplanned reconnect (drop/stall, not a seek).
     /// Live producer correlates with backward source-PTS reset to detect
     /// Jellyfin transcode respawn. See `AVIOReader.lastUnplannedReconnectAt`.

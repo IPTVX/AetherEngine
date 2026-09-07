@@ -23,7 +23,10 @@ the public-API contract.
   session's existing `forwardBufferSegments` window and volume-safety budget,
   and a seek whose target is still retained moves only the consumer cursor: the
   source reader stays at its own frontier and nothing already downloaded is
-  discarded. Measured on a 600 s H.264 source over a 16 Mbit origin, seeking
+  discarded. A local path stays on the direct loop: the spool exists to avoid a
+  second trip to a source, and re-reading a file is a page-cache hit.
+
+  Measured on a 600 s H.264 source over a 16 Mbit origin, seeking
   back 198 s after 200 s of playback: before, two 4 MB detour fetches and two
   blocking reads of 2658 ms and 2623 ms with the display cushion at 0.00 s;
   after, no request at all and the cushion untouched. `bufferedPosition` on a

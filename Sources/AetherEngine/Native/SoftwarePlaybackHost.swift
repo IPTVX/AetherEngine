@@ -851,7 +851,11 @@ final class SoftwarePlaybackHost {
             initialClockTime = .zero
         }
 
-        if !isLive, dem.isSourceSeekable {
+        // A local path is left on the direct loop: the spool exists to avoid a second trip to a
+        // SOURCE, and re-reading a file is a page-cache hit. Measured on a file:// session, the
+        // cache wrote 14 MB of temporary chunks in 25 s (the source bitrate) for a seek that would
+        // have cost nothing anyway.
+        if !isLive, dem.isSourceSeekable, !dem.readsSourceDirectly {
             let video = SoftwarePacketReadAhead.Stream(index: videoStreamIndex,
                                                        numerator: vtb.num, denominator: vtb.den)
             let audio: SoftwarePacketReadAhead.Stream? = audioStreamIndex >= 0

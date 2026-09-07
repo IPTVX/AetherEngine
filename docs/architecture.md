@@ -1,50 +1,5 @@
 # Architecture
 
-## Software VOD compressed packet cache
-
-Seekable software VOD has a compressed packet producer separate from the
-renderer-paced decode consumer. The producer stores lossless packet envelopes in
-a session-owned temporary disk FIFO. Envelopes preserve payload, PTS/DTS, packet
-duration, position, flags, stream index, time base and every side-data entry;
-neither decoded pictures nor source URLs are retained in metadata.
-
-The host uses the existing `forwardBufferSegments` clamp and native session
-retention/volume-safety policy. Byte and forward-time thresholds stop prefetch,
-with bounded protected-chunk and single-record slack. Old consumed chunks can
-be reclaimed at the exact budget boundary so refill cannot deadlock. Metadata
-reads and seek intent are main-thread safe; disk operations and source reads
-stay on workers. Stop releases the session's directory, and bounded stale
-cleanup uses session leases without following symlinks or deleting live stores.
-If creating the store fails, the original direct playback loop remains available.
-Runtime cache corruption is a reported playback failure, not silently skipped data.
-
-The cache frontier is the intersection of selected audio and video presentation
-coverage containing the playhead. Unknown intervals remain unknown; byte counts
-are not converted to guessed seconds. H.264 uses a bounded presentation reorder
-queue and confirmed successor timestamps, because a VFR packet's decode duration
-can be shorter than the picture's actual display hold. Larger discontinuities,
-invalid or unexpectedly late timestamps invalidate or split coverage. Other
-codecs retain strict packet-duration coverage. Without a proven compressed
-frontier, the existing decoded-cushion fallback still applies.
-
-A cached seek restores a retained keyframe cursor, including an earlier keyframe
-for available preroll, and keeps the producer at its existing source frontier.
-A cache miss clears coverage and repositions the demuxer. Consumer generations
-and source epochs are separate: a cached seek must not discard an in-flight
-producer packet, and a superseded consumer must not steal the first packet of a
-new source epoch. Admission applies equally to packet, EOF, error and delayed
-end-of-media callbacks. At EOF the VOD consumer parks until a new seek or stop.
-
-This changes engine cache semantics, not host UI. Software `bufferedPosition`
-and `LiveTelemetry.cachedBytes` describe compressed coverage/residency;
-`forwardBufferSeconds` remains the native player's loaded-range metric and
-`displayCushionSeconds` still describes the small decoded queue. Native HLS
-`residentRanges` and live DVR are not repurposed.
-
-The CI packet-cache step runs the standalone coverage, VFR successor, disk FIFO,
-read-ahead concurrency, host admission and AVPacket-envelope regressions. These
-use generated numeric data and temporary records, not private video fixtures.
-
 How AetherEngine is put together: the three playback pipelines, the source-file map, and the dependency surface. For the public API and integration, see the [README](../README.md); for format and codec depth, [docs/formats.md](formats.md).
 
 ## Playback pipelines
@@ -174,6 +129,62 @@ Routes the host did not ask for:
 | `.loopback` -> `.remoteBypass` | AE#154 / AE#246: an HLS playlist reached the loopback path, which cannot demux it. At load time. |
 
 Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
+
+## Software VOD compressed packet cache
+
+Seekable software VOD read through one of the engine's byte readers has a
+compressed packet producer separate from the renderer-paced decode consumer. The
+producer stores lossless packet envelopes in a session-owned temporary disk FIFO.
+Envelopes preserve payload, PTS/DTS, packet duration, position, flags, stream
+index, time base and every side-data entry; neither decoded pictures nor source
+URLs are retained in metadata. A source libavformat opens itself, which is a
+local path, stays on the direct loop: the spool exists to avoid a second trip to
+a source, and re-reading a file is a page-cache hit.
+
+The host uses the existing `forwardBufferSegments` clamp and native session
+retention/volume-safety policy. The forward-second limit is measured on the
+reservoir, from the packet the consumer last took to the newest one stored,
+because that is what the producer is building and two timestamps always say it.
+The coverage frontier below answers a stricter question and reports nothing at
+all once a hole or a single late presentation timestamp invalidates it, so it
+cannot be the only thing holding the limit up. Byte and forward-time thresholds
+stop prefetch, with bounded protected-chunk and single-record slack. Old consumed chunks can
+be reclaimed at the exact budget boundary so refill cannot deadlock. Metadata
+reads and seek intent are main-thread safe; disk operations and source reads
+stay on workers. Stop releases the session's directory, and bounded stale
+cleanup uses session leases without following symlinks or deleting live stores.
+If creating the store fails, the original direct playback loop remains available.
+Runtime cache corruption is a reported playback failure, not silently skipped data.
+
+The cache frontier is the intersection of selected audio and video presentation
+coverage containing the playhead. Unknown intervals remain unknown; byte counts
+are not converted to guessed seconds. H.264 uses a bounded presentation reorder
+queue and confirmed successor timestamps, because a VFR packet's decode duration
+can be shorter than the picture's actual display hold. Larger discontinuities,
+invalid or unexpectedly late timestamps invalidate or split coverage. Other
+codecs retain strict packet-duration coverage. Without a proven compressed
+frontier, the existing decoded-cushion fallback still applies.
+
+A cached seek restores a retained keyframe cursor, including an earlier keyframe
+for available preroll, and keeps the producer at its existing source frontier.
+A cache miss clears coverage and repositions the demuxer; discarding the spool
+is the worker's job, not the seek's, because removing every retained chunk costs
+more the longer the session has kept them and no seek waits on that work.
+Consumer generations
+and source epochs are separate: a cached seek must not discard an in-flight
+producer packet, and a superseded consumer must not steal the first packet of a
+new source epoch. Admission applies equally to packet, EOF, error and delayed
+end-of-media callbacks. At EOF the VOD consumer parks until a new seek or stop.
+
+This changes engine cache semantics, not host UI. Software `bufferedPosition`
+and `LiveTelemetry.cachedBytes` describe compressed coverage/residency;
+`forwardBufferSeconds` remains the native player's loaded-range metric and
+`displayCushionSeconds` still describes the small decoded queue. Native HLS
+`residentRanges` and live DVR are not repurposed.
+
+The CI packet-cache step runs the standalone coverage, VFR successor, disk FIFO,
+read-ahead concurrency, host admission and AVPacket-envelope regressions. These
+use generated numeric data and temporary records, not private video fixtures.
 
 ## SwiftUI `Menu` in custom player chrome
 
