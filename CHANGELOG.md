@@ -12,6 +12,40 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.73.0] - 2026-09-07
+
+### Changed
+
+- **`SUPPLEMENTAL-CODECS` is emitted for Dolby Vision Profile 8.1 and 8.4 on
+  every display, not only a Dolby-Vision-capable one.** Pairing a plain `hvc1`
+  primary `CODECS` with a DV supplemental is what the HLS authoring
+  specification asks for, and the pairing exists so a client that does not
+  recognise `dvh1` reads the HDR10 or HLG base layer instead of failing to play
+  at all. That client is not hypothetical for this engine: the loopback master
+  is handed to wireless AirPlay receivers, and an AirPlay 2 television is
+  exactly the device the pairing was written for. The gate also keyed on the
+  sending device's own display, which on iOS is read device-wide, so a sender
+  without Dolby Vision aimed at a receiver that has it dropped the signal for
+  no reason.
+
+  The gate was a measurement rather than a guess, from the same afternoon as
+  the strip removed in 6.72.0: an unconditional supplemental switched an
+  HDR10-only panel to HDR through `VIDEO-RANGE=PQ` and then showed a black
+  picture with no error at all. It does not reproduce on tvOS 26.6. Measured
+  for both profiles on an Apple TV 4K 3rd generation at a Samsung HDR10+ panel
+  with no Dolby Vision of its own, master served with the supplemental and the
+  session's own DV mode false: picture present, clip plays, no error log entry.
+  Suggested by DrHurt (#493).
+
+### Added
+
+- **`[DisplayCapabilities] observed: hdr=… hdr10=… hlg=… dv=…`, once per load.**
+  Every question this table decides was previously answered by inferring
+  backwards from the outcome, and a per-mode `false` is an assertion the
+  platform made rather than an absence of information. It lands in the host's
+  diagnostic log like every other engine line, so a report that a source
+  "plays as SDR" arrives with the reason attached.
+
 ## [6.72.0] - 2026-09-07
 
 ### Changed
