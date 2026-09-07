@@ -527,6 +527,22 @@ If a second FFmpeg in the app takes those symbols, that line turns into an `ERRO
 
 The handler fires from whatever thread emitted the line (demuxer, producer pump, local server, audio bridge), so it must be thread-safe and non-blocking; serialize onto a queue before writing to a file. Per-segment trace lines are emitted at `.verbose` and reach os_log's debug level only, never the handler, so the mirrored stream stays readable. `aetherctl` installs exactly this handler, which is why the CLI prints what the app hides.
 
+**Reading the log out of a GUI host is its own problem, and it is worth solving before you need it.** An
+app launched from Finder or `open` has no stdout you can read, so the handler above has nowhere to print
+to; a reporter on #493 lost most of a measurement session to this. Install the handler and write it to a
+file you can name, flushing per line, and do it on every build rather than only when hunting something:
+
+```swift
+EngineLog.handler = { line in DiagnosticFile.shared.append(line) }  // your own serial queue + flush
+```
+
+The os_log side does work and is worth knowing as the fallback, but it needs a time window: `log show
+--last 10m --predicate 'subsystem == "de.superuser404.AetherEngine"'` returns the session's lines here on
+macOS 26.5. Without `--last`, or against a bare `log show`, the same predicate reads as if the engine
+never logged. Lines are emitted with `.public` privacy, so they arrive whole rather than as `<private>`,
+which is also why [`LogRedaction`](Sources/AetherEngine/Diagnostics/LogRedaction.swift) scrubs credentials
+at the funnel: what reaches your file is what reaches a sysdiagnose.
+
 ## Non-goals
 
 Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
