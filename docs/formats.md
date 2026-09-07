@@ -58,6 +58,41 @@ short of that (variable frame timing, a picture order that does not advance one 
 sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
 Reported by @orut34iop.
 
+### Matroska with presentation slots in coding order
+
+Matroska block timestamps are presentation timestamps by specification, and the format has no
+composition-offset table to lose. A writer that fills them packet by packet while the bitstream
+reorders pictures has therefore not lost anything: every presentation slot is still in the file, each
+one just arrived attached to the picture that was *decoded* at that position rather than the one that
+is *displayed* there. On the reporting asset the first slots are 0, 40, 73, 107, 140 and the decoder
+emitted them as 0, 73, 107, 140, 40, one stepped-back presentation clock per mini-GOP for the length
+of the file. Measured here through the engine's own software decoder on a generated twin, 15 of 30
+frame times stepped backwards before the repair and 0 after (#511).
+
+`H264MatroskaSlotPermutation` therefore permutes rather than reconstructs: a picture carries the slot
+its own display rank owns, and the slot is read from the file instead of being computed. Nothing fits
+a cadence, so a ladder quantized from a fractional frame rate is reproduced exactly rather than to
+within a tick, and a slot the writer clamped onto its cluster origin (the reporting asset has one, 7
+ticks below the 1001/30 lattice its other 59 slots sit on) survives as written. Nothing moves the
+decode timestamps either: libavformat derives them from the rising slot ladder, which is the decode
+order the stream really has, and a picture at most its own reorder delay behind its slot cannot
+violate `PTS >= DTS`. The container index is untouched for the same reason, since it holds keyframe
+slots and a keyframe is the first picture of its own sequence.
+
+The slot a picture needs is a packet away, not a plan away. A picture coded ahead of the slot it owns
+waits for the packet carrying that slot, which is the mini-GOP reorder created: three video packets
+on the reporting asset, in a 60-picture sequence. Nothing waits for the end of a sequence.
+
+Detection is fail-closed and costs a healthy file almost nothing: one stepped-back slot is the
+container doing what the format says, and it ends the sample on what is normally the third packet.
+`PTS != DTS` is not an eligibility test here, because libavformat synthesizes a decode ladder from a
+rising presentation one just as readily as from a reordered one. A source is only repaired when the
+sampled slots rise strictly, the picture order regresses, the ranks are distinct, fill the sampled
+window and are a multiple of one measured step, and no picture sits further behind its own slot than
+the reorder delay the container declares. A stream that later stops being that shape, or a wait no
+mini-GOP explains, hands its packets back exactly as they arrived rather than permuting half a
+sequence. Diagnosed by @orut34iop on PR #511, whose numeric ladder is the regression fixture.
+
 ## HDR routing
 
 | Source | Wrapper signaling |

@@ -201,7 +201,7 @@ public final class Demuxer: @unchecked Sendable {
     /// producer, the segment plan, the software decoder, the still extractor) reads the same axis;
     /// a repair applied per host would have them disagree by the reorder delay. nil for every stream
     /// that is not the exact defect shape, which is decided once, on the first read.
-    private var compositionRepair: H264CompositionOffsetRepairSession?
+    private var compositionRepair: (any H264TimestampRepairSession)?
     private var compositionRepairEvaluated = false
 
     /// #407: video streams whose PTS `+genpts` invented out of decode order, because the container
@@ -1297,7 +1297,7 @@ public final class Demuxer: @unchecked Sendable {
     /// #409: resolved once per demuxer, at the first read or at the explicit decision above,
     /// because it needs the stream parameters `avformat_find_stream_info` fills in and costs nothing
     /// for the streams it does not apply to.
-    private func armCompositionRepairIfNeeded() -> H264CompositionOffsetRepairSession? {
+    private func armCompositionRepairIfNeeded() -> (any H264TimestampRepairSession)? {
         if compositionRepairEvaluated { return compositionRepair }
         compositionRepairEvaluated = true
         guard let ctx = formatContext else { return nil }
@@ -1312,11 +1312,18 @@ public final class Demuxer: @unchecked Sendable {
         guard index >= 0, index < Int32(ctx.pointee.nb_streams),
               let stream = ctx.pointee.streams[Int(index)] else { return nil }
         guard stream.pointee.discard != AVDISCARD_ALL else { return nil }
+        // #511: the same defect on a container that never had composition offsets to lose. Its
+        // policy reads the presentation slots the writer misassigned rather than rebuilding them,
+        // so the two never apply to one stream and the container picks between them.
         compositionRepair = H264CompositionOffsetRepairSession(
             containerFormatName: containerFormatName,
             stream: stream,
             streamIndex: index,
             ladderStart: firstIndexedTimestamp(of: stream)
+        ) ?? H264MatroskaSlotPermutationSession(
+            containerFormatName: containerFormatName,
+            stream: stream,
+            streamIndex: index
         )
         return compositionRepair
     }

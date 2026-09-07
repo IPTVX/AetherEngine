@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A Matroska H.264 stream whose block timestamps rise in coding order is
+  presented in display order again.** Matroska stores presentation timestamps,
+  so a writer that fills them packet by packet hands every slot to the picture
+  decoded at that position rather than the one displayed there, and the result
+  is a presentation clock that steps back once per mini-GOP for the length of
+  the file. The demuxer now hands each picture the slot its own display rank
+  owns, read from the file rather than computed, so the repaired times are the
+  container's own set including its rounding. Decode timestamps, the container
+  index, packet payloads and audio are untouched, and a picture waits at most
+  its mini-GOP for the packet carrying its slot. Measured on a generated twin
+  through the software decoder: 15 of 30 frame times stepped backwards before,
+  0 after. Diagnosed by @orut34iop on PR #511.
 
 ## [6.73.0] - 2026-09-07
 
