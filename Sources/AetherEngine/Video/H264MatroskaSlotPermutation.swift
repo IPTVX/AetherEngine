@@ -39,8 +39,10 @@ extension H264CompositionOffsetRepairSession: H264TimestampRepairSession {}
 /// fractional frame rate is reproduced exactly rather than to within a tick, and the one slot the
 /// reporting asset's writer clamped onto its cluster origin (7 ticks below the 1001/30 lattice its
 /// other 59 slots sit on) survives as written. That clamp is also why fitting a lattice would be the
-/// wrong tool: the sample window it would have to be read from is 21 slots at 30000/1001 and 61 at
-/// 60000/1001 before the phase is unique at all, which is most of a GOP.
+/// wrong tool: the sample window it would have to be read from is 21 slots on the reporting asset's
+/// own ladder before one phase reproduces it, and that figure moves with the phase and the cadence
+/// rather than being a property of the frame rate (measured over generated ladders: 16 slots at
+/// 30000/1001 on phase 0, 28 on phase 7, 50 at 60000/1001). Any of those is most of a GOP.
 ///
 /// The decode timestamps are already right. libavformat derives them from the rising slot ladder, so
 /// they are the decode order this stream really has, and the permutation cannot violate `PTS >= DTS`
