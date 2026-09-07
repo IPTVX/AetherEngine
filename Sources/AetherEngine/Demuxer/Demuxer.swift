@@ -1255,12 +1255,12 @@ public final class Demuxer: @unchecked Sendable {
             guard let packet = try readPacketLocked() else {
                 // EOF can arrive mid-sample on a very short source; the verdict has to be reached
                 // now or the held packets would never be delivered.
-                compositionRepair?.endOfStream()
+                try compositionRepair?.endOfStream()
                 if let held = compositionRepair?.dequeue() { return held }
                 return nil
             }
             guard let repair = armCompositionRepairIfNeeded() else { return packet }
-            if !repair.ingest(packet) { return packet }
+            if try !repair.ingest(packet) { return packet }
         }
     }
 
@@ -1282,10 +1282,10 @@ public final class Demuxer: @unchecked Sendable {
         guard let repair = armCompositionRepairIfNeeded(), !repair.isDecided else { return }
         while !repair.isDecided {
             guard let packet = try? readPacketLocked() else {
-                repair.endOfStream()
+                try? repair.endOfStream()
                 return
             }
-            if !repair.ingest(packet) {
+            if (try? repair.ingest(packet)) == false {
                 // Not held: the session is done with the sample and this packet is already on the
                 // final axis, so it goes to the front of the queue rather than out of order.
                 repair.enqueueFront(packet)

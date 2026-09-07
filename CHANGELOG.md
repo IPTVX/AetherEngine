@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- H.264 MP4 with valid composition offsets at the head but missing offsets in
+  later closed IDR sequences no longer escapes timestamp repair after a seek.
+  The partial-region policy restores display ownership of existing timestamp
+  slots, preserving original DTS, audio, keyframe-index time and hardware
+  routing even when decode intervals change inside a sequence. Healthy regions
+  remain unchanged. Includes generated partial-ctts fixtures and packet-level
+  seek, boundary, ownership and decoder regressions.
 
 ## [6.71.0] - 2026-09-06
 

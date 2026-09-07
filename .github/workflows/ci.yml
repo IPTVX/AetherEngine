@@ -40,6 +40,11 @@ jobs:
       - name: swift test
         run: swift test
 
+      - name: Partial H.264 composition-offset runtime regression
+        run: |
+          command -v ffmpeg >/dev/null || brew install ffmpeg
+          bash Scripts/test-h264-partial-composition-controls.sh
+
       # The transport probe is a device harness and runs nowhere in CI, so nothing else would keep
       # it compiling. A harness that stopped building is discovered by the person who needed it.
       - name: build the transport probe (AE#377)
