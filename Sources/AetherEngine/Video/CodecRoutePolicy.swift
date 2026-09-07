@@ -489,17 +489,15 @@ extension HLSVideoEngine {
         case .profile84:
             // P8.4 (HLG-compat base). Mirrors P8.1 routing.
             // DV panel: hvc1 + dvvC + SUPPLEMENTAL dvh1.08.XX/db4h. db4h marks HLG-base for AVKit criteria.
-            // Non-DV panel: strip dvvC (same -11868 risk as P8.1). Plain HLG plays + tonemaps on all panels.
-            // Note: dvh1 sample entry is never valid for HLG-base (AVPlayer rejects it, DrHurt#4 Build 160).
-            let supplemental: String?
-            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy
-            if effectiveDvMode {
-                supplemental = "dvh1.08.\(dvLevelStr)/db4h"
-                doviConfig = .keep
-            } else {
-                supplemental = nil
-                doviConfig = .strip
-            }
+            // Non-DV panel: keep the dvvC, no SUPPLEMENTAL, for the reason written out on the P8.1 branch
+            //   above. The -11868 that both strips were built against was one panel on tvOS 26.0 and does
+            //   not reproduce on 26.6. P8.4 is measured separately from P8.1 rather than assumed: its base
+            //   layer is HLG, so the conversion AVPlayer performs on a panel that is not in HDR is a
+            //   different one, and the dvcC it would consult claims compat=4 rather than 1.
+            // Note: dvh1 sample entry is never valid for HLG-base (AVPlayer rejects it, DrHurt#4 Build 160),
+            //   so there is no P5-style masquerade here, only the record itself.
+            let supplemental: String? = effectiveDvMode ? "dvh1.08.\(dvLevelStr)/db4h" : nil
+            let doviConfig: MP4SegmentMuxer.DoviConfigPolicy = .keep
             return CodecRoute(
                 codecTagOverride: "hvc1",
                 videoRange: .hlg,

@@ -154,7 +154,9 @@ struct Issue455ForcedDVRouteTests {
                                dvDisplay: false, forceDV: true)
         #expect(r.codecTagOverride == "hvc1")
         #expect(r.videoRange == .hlg)
-        #expect(r.doviConfig == .strip)
+        // No masquerade here, and since AE#493 no strip either: the record stays as the source wrote it.
+        #expect(r.doviConfig == .keep)
+        #expect(r.supplementalCodecs == nil)
     }
 
     @Test("P5 is unaffected: it was already served this way")
