@@ -629,17 +629,16 @@ final class H264CompositionOffsetRepairSession {
     /// repaired packets cut segment 2 one picture past its keyframe, which is a segment AVPlayer
     /// cannot start at.
     var decodeTimestampOffset: Int64? {
-        if monitorsPartialOffsets { return 0 }
         guard phase == .repairing, let rewriter else { return nil }
         return rewriter.plan.shift - rewriter.plan.decodeLead
     }
 
     /// Returns true when the packet was taken over by the session and must not be emitted yet.
     /// A packet the session keeps is owned by it until `dequeue()` hands it back.
-    func ingest(_ packet: UnsafeMutablePointer<AVPacket>) throws -> Bool {
+    func ingest(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
         switch phase {
         case .off:
-            return monitorsPartialOffsets ? try partialRepairCandidate?.ingest(packet) ?? false : false
+            return monitorsPartialOffsets ? partialRepairCandidate?.ingest(packet) ?? false : false
         case .repairing:
             guard packet.pointee.stream_index == streamIndex else { return false }
             applyRepair(to: packet, pictureOrderCount: reader?.pictureOrderCount(for: packet))
@@ -677,9 +676,9 @@ final class H264CompositionOffsetRepairSession {
     }
 
     /// EOF during sampling. Decides on what is there, so the held packets are still delivered.
-    func endOfStream() throws {
+    func endOfStream() {
         if phase == .sampling { decide() }
-        if monitorsPartialOffsets { try partialRepairCandidate?.endOfStream() }
+        if monitorsPartialOffsets { partialRepairCandidate?.endOfStream() }
     }
 
     func noteSeek() {

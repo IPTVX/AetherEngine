@@ -109,14 +109,22 @@ the corroborated presentation lead by display rank. Original DTS, audio and the
 already published keyframe index never move. Actual timestamp slots, rather than
 an average-FPS clock, preserve interval changes and quantization within a sequence.
 
-The partial-composition hold is bounded by **512 video pictures, 1024 interleaved
-packets and 32 MiB**. Healthy nonzero offsets resume unchanged delivery. Fields,
-missing timestamps, incomplete POC, arithmetic overflow and insufficient lead are
-not guessed. Before confirmation an unproven sequence passes through unchanged;
-after confirmation an unsupported zero-offset sequence fails explicitly instead
-of silently mixing repaired and unrepaired timing. Seek and teardown release both
-unpublished input and pending output. No decoder-route or host-UI change is needed.
-The existing whole-file missing-offset policy above remains separate.
+The slot a picture needs is a packet away, not a plan away, exactly as in the Matroska
+policy above: a picture coded ahead of its own slot waits the mini-GOP the reorder
+created, so nothing waits for the end of a sequence and no sequence is too long to
+repair. The wait is bounded by the reorder delay the container declares, believed up
+to **16 pictures**, and the packets held behind it by **1024 interleaved packets and
+32 MiB**, which is a ceiling on a container's interleaving rather than on its GOP.
+A candidate sequence has to show its reordering within **64 pictures** before a single
+picture is rewritten.
+
+Healthy nonzero offsets resume unchanged delivery. Fields, missing timestamps,
+incomplete POC, a rank claimed twice, arithmetic overflow and insufficient lead are
+not guessed at. **Every refusal hands the held packets back exactly as they arrived**
+and lets the rest of that sequence stream through, so a shape this policy does not own
+costs the repair and never the session; the next IDR is a fresh candidate. Seek and
+teardown release both unpublished input and pending output. No decoder-route or host-UI
+change is needed. The existing whole-file missing-offset policy above remains separate.
 
 See the [partial-composition regression and reproduction](partial-composition-regression.md)
 for generated fixtures, original numeric evidence and verification limits.

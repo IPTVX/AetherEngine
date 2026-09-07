@@ -102,7 +102,7 @@ struct H264PartialCompositionRuntimeTests {
             }
             while !stop {
                 while let packet = session.dequeue() { try emit(packet) }
-                guard reads < 10000, videoRead < 2000 else { throw Failure.boundedRead }
+                guard reads < 40000, videoRead < 8000 else { throw Failure.boundedRead }
                 guard let packet = trackedPacketAlloc() else { throw Failure.demux }
                 let status = av_read_frame(format, packet)
                 if status < 0 {
@@ -115,14 +115,14 @@ struct H264PartialCompositionRuntimeTests {
                 inputs[UInt(bitPattern: packet)] = try TimestampPacketSnapshot(copying: packet)
                 if packet.pointee.stream_index == index {
                     let key = packet.pointee.flags & AV_PKT_FLAG_KEY != 0
-                    stop = videoRead >= 180 && key
+                    stop = videoRead >= 1200 && key
                     videoRead += 1
                     try decode(raw, packet: packet, into: &rawPTS)
                 }
-                if try !session.ingest(packet) { try emit(packet) }
+                if !session.ingest(packet) { try emit(packet) }
                 observedRepair = observedRepair || session.summary.contains("confirmed_partial_composition_offsets")
             }
-            try session.endOfStream()
+            session.endOfStream()
             while let packet = session.dequeue() { try emit(packet) }
             try decode(raw, packet: nil, into: &rawPTS)
             try decode(fixed, packet: nil, into: &fixedPTS)
@@ -136,7 +136,7 @@ struct H264PartialCompositionRuntimeTests {
             precondition(fixedRegressions == 0)
             if rawRegressions > 0 {
                 precondition(observedRepair)
-                precondition(session.decodeTimestampOffset == 0)
+                precondition(session.decodeTimestampOffset == nil)
             } else { precondition(rawPTS == fixedPTS, "healthy head remains exactly unchanged") }
             print("PASS source_kind=\(matroska ? "matroska" : "mp4") seek=\(position) decoded=\(fixedPTS.count) original_regressions=\(rawRegressions) repaired_regressions=\(fixedRegressions) packets=\(delivered) reason=\(diagnostic) decode_offset=\(session.decodeTimestampOffset ?? 0) packet_balance=0")
         }
@@ -155,7 +155,7 @@ struct H264PartialCompositionRuntimeTests {
         func read() throws {
             guard let packet = trackedPacketAlloc() else { throw Failure.demux }
             guard av_read_frame(format, packet) >= 0 else { av_packet_free_safe(packet); throw Failure.demux }
-            if try !session.ingest(packet) { av_packet_free_safe(packet) }
+            if !session.ingest(packet) { av_packet_free_safe(packet) }
         }
         for goal in [3, 500] {
             try seek()
@@ -165,35 +165,53 @@ struct H264PartialCompositionRuntimeTests {
             precondition(session.dequeue() == nil && PacketBalanceTracker.alive == 0,
                 "seek must release both pending input and partly drained output")
         }
-        for malformedDTS: Int64 in [Int64.min, 0] {
+        // A shape this policy cannot own costs the repair, never the session. After confirmation a
+        // malformed timestamp hands every held packet back and the reads that follow keep coming.
+        for malformed: (dts: Int64, pts: Int64) in [(Int64.min, Int64.min), (0, 0)] {
             try seek()
             var confirmed = false
-            for _ in 0..<2000 {
+            for _ in 0..<4000 {
                 try read()
                 if session.summary.contains("confirmed_partial_composition_offsets") { confirmed = true; break }
             }
             precondition(confirmed)
-            guard let malformed = trackedPacketAlloc() else { throw Failure.demux }
-            malformed.pointee.stream_index = index
-            malformed.pointee.dts = malformedDTS
-            do { _ = try session.ingest(malformed); throw Failure.session }
-            catch H264PartialCompositionRepairSession.RepairError.sequenceNoLongerRepairable { }
-            precondition(PacketBalanceTracker.alive == 0 && session.dequeue() == nil)
+            guard let packet = trackedPacketAlloc() else { throw Failure.demux }
+            packet.pointee.stream_index = index
+            packet.pointee.dts = malformed.dts
+            packet.pointee.pts = malformed.pts
+            if !session.ingest(packet) { av_packet_free_safe(packet) }
+            while let packet = session.dequeue() { av_packet_free_safe(packet) }
+            precondition(PacketBalanceTracker.alive == 0, "a refusal still owns every packet it took")
+            // A refused sequence streams through the session rather than out of its queue, so
+            // count both ways a packet can come back.
+            var delivered = 0
+            for _ in 0..<400 {
+                guard let next = trackedPacketAlloc() else { throw Failure.demux }
+                guard av_read_frame(format, next) >= 0 else { av_packet_free_safe(next); break }
+                if !session.ingest(next) { av_packet_free_safe(next); delivered += 1 }
+                while let packet = session.dequeue() { av_packet_free_safe(packet); delivered += 1 }
+            }
+            precondition(delivered > 0, "a refused sequence still has to stream through")
             session.noteSeek()
+            precondition(PacketBalanceTracker.alive == 0)
         }
         try seek()
-        for _ in 0..<3 { try read() }
-        // Pending video plus empty auxiliary packets must hit the all-stream bound without
-        // reading arbitrarily far. Even refusal owns and returns every original packet.
-        for _ in 0..<1024 {
+        for _ in 0..<32 { try read() }
+        // Interleaving, not reordering, is what can still make the wait large. The all-stream budget
+        // is the ceiling on that, and crossing it ends the hold rather than the delivery.
+        var heldForeign = 0
+        for _ in 0..<(4 * H264PartialCompositionRepair.maximumHeldPackets) {
             guard let packet = trackedPacketAlloc() else { throw Failure.demux }
             packet.pointee.stream_index = index + 1
-            if try !session.ingest(packet) { av_packet_free_safe(packet) }
+            if session.ingest(packet) { heldForeign += 1 } else { av_packet_free_safe(packet) }
         }
+        precondition(heldForeign > 0 && heldForeign <= H264PartialCompositionRepair.maximumHeldPackets,
+                     "the all-stream budget has to end the hold, held \(heldForeign)")
         while let packet = session.dequeue() { av_packet_free_safe(packet) }
         session.noteSeek()
         precondition(PacketBalanceTracker.alive == 0)
-        print("PASS partial lifecycle: seek-pending, seek-ready-and-pending, confirmed-fail-closed, all-stream-budget packet_balance=0")
+        print("PASS partial lifecycle: seek-pending, seek-ready-and-pending, confirmed-fails-open,"
+            + " all-stream-budget held=\(heldForeign) packet_balance=0")
     }
 
     static func decoder(_ parameters: UnsafeMutablePointer<AVCodecParameters>, timeBase: AVRational) throws
