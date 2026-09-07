@@ -93,6 +93,34 @@ the reorder delay the container declares. A stream that later stops being that s
 mini-GOP explains, hands its packets back exactly as they arrived rather than permuting half a
 sequence. Diagnosed by @orut34iop on PR #511, whose numeric ladder is the regression fixture.
 
+### MP4 with composition offsets missing only in later regions
+
+A healthy head does not establish a healthy table for the whole file. Some mixed
+MP4s retain valid offsets at the head, then give later reordered pictures zero
+offsets. Seeking into that region can produce persistent judder despite normal
+aggregate FPS and sufficient network buffering.
+
+When a healthy origin picture corroborates the container's edit/index lead, the
+demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. One
+bounded, complete IDR-to-IDR progressive sequence is parsed for picture order.
+If every selected packet has valid equal PTS/DTS and its distinct even POC fills
+the complete sequence, a proven permutation assigns its original DTS slots plus
+the corroborated presentation lead by display rank. Original DTS, audio and the
+already published keyframe index never move. Actual timestamp slots, rather than
+an average-FPS clock, preserve interval changes and quantization within a sequence.
+
+The partial-composition hold is bounded by **512 video pictures, 1024 interleaved
+packets and 32 MiB**. Healthy nonzero offsets resume unchanged delivery. Fields,
+missing timestamps, incomplete POC, arithmetic overflow and insufficient lead are
+not guessed. Before confirmation an unproven sequence passes through unchanged;
+after confirmation an unsupported zero-offset sequence fails explicitly instead
+of silently mixing repaired and unrepaired timing. Seek and teardown release both
+unpublished input and pending output. No decoder-route or host-UI change is needed.
+The existing whole-file missing-offset policy above remains separate.
+
+See the [partial-composition regression and reproduction](partial-composition-regression.md)
+for generated fixtures, original numeric evidence and verification limits.
+
 ## HDR routing
 
 | Source | Wrapper signaling |

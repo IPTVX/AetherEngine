@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- H.264 MP4 with valid composition offsets at the head but missing offsets in
+  later closed IDR sequences no longer escapes timestamp repair after a seek.
+  The partial-region policy restores display ownership of existing timestamp
+  slots, preserving original DTS, audio, keyframe-index time and hardware
+  routing even when decode intervals change inside a sequence. Healthy regions
+  remain unchanged. Includes generated partial-ctts fixtures and packet-level
+  seek, boundary, ownership and decoder regressions.
+
 - **Software VOD reads compressed packets ahead of the decoder, and keeps what
   it has read across a seek that lands inside it.** The software path had no
   reservoir of its own: the demux loop read on renderer backpressure alone, so
