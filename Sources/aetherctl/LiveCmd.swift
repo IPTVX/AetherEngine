@@ -120,6 +120,7 @@ func runLive(
     realtime: Bool = false,
     fastZap: Bool = false,
     pacingPreroll: Double? = nil,
+    pacingRate: Double? = nil,
     freezeAfter: Double? = nil,
     unfreezeAfter: Double? = nil,
     rewindBeforeFreeze: Double? = nil,
@@ -177,6 +178,11 @@ func runLive(
     if let preroll = pacingPreroll {
         fixture.pacingPrerollSeconds = preroll
         print("aetherctl live: --preroll \(preroll)s (0 = strict-realtime origin, no backlog burst)")
+    }
+    if let rate = pacingRate {
+        fixture.pacingRateMultiple = rate
+        print("aetherctl live: --realtime-rate \(rate)x (origin keeps handing over "
+              + "\(rate)x faster than the content happens, for the whole run)")
     }
     if fastZap {
         print("aetherctl live: --fast-zap set, LoadOptions.liveJoinProfile = .fastZap (AE#195)")
