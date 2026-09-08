@@ -10,7 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.74.0] - 2026-09-08
+
 ### Added
+
+- **The subtitle forward prefetcher's cancel says who cancelled it, and a
+  sidecar takeover announces itself.** `#151 forward prefetch exited
+  (reason=cancelled cancelled=true)` reported that a `cancel()` had happened
+  and nothing else, and it lands whenever the parked loop next looks, seconds
+  after the fact, so a capture showing a prefetcher that stops early and never
+  returns was indistinguishable from a teardown, a track switch and a rebuild.
+  Every teardown route now carries a reason to the cancel, which emits
+  `#151 forward prefetch cancelled (reason=sidecarSelected)` and its siblings
+  when a session was actually running. The sidecar path had the matching gap on
+  the other side: the drainer announced itself with `overlay fed by
+  packet-store drainer` and the whole-file path announced nothing, so a
+  complete track publishing into the overlay looked like a drainer that had
+  stopped filling. It now says `sidecar decode start:` and `overlay fed by
+  sidecar decode: ... (N cues)`, and a decode that starts and never publishes
+  leaves a trace instead of an empty overlay with no author. Raised by
+  RadicalMuffinMan (#496).
 
 - **`aetherctl play --present-times`: how many frames actually reached the
   screen on the native path.** `--frame-times` reads the software renderer's own
@@ -22,6 +43,23 @@ the public-API contract.
   its random access points.
 
 ### Fixed
+
+- **A live join whose source timestamps sit just below the 33-bit PTS wrap
+  publishes a zero axis instead of an unsigned six million years.** The
+  producer pinned an epoch's first frame to the demuxed value and that value
+  was free to go negative, which for `tfdt` is not unusual but unrepresentable:
+  the box carries `unsigned int(64)`, so `movenc` wrote the bits and AVPlayer
+  read `baseMediaDecodeTime = 2^64 - |dts|` against a playlist starting at 0.
+  libavformat produces those timestamps by design, an MPEG-TS whose first DTS
+  falls within 60 s of the wrap at `2^33 / 90000` is classified
+  `AV_PTS_WRAP_SUB_OFFSET` and every timestamp afterwards comes out 2^33 ticks
+  low, which is an ordinary live join rather than the early-open case the pin
+  exists for. Measured on a seed 53.7 s below the wrap: before, `seg0` carried
+  `baseMediaDecodeTime=18446744073704717024` with a video `traf` only and the
+  clock never moved; after, `tfdt` is 0 on both `traf`s, audio is back in
+  `seg0`, and the clock runs across 25 s with no stall. Found while
+  investigating AE#509 (AttiK22), whose own capture has different gate values
+  and stays open.
 
 - **An MP4 that carries valid composition offsets at its head and none in a
   later region gets that region's display order back.** A healthy head is not
