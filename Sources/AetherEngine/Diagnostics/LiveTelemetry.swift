@@ -10,6 +10,11 @@ import Foundation
 public struct LiveTelemetry: Equatable, Sendable {
     // Enthusiast section
     public let instantBitrateMbps: Double?
+    /// Lifetime mean rate of the session, over the seconds it spent consuming media rather than over
+    /// wall-clock seconds since it started (AE#514). A pause therefore leaves this value standing
+    /// still instead of dragging it toward zero for as long as the pause lasts, and so does the tail
+    /// after end-of-media. nil until the session has both accrued active time and fetched something:
+    /// like `networkThroughputMbps`, a value that cannot be measured yet is a gap, never a zero.
     public let averageBitrateMbps: Double?
     /// Live bitrate of the audio bridge's encoded output, or nil when no bridge is active (stream-copy /
     /// AVPlayer-native path) or before the first delta. Measured from the bridge's cumulative output-byte
