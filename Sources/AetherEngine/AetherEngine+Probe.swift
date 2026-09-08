@@ -638,6 +638,44 @@ extension AetherEngine {
         return effectiveFormat
     }
 
+    /// AE#515 (from #493): the label a loopback session takes back from the item AVFoundation is playing,
+    /// where the platform has no capability table to clamp it against.
+    ///
+    /// `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so `supportsDolbyVision` is false on
+    /// every Mac unless the host asserts it, and `effectiveVideoFormat` sends a Profile 5 PQ base to
+    /// `.hdr10`. Measured with the assertion off on a 16" XDR: Profile 5 and Profile 8.1 both strobe
+    /// against Dolby's reference content, so the RPU reaches the pixels with no claim set anywhere and
+    /// the clamp was moving nothing but the label. `NativeAVPlayerHost` already parses the served item's
+    /// sample entry, and a `dvh1` / `dvhe` entry is that session's own evidence.
+    ///
+    /// An upgrade rather than the unconditional mirror `loadRemoteHLS` wires, and each term earns its
+    /// place by a case it keeps out:
+    ///
+    /// - `perModeCapabilitiesObservable` keeps tvOS and iOS out, where the table answers and the label
+    ///   follows it. A Profile 5 master carries `dvh1` on every panel, so the mirror would relabel a
+    ///   tvOS session parked in SDR, or one on an HDR10-only panel, as Dolby Vision.
+    /// - `.hdr10` is the only clamped value taken back. `.sdr` is the clamp being right about a display
+    ///   that presents no HDR at all, and `.dolbyVision` is a session that already says so.
+    /// - the item term is what the evidence actually is. Profile 8.1 reports `hvc1` and composes anyway,
+    ///   which nothing in the stack reports, so it keeps `.hdr10`.
+    /// - the source term is the engine's own probe agreeing. A probe that did not call the source Dolby
+    ///   Vision leaves no RPU to compose, and the disagreement is a packaging fault worth seeing rather
+    ///   than a label to publish.
+    ///
+    /// `nil` means leave the published label alone.
+    nonisolated static func dolbyVisionLabelUpgrade(
+        publishedFormat: VideoFormat,
+        sourceFormat: VideoFormat,
+        itemFormat: VideoFormat,
+        perModeCapabilitiesObservable: Bool
+    ) -> VideoFormat? {
+        guard !perModeCapabilitiesObservable,
+              publishedFormat == .hdr10,
+              sourceFormat == .dolbyVision,
+              itemFormat == .dolbyVision else { return nil }
+        return .dolbyVision
+    }
+
     /// AE#459: what this session takes the panel to be presenting, from the host's assertion and the
     /// engine's own criteria readout.
     ///

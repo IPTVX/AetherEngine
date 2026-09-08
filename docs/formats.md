@@ -169,6 +169,8 @@ ST 2094-40 metadata stays attached to the HEVC bitstream as user-data-registered
 
 The published `videoFormat` starts at `.hdr10` for any BT.2020 / PQ source and flips to `.hdr10Plus` the first time a packet's T.35 SEI signature is seen in the producer's scan. Debounced across producer restarts so a scrub doesn't re-fire. Hosts can drive an HDR10+ badge or analytics hook off the `$videoFormat` transition.
 
+The label can also be taken back from the item itself, where the platform has no capability table to clamp it against (AE#515). A Dolby Vision source on macOS resolves to `.hdr10`, because `supportsDolbyVision` is unclaimable there without a host assertion, while AVFoundation goes on playing the `dvh1` sample entry the engine served. Measured with the assertion off on a 16" XDR, a Profile 5 and a Profile 8.1 grade of Dolby's reference content both strobe, so the RPU reaches the pixels with no claim set anywhere and the clamp was moving nothing but the label. When the item's sample entry reads `dvh1` / `dvhe` and the probe agrees the source is Dolby Vision, the label is upgraded from `.hdr10` to `.dolbyVision` at `readyToPlay`. It is an upgrade and not a mirror of what AVFoundation parsed, for two reasons that both matter: an `.sdr` label is the clamp being right about a display presenting no HDR at all, and on tvOS and iOS the per-mode table answers the capability question, so the label follows it rather than a sample entry that a Profile 5 master carries on every panel. Profile 8.1 keeps `.hdr10` on macOS: it reports `hvc1` with the DV configuration alongside it, it composes on that display all the same, and nothing in the stack reports that.
+
 ## Audio
 
 | | |
