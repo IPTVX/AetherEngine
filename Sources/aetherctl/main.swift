@@ -157,11 +157,16 @@ func printUsage() {
                      (AVPlayer.availableHDRModes is unavailable there)
                      and HDR eligibility answers HDR10 and HLG but not
                      DV, so a DV source otherwise plays as its HDR10
-                     base layer with effective-format=hdr10. With the
-                     flag the session serves the DV route (dvh1 tags,
-                     SUPPLEMENTAL-CODECS, master playlist). A wrong
-                     claim costs one in-place media-playlist fallback
-                     (-11868 / -11848), not the item.
+                     base layer with effective-format=hdr10. The flag
+                     moves that label and the tvOS criteria request; it
+                     no longer moves the packaging of a P5 / P8.1 / P8.4
+                     source, which since 6.72.0 / 6.73.0 carries its
+                     dvcC and SUPPLEMENTAL-CODECS on every display (the
+                     served master, media playlist, init.mp4 and
+                     segments are byte-identical either way). P7 and AV1
+                     DV are still gated on it. A wrong claim costs one
+                     in-place media-playlist fallback (-11868 / -11848),
+                     not the item.
 
     Flags (serve / seektest):
       --throttle-kbps N

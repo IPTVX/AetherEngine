@@ -381,19 +381,26 @@ public struct LoadOptions: Sendable, Equatable {
     ///
     /// AE#493: `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode capability
     /// table at all, and `eligibleForHDRPlayback` answers HDR10 and HLG but cannot answer this one. Setting
-    /// it serves the source the way a DV display is served (`dvh1` sample entry, `SUPPLEMENTAL-CODECS`,
-    /// master playlist) and publishes `videoFormat = .dolbyVision`. HDR support rides along because DV is an
-    /// HDR format; HDR10 and HLG capability are not implied.
+    /// it publishes `videoFormat = .dolbyVision` and asks the tvOS display-criteria handshake for `dvh1`.
+    /// HDR support rides along because DV is an HDR format; HDR10 and HLG capability are not implied.
+    ///
+    /// It no longer decides the PACKAGING of a Profile 5, 8.1 or 8.4 source. 6.72.0 gave the non-DV branch
+    /// its `dvcC` back and 6.73.0 its `SUPPLEMENTAL-CODECS`, so those three grades serve byte-identical
+    /// manifests and segments either way (measured on macOS against the matched Dolby grades: master,
+    /// media playlist, `init.mp4` and `seg0.mp4` md5-identical with and without the claim). Profile 7,
+    /// whose RPU is converted to 8.1 per packet, and AV1 Dolby Vision, whose record is read only on a
+    /// display that takes it, are still gated on it.
     ///
     /// A wrong claim is cheap on the class of failure the engine classifies, and that class is not the whole
     /// space. AVPlayer refusing the master with -11868 / -11848 fails the ITEM, and the engine falls back to
     /// the media playlist once, in place, at the same position, where AVPlayer tone-maps the base layer;
     /// correctable mid-session through `reloadAtCurrentPosition(applying:)`. Two measured limits on that:
     /// on macOS the wrong claim was not refused at all (a DV master on a Mac with no DV display plays,
-    /// macOS 26.5.2), and on tvOS an asserted Profile 8.1 reaches the DV packaging (`dvvC` in the sample
-    /// entry plus `SUPPLEMENTAL-CODECS`), which on an HDR10-only panel was measured to reach `readyToPlay`,
-    /// play for a second or two and then stall with -15628 in the item's error log (2026-05-26, AE#4). A
-    /// stall is not an item failure, so the fallback above does not fire for it.
+    /// macOS 26.5.2), and a stall is not an item failure, so the fallback above does not fire for the
+    /// -15628 an HDR10-only panel showed on the DV packaging in May 2026 (AE#4). That stall is no longer
+    /// the claim's to own: since 6.72.0 / 6.73.0 the same packaging reaches such a panel with or without
+    /// it, and it did not reproduce on tvOS 26.6. What the claim can still move on the route is HDR
+    /// readiness, since `supportsHDR` rides along, and that is the -11848 the fallback does catch.
     ///
     /// Asserting also turns `forceDolbyVisionOnNonDVDisplay` off, since that one is gated on the display
     /// having no DV. On tvOS, DV composition on a panel without Dolby Vision is what that flag is for, and
