@@ -87,6 +87,12 @@ final class HeldSourceConnection: @unchecked Sendable {
     private let offset: Int64
     private let userAgent: String?
     private let queue: DispatchQueue
+    /// The reader's connection generation this transfer belongs to. Carried here because the
+    /// reader's response, delivery and end handling are all keyed on it and a stale callback has
+    /// to be recognisable as stale.
+    let generation: Int
+    /// The origin slot this connection occupies, released once by whoever gets there first.
+    private var ticket: OriginRequestBudget.Ticket?
 
     private let stateLock = NSLock()
     private var _cancelled = false
@@ -103,11 +109,15 @@ final class HeldSourceConnection: @unchecked Sendable {
          extraHeaders: [String: String],
          userAgent: String?,
          label: String,
+         generation: Int = 0,
+         ticket: OriginRequestBudget.Ticket? = nil,
          delegate: HeldSourceConnectionDelegate) {
         self.respondedBy = url
         self.offset = offset
         self.extraHeaders = extraHeaders
         self.userAgent = userAgent
+        self.generation = generation
+        self.ticket = ticket
         self.delegate = delegate
         self.queue = DispatchQueue(label: "aether.avio.held.\(label)")
     }
@@ -120,6 +130,16 @@ final class HeldSourceConnection: @unchecked Sendable {
     /// Open the connection and run the pull loop until it ends. Returns immediately.
     func start() {
         queue.async { [weak self] in self?.run() }
+    }
+
+    /// Give the origin slot back. Idempotent: the reader releases synchronously so the frontier
+    /// re-request does not queue behind this connection, and the end callback then finds nothing.
+    func releaseOriginTicket() {
+        stateLock.lock()
+        let held = ticket
+        ticket = nil
+        stateLock.unlock()
+        OriginRequestBudget.shared.release(held)
     }
 
     /// End the connection. Idempotent, and safe from any thread including from inside a delegate
@@ -527,4 +547,14 @@ final class ChunkedBodyDecoder {
             }
         }
     }
+}
+
+// MARK: - The reader's transfer abstraction
+
+extension HeldSourceConnection: PersistentTransfer {
+    func startTransfer() { start() }
+    func cancelTransfer() { cancel() }
+    /// The whole point of this transport: nothing arrives that was not asked for, so the reader's
+    /// high-water end has nothing to protect against here.
+    var isDemandDriven: Bool { true }
 }

@@ -213,7 +213,10 @@ struct Issue377HeldConnectionTests {
         connection.start()
         #expect(delegate.waitForEnd())
 
-        #expect(delegate.body.count == 64 * 1024)
+        // A budget is a CEILING on one read, not a promise: a socket hands over what has arrived,
+        // so two 32 KB pulls deliver at most 64 KB and usually a little less.
+        #expect(delegate.body.count <= 64 * 1024)
+        #expect(delegate.body.count > 32 * 1024, "both pulls should have delivered")
         #expect(delegate.endError == nil, "a budget of zero is a deliberate end, not a fault")
         #expect(origin.rangeRequestCount == 1)
     }
@@ -277,5 +280,115 @@ struct Issue377HeldConnectionTests {
 
         #expect(origin.requestedRanges.first?.start == offset)
         #expect(Int64(delegate.body.count) == total - offset)
+    }
+}
+
+/// The reader with the flag on, against the same scripted origin the pushed path is measured on.
+///
+/// Request COUNT is the observable, and it is the one thing a loopback can honestly report about
+/// this change: how many times the origin was asked is transport independent, while the
+/// backpressure itself is invisible here (TCP closes the window long before any buffer of interest
+/// fills, which is why #220's defect survived every local test it had). Each test that asserts a
+/// held count carries the pushed count next to it, because a harness in which the known shape looks
+/// the same as the new one decides nothing.
+@Suite("#377 held connection in the reader")
+struct Issue377HeldReaderTests {
+
+    /// Ranges the DATA path asked for, with the open-time speculative tail fetch excluded: it
+    /// lives at the far end of the file and is not part of the streaming cadence.
+    private func dataRanges(_ server: ThrottledOriginServer, totalSize: Int64) -> [Int64] {
+        server.requestedRanges.map(\.start).filter { $0 < totalSize - 1024 * 1024 }
+    }
+
+    private func drain(_ reader: AVIOReader, bytes target: Int, timeout: TimeInterval = 60) -> Int {
+        let sliceCap = 256 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        var got = 0
+        let deadline = Date().addingTimeInterval(timeout)
+        while got < target && Date() < deadline {
+            let n = reader.read(into: buf, size: Int32(sliceCap))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+        return got
+    }
+
+    @Test("a held reader serves a long read on one request where the pushed reader needs several")
+    func oneRequestForALongRead() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let target = 64 * 1024 * 1024
+
+        let heldOrigin = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { heldOrigin.stop() }
+        let held = AVIOReader(url: URL(string: "http://127.0.0.1:\(heldOrigin.port)/movie.bin")!,
+                              heldConnection: true)
+        defer { held.markClosed(); held.close() }
+        try held.open()
+        #expect(drain(held, bytes: target) >= target, "the held reader did not deliver the read")
+
+        let pushedOrigin = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { pushedOrigin.stop() }
+        let pushed = AVIOReader(url: URL(string: "http://127.0.0.1:\(pushedOrigin.port)/movie.bin")!)
+        defer { pushed.markClosed(); pushed.close() }
+        try pushed.open()
+        #expect(drain(pushed, bytes: target) >= target, "the pushed reader did not deliver the read")
+
+        let heldAsks = dataRanges(heldOrigin, totalSize: totalSize)
+        let pushedAsks = dataRanges(pushedOrigin, totalSize: totalSize)
+
+        // The positive control: the default path pays a request per drain cycle, which is the
+        // cadence that walks into a refusal window on a long file.
+        #expect(pushedAsks.count > 1,
+                "the pushed control asked \(pushedAsks.count) times; it pays a request per drain cycle, so this harness is not measuring the difference")
+        #expect(heldAsks.count == 1,
+                "a held connection asked \(heldAsks.count) times for one continuous read: \(heldAsks)")
+    }
+
+    @Test("a stalled consumer ends the held connection inside the idle budget and holds no flow")
+    func stalledConsumerEndsTheHeldConnection() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { server.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                heldConnection: true)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // Nobody consumes: the paused-viewer shape. #310's worst episode came out of exactly this
+        // state, so the connection has to be gone rather than merely quiet.
+        try await Task.sleep(for: .seconds(8))
+
+        #expect(!reader.hasLiveConnectionForTesting,
+                "a paused consumer must hold no flow, which is the #310 invariant 6.11.0 shipped")
+        let diag = reader.windowDiagnostics
+        #expect(diag.parked, "the idle end must be recorded as backpressure so the refill owns it")
+        #expect(dataRanges(server, totalSize: totalSize).count == 1,
+                "nothing drained, so nothing may have been re-requested")
+    }
+
+    @Test("consumption after an idle end refills at the frontier without going backwards")
+    func refillAfterIdleEnd() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { server.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                heldConnection: true)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        try await Task.sleep(for: .seconds(8))   // past the idle budget
+        let afterIdle = dataRanges(server, totalSize: totalSize)
+        #expect(afterIdle.count == 1)
+
+        let target = 48 * 1024 * 1024
+        #expect(drain(reader, bytes: target) >= target,
+                "the reader did not resume after the idle end")
+
+        let asks = dataRanges(server, totalSize: totalSize)
+        #expect(asks.count == 2,
+                "resuming should cost exactly one re-request at the frontier, got \(asks)")
+        #expect(asks == asks.sorted(), "a refill went backwards past the frontier: \(asks)")
+        #expect(asks[1] > 0, "the refill asked from byte 0 again instead of at the frontier")
     }
 }
