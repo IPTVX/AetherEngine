@@ -2230,6 +2230,10 @@ final class NativeAVPlayerHost {
     /// format instead of the `.sdr` default. Called at readyToPlay and again at first `.playing` (an HLS
     /// video track can be absent from `item.tracks` at the readyToPlay instant). No-op for the item once it
     /// has been replaced; leaves `detectedVideoFormat` nil while no video track resolves (audio-only black).
+    ///
+    /// AE#515: this runs on every native session, the loopback route included, where the engine reads it
+    /// as a Dolby Vision label upgrade rather than as the format itself. The line used to name itself
+    /// `remote-HLS` on both, which cost a reporter time on a log where the route was the question.
     @MainActor
     private func publishDetectedVideoFormat(from item: AVPlayerItem) async {
         let sid = sessionID
@@ -2249,7 +2253,7 @@ final class NativeAVPlayerHost {
             if detectedVideoFormat != fmt {
                 detectedVideoFormat = fmt
                 EngineLog.emit(
-                    "[NativeAVPlayerHost] #\(sessionID) remote-HLS videoFormat=\(fmt) "
+                    "[NativeAVPlayerHost] #\(sessionID) item videoFormat=\(fmt) "
                     + "subType='\(fourccString(subType))' transfer=\(transfer ?? "nil") "
                     + "rate=\(rate.map { String(format: "%.3f", $0) } ?? "nil")",
                     category: .engine

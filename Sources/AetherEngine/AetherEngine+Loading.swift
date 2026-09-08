@@ -1264,6 +1264,17 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
+        // AE#515: the same parse `loadRemoteHLS` mirrors, read here as an upgrade only. This route has a
+        // probe, so `sourceVideoFormat` is already answered and `videoFormat` is the clamped label; what
+        // the item adds is the one thing the clamp cannot know on a platform without a capability table,
+        // namely that AVFoundation is playing a Dolby Vision sample entry. Mirroring the sink instead
+        // would overwrite a tvOS label the panel answered for.
+        host.$detectedVideoFormat
+            .compactMap { $0 }
+            .sink { [weak self] fmt in
+                self?.applyDolbyVisionLabelUpgrade(itemFormat: fmt)
+            }
+            .store(in: &nativeCancellables)
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
@@ -2342,5 +2353,25 @@ extension AetherEngine {
         guard videoFormat == .hdr10 else { return }
         EngineLog.emit("[AetherEngine] HDR10+ T.35 detected, upgrading videoFormat .hdr10 → .hdr10Plus", category: .engine)
         videoFormat = .hdr10Plus
+    }
+
+    /// AE#515: republish a clamped Dolby Vision label once the item AVFoundation is playing says so.
+    /// Called from the loopback route's item-format sink; `dolbyVisionLabelUpgrade` carries the rule and
+    /// the reason for every term. `sourceVideoFormat` is untouched: the probe answered that one already,
+    /// and better than a sample entry can.
+    @MainActor
+    private func applyDolbyVisionLabelUpgrade(itemFormat: VideoFormat) {
+        guard let upgraded = Self.dolbyVisionLabelUpgrade(
+            publishedFormat: videoFormat,
+            sourceFormat: sourceVideoFormat,
+            itemFormat: itemFormat,
+            perModeCapabilitiesObservable: Self.perModeDisplayCapabilitiesObservable
+        ) else { return }
+        EngineLog.emit(
+            "[AetherEngine] item carries a Dolby Vision sample entry, upgrading videoFormat "
+            + "\(videoFormat) → \(upgraded); this display reports no per-mode capabilities and the "
+            + "clamp had nothing to read (#515)",
+            category: .engine)
+        videoFormat = upgraded
     }
 }

@@ -1310,6 +1310,21 @@ public final class AetherEngine: ObservableObject {
         #endif
     }
 
+    /// AE#515: whether this platform can be asked what the display presents, mode by mode.
+    ///
+    /// True exactly where `displayCapabilities` reads `AVPlayer.availableHDRModes`. Everywhere else the
+    /// per-mode terms are not an observation: HDR10 and HLG are answered from eligibility, and Dolby
+    /// Vision is left to a host assertion because nothing can observe it. `dolbyVisionLabelUpgrade` is
+    /// the one rule that turns on the difference, so it is named rather than re-derived from `#if`s at
+    /// the call site.
+    nonisolated static let perModeDisplayCapabilitiesObservable: Bool = {
+        #if os(tvOS) || os(iOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
     // MARK: - View binding
 
     /// Weak: dropping the view reference must not leak the surface through the engine singleton.
