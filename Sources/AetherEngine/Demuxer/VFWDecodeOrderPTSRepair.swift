@@ -37,11 +37,24 @@ import AetherLibavutil
 /// present on such a track was necessarily invented by `+genpts`. `video_delay > 0` narrows that to the
 /// streams where inventing it can transpose anything at all.
 ///
-/// Two deliberate exclusions:
+/// **AVI joins the gate (measured).** The exclusion above was for want of a sample; here is one.
+/// A 2000s XviD rip (`mpeg4`, Advanced Simple Profile, tag `XVID`, 720x304, `video_delay = 1`,
+/// packed B-frames) reaches `SoftwareVideoDecoder` with the same transposition, and `aetherctl
+/// swdecode` reports it in the same words:
 ///
-/// - **Matroska only.** AVI carries a FourCC on every track and is DTS-only as well, but the
-///   `ms_compat`/`codec_tag` equivalence is established in `matroskadec` and nowhere else, and a
-///   VC-1 AVI has not been measured. A gate that is exact on one container beats a guess on two.
+///     0.042  0.083  0.167  0.125  0.209  0.292  0.250  0.334  0.417  0.375
+///     Steps backwards: 12 of 37
+///
+/// AVI needs no `ms_compat` equivalence to establish the same fact, because `avidec` has no other
+/// mode: the container has no presentation timestamps at all, every track carries a FourCC, and the
+/// demuxer puts the frame index on `pkt->dts`. So on an AVI input any PTS present was necessarily
+/// invented by `+genpts`, which makes `codec_tag != 0` a tautology there rather than a signal, and
+/// `video_delay > 0` carries the whole gate. Progressive source, evenly spaced timestamps, no
+/// telecine: the packed bitstream is the only unusual property, and it is not the cause — the
+/// invented axis is.
+///
+/// One deliberate exclusion remains:
+///
 /// - **H.264 / HEVC / AV1 keep their PTS**, VFW-carried or not. Those are the codecs
 ///   `VideoRoutingPolicy` can route natively, which is the one path where packets reach the fMP4
 ///   muxer, and that muxer refuses a packet with no timestamp outright. A wrongly ordered picture is
@@ -69,9 +82,27 @@ enum VFWDecodeOrderPTSRepair {
 
     /// Whether `+genpts` is inventing a decode-order axis for this stream, so its PTS has to go.
     static func suppressesGeneratedPTS(formatName: String, shape: StreamShape) -> Bool {
-        guard isMatroska(formatName) else { return false }
-        guard shape.codecTag != 0, shape.videoDelay > 0 else { return false }
+        guard containerWithholdsPTS(formatName) else { return false }
+        // No reorder delay means decode order IS presentation order: the invented axis is the right
+        // one, and clearing it would only cost. True for both containers.
+        guard shape.videoDelay > 0 else { return false }
+        // Matroska carries a codec tag only on the VFW-carried tracks that withhold PTS; a natively
+        // mapped track gets real timestamps and must keep them. AVI has no such split — every track
+        // is FourCC-carried and none carries PTS — so there the tag says nothing.
+        if isMatroska(formatName), shape.codecTag == 0 { return false }
         return !nativelyRoutableCodecs.contains(shape.codecID)
+    }
+
+    /// Containers that supply no presentation timestamps, so anything on `pkt->pts` came from
+    /// `+genpts` and describes decode order.
+    static func containerWithholdsPTS(_ formatName: String) -> Bool {
+        isMatroska(formatName) || isAVI(formatName)
+    }
+
+    /// `avidec` registers under the bare name, but match it the same way as Matroska so a
+    /// comma-joined alias cannot slip past.
+    static func isAVI(_ formatName: String) -> Bool {
+        formatName.split(separator: ",").contains { $0 == "avi" }
     }
 
     /// libavformat registers both Matroska flavours under one comma-joined demuxer name
