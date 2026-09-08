@@ -339,7 +339,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.73.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -499,6 +499,16 @@ and reads as an SDR panel forever ([#459](https://github.com/superuser404notfoun
 neither flag can hide a capability the system reports, and a wrong one costs a single in-place
 media-playlist fallback (`-11868` / `-11848`) at the same position rather than the item.
 
+That fallback covers the failure class AVPlayer reports as an item failure, which is not the whole space,
+and the gap sits on tvOS. An asserted Profile 8.1 is served the way a DV panel is served (`dvvC` in the
+sample entry plus `SUPPLEMENTAL-CODECS`), and on an HDR10-only panel that packaging was measured to reach
+`readyToPlay`, play for a second or two and then stall with `-15628` in the item's error log
+([#4](https://github.com/superuser404notfound/AetherEngine/issues/4), 2026-05-26). A stall is not an item
+failure, so nothing catches it. On tvOS the flag for a display without Dolby Vision is
+`forceDolbyVisionOnNonDVDisplay`, which serves that source as a Profile 5 instead and is device-verified on
+exactly that panel class ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455));
+asserting DV turns it off, because it is gated on the display having none.
+
 `suppressDisplayCriteria` defaults to `false`, so the engine-driven path is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or 5 s timeout), then `replaceCurrentItem` runs against an already-correct panel.
 
 **Handoffs between items:** back-to-back `load()` calls preserve the applied criteria across the seam, so a same-mode follow-up (Dolby Vision episode to Dolby Vision episode) overwrites it in place with a single handshake instead of bouncing the panel through SDR. If your host calls `stop()` between items, pass `stop(resetDisplayCriteria: false)` to get the same behavior ([#128](https://github.com/superuser404notfound/AetherEngine/pull/128)); the plain `stop()` returns the panel to its default mode, which is what you want when leaving playback for the app UI. Audio-only sessions and suppressed hosts clear a leftover criteria automatically.
@@ -527,6 +537,22 @@ If a second FFmpeg in the app takes those symbols, that line turns into an `ERRO
 
 The handler fires from whatever thread emitted the line (demuxer, producer pump, local server, audio bridge), so it must be thread-safe and non-blocking; serialize onto a queue before writing to a file. Per-segment trace lines are emitted at `.verbose` and reach os_log's debug level only, never the handler, so the mirrored stream stays readable. `aetherctl` installs exactly this handler, which is why the CLI prints what the app hides.
 
+**Reading the log out of a GUI host is its own problem, and it is worth solving before you need it.** An
+app launched from Finder or `open` has no stdout you can read, so the handler above has nowhere to print
+to; a reporter on #493 lost most of a measurement session to this. Install the handler and write it to a
+file you can name, flushing per line, and do it on every build rather than only when hunting something:
+
+```swift
+EngineLog.handler = { line in DiagnosticFile.shared.append(line) }  // your own serial queue + flush
+```
+
+The os_log side does work and is worth knowing as the fallback, but it needs a time window: `log show
+--last 10m --predicate 'subsystem == "de.superuser404.AetherEngine"'` returns the session's lines here on
+macOS 26.5. Without `--last`, or against a bare `log show`, the same predicate reads as if the engine
+never logged. Lines are emitted with `.public` privacy, so they arrive whole rather than as `<private>`,
+which is also why [`LogRedaction`](Sources/AetherEngine/Diagnostics/LogRedaction.swift) scrubs credentials
+at the funnel: what reaches your file is what reaches a sysdiagnose.
+
 ## Non-goals
 
 Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
@@ -553,10 +579,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.71.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.73.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.71.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "6.73.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 

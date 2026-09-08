@@ -12,6 +12,72 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.73.0] - 2026-09-07
+
+### Changed
+
+- **`SUPPLEMENTAL-CODECS` is emitted for Dolby Vision Profile 8.1 and 8.4 on
+  every display, not only a Dolby-Vision-capable one.** Pairing a plain `hvc1`
+  primary `CODECS` with a DV supplemental is what the HLS authoring
+  specification asks for, and the pairing exists so a client that does not
+  recognise `dvh1` reads the HDR10 or HLG base layer instead of failing to play
+  at all. That client is not hypothetical for this engine: the loopback master
+  is handed to wireless AirPlay receivers, and an AirPlay 2 television is
+  exactly the device the pairing was written for. The gate also keyed on the
+  sending device's own display, which on iOS is read device-wide, so a sender
+  without Dolby Vision aimed at a receiver that has it dropped the signal for
+  no reason.
+
+  The gate was a measurement rather than a guess, from the same afternoon as
+  the strip removed in 6.72.0: an unconditional supplemental switched an
+  HDR10-only panel to HDR through `VIDEO-RANGE=PQ` and then showed a black
+  picture with no error at all. It does not reproduce on tvOS 26.6. Measured
+  for both profiles on an Apple TV 4K 3rd generation at a Samsung HDR10+ panel
+  with no Dolby Vision of its own, master served with the supplemental and the
+  session's own DV mode false: picture present, clip plays, no error log entry.
+  Suggested by DrHurt (#493).
+
+### Added
+
+- **`[DisplayCapabilities] observed: hdr=… hdr10=… hlg=… dv=…`, once per load.**
+  Every question this table decides was previously answered by inferring
+  backwards from the outcome, and a per-mode `false` is an assertion the
+  platform made rather than an absence of information. It lands in the host's
+  diagnostic log like every other engine line, so a report that a source
+  "plays as SDR" arrives with the reason attached.
+
+## [6.72.0] - 2026-09-07
+
+### Changed
+
+- **A Dolby Vision Profile 8.1 or 8.4 served to a display without Dolby
+  Vision keeps its `dvcC` instead of having it stripped.** The strip was added
+  on 2026-05-26 against a measured failure (an HDR10-only panel refused the
+  asset open with `-11868` / `-17223` even behind a clean master with no
+  `SUPPLEMENTAL-CODECS`), and that failure does not reproduce on tvOS 26.6.
+  Re-measured on an Apple TV 4K 3rd generation at a Samsung HDR10+ panel with
+  no Dolby Vision of its own, using Dolby's Browser Test Kit, where the same
+  grade exists as Profile 5, 8.1 and 8.4 and the Profile 5 cut is the control
+  for whether anything composed: eleven sessions across both routes and both
+  panel states, not one error log entry among them.
+
+  Keeping the record is not only harmless, it is what puts the RPU on the
+  pixels wherever AVPlayer has to convert the base layer, which on tvOS is
+  every HDR source while the panel is not in HDR mode. On that path a kept
+  record composes, measured for 8.1 and separately for 8.4, and a stripped one
+  hands the panel the flat base layer with its single static grade. On a panel
+  that is in HDR nothing composes either way, so the change costs that route
+  nothing.
+
+  `SUPPLEMENTAL-CODECS` stays gated on the display's own Dolby Vision
+  capability. The same run resolved both arms to `hdr10` on a panel without
+  Dolby Vision, so the upgrade signal is inert there, and it carries its own
+  history of a black picture on that panel class. Reported by DrHurt (#493).
+
+- **A malformed Profile 8 compatibility id ("P8.6", #53) normalizes on both
+  branches.** Dropping the record used to hide it on the non-Dolby-Vision
+  branch; a record that is kept has to be a truthful one.
+
 ## [6.71.0] - 2026-09-06
 
 ### Added

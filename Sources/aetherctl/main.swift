@@ -116,7 +116,7 @@ func printUsage() {
       aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--realtime-rate X] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N] [--live-only] [--no-blocking-reload] [--force-master]
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N]
                      [--no-blocking-reload]
@@ -495,6 +495,10 @@ if first == "live" {
     // --preroll N: backlog seconds the paced fixture bursts before 1x pacing (default 30).
     // 0 models a strict-realtime origin with no backlog (the AE#195 slow-join case).
     let preroll = takeDoubleFlag("--preroll", from: &rest)
+    // --realtime-rate X: pace at X times wall clock after the preroll (implies --realtime). 1x is
+    // `--realtime`; unpaced is a burst that ENDS. Neither covers an origin that keeps running ahead
+    // for the whole session, which is what makes a live edge outrun the client that tracks it.
+    let realtimeRate = takeDoubleFlag("--realtime-rate", from: &rest)
     // --gen-highbitrate-seed: generate ~22 Mbps 1080p H.264 MPEG-TS seed for RSS-retention measurement.
     if takeFlag("--gen-highbitrate-seed", from: &rest) {
         let path = seed ?? "Fixtures/user/highbitrate-1080p.ts"
@@ -536,8 +540,8 @@ if first == "live" {
                  reportCacheBytes: reportCacheBytes, rewindTest: rewindTest,
                  reloadTest: reloadTest,
                  forceSoftware: forceSW, dropAfter: dropAfter,
-                 discontinuityAt: discontinuityAt, realtime: realtime,
-                 fastZap: fastZap, pacingPreroll: preroll,
+                 discontinuityAt: discontinuityAt, realtime: realtime || realtimeRate != nil,
+                 fastZap: fastZap, pacingPreroll: preroll, pacingRate: realtimeRate,
                  freezeAfter: freezeAfter, unfreezeAfter: unfreezeAfter,
                  rewindBeforeFreeze: rewindBeforeFreeze,
                  forceRecoveryReloadAt: forceRecoveryReloadAt,
