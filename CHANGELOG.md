@@ -12,6 +12,118 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.75.0] - 2026-09-09
+
+### Added
+
+- **`LoadOptions.heldSourceConnection`: one connection held open for the whole
+  session, instead of a fresh range request at every drain cycle.** The reader
+  ends its connection at the window high water and asks for a new range at every
+  low water, because a data task has no way to say stop sending: the suspend is
+  advisory, and a task that does park holds a dormant flow that takes the
+  process's networking down with it. Against an origin that rate-limits, that
+  cadence is the defect. The held path is an HTTP/1.1 transport over
+  `URLSessionStreamTask`, whose reads are demand driven, so it asks once and
+  pulls, and the framing URLSession would do is the engine's: request line,
+  response head, Content-Length or chunked, bounded redirects, OS TLS through
+  the engine's own trust delegate. Measured with `aetherctl` against a
+  Range-logging origin, 150 s of continuous playback of the same 66 MB source
+  with identical decode on both arms (14617 packets read, 6000 written): the
+  pushed path spent five ranges, each ending at the window high water, and the
+  held path one open-ended range in one generation, first data after 3 ms. The
+  pull budget keeps the dormant stretch to 64 KB over media rate, and a full
+  window past a 5 s budget ends the connection rather than parking a flow, so a
+  paused viewer stays on the invariant. The option names the session rather
+  than tuning it, since the transport is chosen when the source is opened, so a
+  reload that changes it is refused rather than silently ignored, and side
+  readers do not inherit it: their multi-minute parks are the one shape a held
+  connection must not take. `aetherctl --held-connection` drives it. Reported
+  by Rasmusmart57 (#377).
+
+- **`aetherctl live` prints the item clock beside the published clock, and
+  `live --start-position` drives a live join with a resume anchor.** A live
+  report's sharpest field is the playhead off `AVPlayerItem.currentTime()`, and
+  the harness had no counterpart for it: it printed the engine's published
+  clock, which is the item clock plus the playlist shift, and hours into an
+  encoder clock those two are thousands of seconds apart in a perfectly healthy
+  session. The 1 Hz tick now carries `item=<s> ranges=<n> status=<n>`, the three
+  fields a host dumps when a join fetches a window and presents none of it.
+  `ranges=0` is the discriminating one: it says nothing has been PLACED, which
+  `isPlaybackBufferEmpty` cannot say. A healthy join on the reporting axis reads
+  `t=95173.70s item=0.75s ranges=1 status=1`. The resume anchor is an ITEM-axis
+  value while a host only ever sees the published clock, so the mount seek that
+  spends it now names the axis it is spent on (#509).
+
+### Fixed
+
+- **A subtitle prefetcher held away from a move the viewer already made no
+  longer takes the region in front of him with it.** The forward prefetcher
+  takes a pending re-anchor at one point in its loop, and both of the loop's
+  waits sit in front of that point. A yield to a producing video path holds the
+  move for up to the whole 60 s cap, and the park holds it for as long as the
+  banked read position stays past the playhead, which after a backward seek
+  means until the viewer catches back up to where the reader already was. In
+  both states the reader goes on banking packets for the stretch the viewer has
+  left, the stretch he is in is harvested by nobody, and the drain has nothing
+  to publish there: subtitles drop out for tens of seconds in the middle of
+  otherwise healthy playback and return when the next transport change
+  re-anchors the drain. The reported probe carries the signature, and it was the
+  one number in it with no innocent reading: `prefetchLead=-215.8s` under a live
+  loop, 30 s after two probes reading +74.5 and +74.7. A pending move now counts
+  as freshly anchored for the arbitration, which is what the anchor grace
+  already exists for, and the park breaks on a pending move because that move is
+  what voids the position the park is judging. A seek in flight still wins the
+  link. Reported by RadicalMuffinMan (#496).
+
+- **The generated-PTS repair reaches AVI, so an XviD rip with a reorder delay
+  plays in presentation order.** The gate was Matroska-only for want of a
+  measured AVI. On a 2000 s XviD rip (mpeg4 ASP, tag XVID, video_delay 1, packed
+  B-frames) `aetherctl swdecode` reported 12 backward steps of 37 before and 0
+  of 37 after. AVI needs no `ms_compat` equivalence to establish the same fact,
+  because avidec has no other mode: the container carries no presentation
+  timestamps at all, so on an AVI input any PTS present was necessarily invented
+  by `+genpts`, and `video_delay > 0` carries the whole gate. What transposes
+  the axis is the packed bitstream: a plain coding-order XviD AVI of the same
+  shape already decodes in order (0 backward steps of 14), because there the
+  invented axis is the presentation ladder shifted by exactly one frame,
+  uniformly. A packed stream's N-VOP placeholder chunks hold a slot while the
+  picture they stand for rides inside the previous chunk, so packets and
+  pictures stop matching one to one and the shift stops being uniform. The
+  repair is preferred over libavcodec's `mpeg4_unpack_bframes` because it covers
+  every container that withholds timestamps, where the filter covers one codec.
+  Contributed by a1go3, who reported it and sent the patch (#516).
+
+- **A Dolby Vision item on the loopback route is no longer labelled HDR10 on
+  macOS.** `AVPlayer.availableHDRModes` is API_UNAVAILABLE there, so
+  `supportsDolbyVision` is false on every Mac unless the host asserts it, and a
+  Profile 5 PQ base was reported as `.hdr10` while the session went on playing
+  the `dvh1` sample entry the engine served. The host already parses the item's
+  sample entry for the remote-HLS bypass; the loopback route now reads the same
+  publisher, as an upgrade only. It fires only where the platform has no
+  per-mode capability table, only from `.hdr10`, only for a source the probe
+  called Dolby Vision, and only on a `dvh1` or `dvhe` item, because an
+  unconditional copy would relabel a session on a tvOS panel parked in SDR,
+  whose label is deliberately `.sdr`. Profile 8.1 keeps `.hdr10`: it reports
+  `hvc1`, it composes anyway, and nothing in the stack says so. The host's
+  format line is renamed from `remote-HLS videoFormat=` to `item videoFormat=`,
+  because it runs on every native session and naming the wrong route cost a
+  reporter time on a log where the route was the question. Reported and
+  diagnosed by Rasmusmart57, down to the two line numbers (#515).
+
+- **The live telemetry's lifetime average bitrate divides by active time, not by
+  the wall clock.** `demuxerBytesFetched` stops advancing while the transport is
+  paused, the wall clock does not, so a 2.8 Mbps file left paused for three
+  minutes reported 0.4 Mbps and climbed back only asymptotically on resume,
+  because the paused seconds never left the divisor again. Same shape after
+  end of media, where the sampler keeps ticking until the host tears the session
+  down. A tick now charges its second only when the playback phase says the
+  session is consuming media. `.seeking` deliberately still charges, against the
+  report's suggestion: a seek is where the bytes arrive hardest, so dropping
+  those seconds while keeping their bytes would push the average above the
+  media's real rate on every scrub, and the same holds for `.rebuffering` and
+  `.stalled`. The value is also nil rather than a confident `0.00 Mbps` until
+  both halves are measurable. Reported by classicjazz (#514).
+
 ## [6.74.0] - 2026-09-08
 
 ### Added
