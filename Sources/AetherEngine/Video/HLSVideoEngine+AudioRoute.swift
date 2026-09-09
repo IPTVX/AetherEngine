@@ -12,6 +12,11 @@ extension HLSVideoEngine {
         case vorbis, pcm, mp2
         /// LATM/LOAS-framed AAC (DVB-T2/IPTV, typically HE-AAC); no ADTS headers, no ASC in extradata, always bridges via aac_latm decoder.
         case aacLatm
+        /// Every Windows Media audio flavour (Standard, Pro, Lossless, Voice), which arrives with the
+        /// native .wmv / .asf support of FFmpegBuild 3.1.0. None is fMP4-legal, so all bridge. One case
+        /// rather than five: nothing downstream distinguishes them, and a missing entry is not an error
+        /// but a silent film, since `.unsupported` does not bridge and the session goes video-only.
+        case wma
         case unsupported
 
         static func from(_ codecID: AVCodecID) -> AudioCodecCompat {
@@ -28,6 +33,12 @@ extension HLSVideoEngine {
             case AV_CODEC_ID_DTS:    return .dts
             case AV_CODEC_ID_VORBIS: return .vorbis
             case AV_CODEC_ID_MP2:    return .mp2
+            case AV_CODEC_ID_WMAV1,
+                 AV_CODEC_ID_WMAV2,
+                 AV_CODEC_ID_WMAPRO,
+                 AV_CODEC_ID_WMALOSSLESS,
+                 AV_CODEC_ID_WMAVOICE:
+                return .wma
             case AV_CODEC_ID_PCM_S16LE,
                  AV_CODEC_ID_PCM_S24LE,
                  AV_CODEC_ID_PCM_F32LE,
@@ -47,7 +58,7 @@ extension HLSVideoEngine {
             case .eac3:   return "ec-3"
             case .flac:   return "fLaC"
             case .alac:   return "alac"
-            case .mp3, .opus, .truehd, .dts, .vorbis, .pcm, .mp2, .aacLatm, .unsupported:
+            case .mp3, .opus, .truehd, .dts, .vorbis, .pcm, .mp2, .aacLatm, .wma, .unsupported:
                 // mp3: theoretically mp4a.40.34, but AVPlayer treats any mp4a as AAC and fails; bridge to FLAC.
                 return ""
             }
@@ -56,7 +67,7 @@ extension HLSVideoEngine {
         /// Codecs that must go through AudioBridge. Opus is fMP4-spec-legal but AVPlayer rejects it in HLS-fMP4 in practice (only CAF/WebM paths work). MP3 writes `mp4a.40.34` but AVPlayer treats any mp4a as AAC, failing with -11829/-12848.
         var requiresBridge: Bool {
             switch self {
-            case .opus, .mp3, .truehd, .dts, .vorbis, .pcm, .mp2, .aacLatm: return true
+            case .opus, .mp3, .truehd, .dts, .vorbis, .pcm, .mp2, .aacLatm, .wma: return true
             default: return false
             }
         }
