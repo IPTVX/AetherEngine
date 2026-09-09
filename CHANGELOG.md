@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.76.0] - 2026-09-09
+
+### Added
+
+- **Windows Media audio routes through the AudioBridge, which is what makes
+  native `.wmv` / `.asf` playable.** FFmpegBuild 3.1.0 adds the `asf` demuxer
+  and every WMA decoder (Standard, Pro, Lossless, Voice); without a matching
+  entry in `AudioCodecCompat` that build would be worse than the one before it,
+  because an id the table does not know maps to `.unsupported`, which does not
+  bridge, so the file would open and play its picture with no audio track at
+  all. No WMA flavour is fMP4-legal, so all five bridge, like MP2 and Blu-ray
+  LPCM. The software path never needed the entry: it opens its own
+  `AudioDecoder` and would have decoded WMA the moment the build carried it. It
+  is the native path and its HLS serving that the table gates. Verified with
+  `aetherctl` on real media: `wmv3` + `wmav2` plays through, WMA Pro 5.1 opens
+  at 48 kHz across six channels into CoreAudio, WMA Voice decodes at 8 kHz.
+
+### Changed
+
+- FFmpegBuild pinned to 3.1.0 (from 3.0.0). Same `n8.1.2` FFmpeg, plus the
+  `asf` demuxer and the WMA decoders, at 177 KB on `libavcodec` and 16 KB on
+  `libavformat` per arm64 slice.
+
 ## [6.75.0] - 2026-09-09
 
 ### Added
