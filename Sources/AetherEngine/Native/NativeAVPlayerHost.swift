@@ -841,6 +841,18 @@ final class NativeAVPlayerHost {
 
         // Explicit seek prevents AVPlayer from defaulting to the EVENT-playlist live edge. Remote-HLS and loopback live REJOINS set skipInitialSeek (backlog-start seek was the prime suspect for permanent waitingToPlay on rejoin; see LiveReloadPolicy.skipInitialSeek).
         if !skipInitialSeek {
+            // AE#509: name the seek and the axis it is spent on. This is the only unconditional
+            // reposition of a fresh item, it happens before the item can answer for itself, and
+            // nothing logged it: a session parked at an unreachable position looked exactly like a
+            // session that placed nothing. `startPosition` is an ITEM-axis anchor, while a live
+            // host only ever sees the published clock (item + shift), so a live anchor that is not
+            // nil is the one shape where those two axes can be confused.
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) mount seek: item axis "
+                + String(format: "%.2f", startPosition ?? 0) + "s "
+                + "(startPosition=\(startPosition.map { String(format: "%.2f", $0) } ?? "nil"), "
+                + "live=\(contract.isLive))",
+                category: .engine)
             // Load-time seek (not a user scrub): no seekInFlight needed; the async seek(to:) carries #37/#38 semantics for user seeks.
             avPlayer.seek(to: CMTime(seconds: startPosition ?? 0, preferredTimescale: 600),
                           toleranceBefore: .zero, toleranceAfter: .zero)

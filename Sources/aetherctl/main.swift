@@ -537,6 +537,10 @@ if first == "live" {
     // the device's own route, and every live leg before this ran media-direct, so nothing here had
     // ever exercised it.
     let liveForceMaster = takeFlag("--force-master", from: &rest)
+    // AE#509: --start-position S loads the live session with a resume anchor, the same one
+    // `load(url:startPosition:)` takes. Live callers normally pass nil, so the anchor's own live
+    // handling had never been drivable from here.
+    let liveStartPosition = takeDoubleFlag("--start-position", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -552,7 +556,8 @@ if first == "live" {
                  forceRecoveryReloadAt: forceRecoveryReloadAt,
                  rewindHold: rewindHold,
                  blockingReload: noBlockingReload ? false : nil,
-                 liveOnly: liveOnly, forceMaster: liveForceMaster))
+                 liveOnly: liveOnly, forceMaster: liveForceMaster,
+                 startPosition: liveStartPosition))
 }
 
 if first == "play" {
