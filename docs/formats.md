@@ -58,6 +58,77 @@ short of that (variable frame timing, a picture order that does not advance one 
 sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
 Reported by @orut34iop.
 
+### Matroska with presentation slots in coding order
+
+Matroska block timestamps are presentation timestamps by specification, and the format has no
+composition-offset table to lose. A writer that fills them packet by packet while the bitstream
+reorders pictures has therefore not lost anything: every presentation slot is still in the file, each
+one just arrived attached to the picture that was *decoded* at that position rather than the one that
+is *displayed* there. On the reporting asset the first slots are 0, 40, 73, 107, 140 and the decoder
+emitted them as 0, 73, 107, 140, 40, one stepped-back presentation clock per mini-GOP for the length
+of the file. Measured here through the engine's own software decoder on a generated twin, 15 of 30
+frame times stepped backwards before the repair and 0 after (#511).
+
+`H264MatroskaSlotPermutation` therefore permutes rather than reconstructs: a picture carries the slot
+its own display rank owns, and the slot is read from the file instead of being computed. Nothing fits
+a cadence, so a ladder quantized from a fractional frame rate is reproduced exactly rather than to
+within a tick, and a slot the writer clamped onto its cluster origin (the reporting asset has one, 7
+ticks below the 1001/30 lattice its other 59 slots sit on) survives as written. Nothing moves the
+decode timestamps either: libavformat derives them from the rising slot ladder, which is the decode
+order the stream really has, and a picture at most its own reorder delay behind its slot cannot
+violate `PTS >= DTS`. The container index is untouched for the same reason, since it holds keyframe
+slots and a keyframe is the first picture of its own sequence.
+
+The slot a picture needs is a packet away, not a plan away. A picture coded ahead of the slot it owns
+waits for the packet carrying that slot, which is the mini-GOP reorder created: three video packets
+on the reporting asset, in a 60-picture sequence. Nothing waits for the end of a sequence.
+
+Detection is fail-closed and costs a healthy file almost nothing: one stepped-back slot is the
+container doing what the format says, and it ends the sample on what is normally the third packet.
+`PTS != DTS` is not an eligibility test here, because libavformat synthesizes a decode ladder from a
+rising presentation one just as readily as from a reordered one. A source is only repaired when the
+sampled slots rise strictly, the picture order regresses, the ranks are distinct, fill the sampled
+window and are a multiple of one measured step, and no picture sits further behind its own slot than
+the reorder delay the container declares. A stream that later stops being that shape, or a wait no
+mini-GOP explains, hands its packets back exactly as they arrived rather than permuting half a
+sequence. Diagnosed by @orut34iop on PR #511, whose numeric ladder is the regression fixture.
+
+### MP4 with composition offsets missing only in later regions
+
+A healthy head does not establish a healthy table for the whole file. Some mixed
+MP4s retain valid offsets at the head, then give later reordered pictures zero
+offsets. Seeking into that region can produce persistent judder despite normal
+aggregate FPS and sufficient network buffering.
+
+When a healthy origin picture corroborates the container's edit/index lead, the
+demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. One
+bounded, complete IDR-to-IDR progressive sequence is parsed for picture order.
+If every selected packet has valid equal PTS/DTS and its distinct even POC fills
+the complete sequence, a proven permutation assigns its original DTS slots plus
+the corroborated presentation lead by display rank. Original DTS, audio and the
+already published keyframe index never move. Actual timestamp slots, rather than
+an average-FPS clock, preserve interval changes and quantization within a sequence.
+
+The slot a picture needs is a packet away, not a plan away, exactly as in the Matroska
+policy above: a picture coded ahead of its own slot waits the mini-GOP the reorder
+created, so nothing waits for the end of a sequence and no sequence is too long to
+repair. The wait is bounded by the reorder delay the container declares, believed up
+to **16 pictures**, and the packets held behind it by **1024 interleaved packets and
+32 MiB**, which is a ceiling on a container's interleaving rather than on its GOP.
+A candidate sequence has to show its reordering within **64 pictures** before a single
+picture is rewritten.
+
+Healthy nonzero offsets resume unchanged delivery. Fields, missing timestamps,
+incomplete POC, a rank claimed twice, arithmetic overflow and insufficient lead are
+not guessed at. **Every refusal hands the held packets back exactly as they arrived**
+and lets the rest of that sequence stream through, so a shape this policy does not own
+costs the repair and never the session; the next IDR is a fresh candidate. Seek and
+teardown release both unpublished input and pending output. No decoder-route or host-UI
+change is needed. The existing whole-file missing-offset policy above remains separate.
+
+See the [partial-composition regression and reproduction](partial-composition-regression.md)
+for generated fixtures, original numeric evidence and verification limits.
+
 ## HDR routing
 
 | Source | Wrapper signaling |
@@ -72,7 +143,7 @@ Reported by @orut34iop.
 
 HDR-to-SDR mapping is handled by AVPlayer and the system compositor according to the connected display. AetherEngine doesn't tonemap on the host; it tells the system "this is BT.2020 PQ" (or DV, or HLG) via the HLS-fMP4 sample description and lets tvOS / iOS pick the right path.
 
-An HDR master playlist is only served when the panel is ready for it. On tvOS the external panel must already be in HDR mode or Match Dynamic Range must be on (an SDR-parked panel rejects an HDR master with `-11848`). On iOS and macOS the built-in panel engages EDR on demand with no display mode switch, so `AVPlayer.eligibleForHDRPlayback` counts as readiness there; SDR-only devices read ineligible and stay media-direct. `DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see the README's "Host setup on tvOS" section.) The per-mode capability split (Dolby Vision vs HDR10 vs HLG) still comes from `AVPlayer.availableHDRModes`; the 26 SDKs deprecate it in favor of the eligibility Bool but ship no per-mode replacement, and the DV5 `-11868` guard needs exactly that distinction, so the engine keeps the deprecated read until Apple obsoletes it. That read does not exist on macOS at all (`API_UNAVAILABLE(macos)`), so the Mac table is derived from eligibility for HDR10 and HLG and leaves Dolby Vision unclaimed: eligibility proves EDR, not that AVFoundation will accept a DV variant on this display. A host that knows the hardware claims it with `LoadOptions.panelPresentsDolbyVision`, and a wrong claim costs one in-place media-playlist fallback rather than the item (AE#493) for the failures AVPlayer reports as an item failure. On tvOS that leaves a gap: an asserted Profile 8.1 takes the DV packaging (`dvvC` plus `SUPPLEMENTAL-CODECS`), which on an HDR10-only panel was measured to play for a second or two and then stall with `-15628` (AE#4), and a stall is not an item failure. DV composition on a panel without Dolby Vision is what `forceDolbyVisionOnNonDVDisplay` is for there (AE#455). An HDR master additionally requires a known source frame rate (#130): AVPlayer filters a `VIDEO-RANGE=PQ`/`HLG` variant that carries no `FRAME-RATE` attribute out of the master at parse time and fails the item with `-1002` without ever fetching the media playlist (SDR variants are accepted without it). The manifest frame rate uses the probe's `avg_frame_rate` with an `r_frame_rate` fallback; a source where both are unset (some live MPEG-TS ingests) routes media-direct instead of serving a master AVPlayer provably rejects.
+An HDR master playlist is only served when the panel is ready for it. On tvOS the external panel must already be in HDR mode or Match Dynamic Range must be on (an SDR-parked panel rejects an HDR master with `-11848`). On iOS and macOS the built-in panel engages EDR on demand with no display mode switch, so `AVPlayer.eligibleForHDRPlayback` counts as readiness there; SDR-only devices read ineligible and stay media-direct. `DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see the README's "Host setup on tvOS" section.) The per-mode capability split (Dolby Vision vs HDR10 vs HLG) still comes from `AVPlayer.availableHDRModes`; the 26 SDKs deprecate it in favor of the eligibility Bool but ship no per-mode replacement, and the DV5 `-11868` guard needs exactly that distinction, so the engine keeps the deprecated read until Apple obsoletes it. That read does not exist on macOS at all (`API_UNAVAILABLE(macos)`), so the Mac table is derived from eligibility for HDR10 and HLG and leaves Dolby Vision unclaimed: eligibility proves EDR, not that AVFoundation will accept a DV variant on this display. A host that knows the hardware claims it with `LoadOptions.panelPresentsDolbyVision`, and a wrong claim costs one in-place media-playlist fallback rather than the item (AE#493) for the failures AVPlayer reports as an item failure. The claim no longer picks the packaging of a Profile 5, 8.1 or 8.4 source: 6.72.0 gave the non-DV branch its `dvcC` back and 6.73.0 its `SUPPLEMENTAL-CODECS`, so those three serve byte-identical manifests and segments with and without it, and what moves is the published `videoFormat`, the criteria request and the HDR readiness that rides along (Profile 7 and AV1 Dolby Vision are still gated on it). On tvOS that leaves a gap in the net: the `-15628` an HDR10-only panel showed on the DV packaging in May 2026 (AE#4) is a stall rather than an item failure, it now reaches that panel with or without the claim, and it did not reproduce on tvOS 26.6. DV composition on a panel without Dolby Vision is what `forceDolbyVisionOnNonDVDisplay` is for there (AE#455). An HDR master additionally requires a known source frame rate (#130): AVPlayer filters a `VIDEO-RANGE=PQ`/`HLG` variant that carries no `FRAME-RATE` attribute out of the master at parse time and fails the item with `-1002` without ever fetching the media playlist (SDR variants are accepted without it). The manifest frame rate uses the probe's `avg_frame_rate` with an `r_frame_rate` fallback; a source where both are unset (some live MPEG-TS ingests) routes media-direct instead of serving a master AVPlayer provably rejects.
 
 Non-DV HEVC derives its primary `CODECS` string from the source `hvcC` profile_tier_level (profile space, profile, tier, level, constraint bytes), so an 8-bit Main source is not mis-declared as Main10. The compatibility-flags element is the stored `general_profile_compatibility_flags` in REVERSE bit order per RFC 6381 / ISO 14496-15 Annex E: a real Main10 record stores `0x20000000` and prints `hvc1.2.4...`, matching MP4Box and Dolby's own reference manifests. The declaration is checked against the init segment on device, so it has to be exact.
 
@@ -97,6 +168,8 @@ AV1+DV emits a bare `dav1.10.<dvLevel>` primary for Profile 10.0 (DV-only) and P
 ST 2094-40 metadata stays attached to the HEVC bitstream as user-data-registered ITU-T T.35 SEI NALs. The HLS-fMP4 stream-copy preserves the SEI through to `AVPlayer`, which forwards it to the system compositor. HDR10+-capable TVs apply the per-scene tone-mapping curves; HDR10-only TVs fall back to the static HDR10 base.
 
 The published `videoFormat` starts at `.hdr10` for any BT.2020 / PQ source and flips to `.hdr10Plus` the first time a packet's T.35 SEI signature is seen in the producer's scan. Debounced across producer restarts so a scrub doesn't re-fire. Hosts can drive an HDR10+ badge or analytics hook off the `$videoFormat` transition.
+
+The label can also be taken back from the item itself, where the platform has no capability table to clamp it against (AE#515). A Dolby Vision source on macOS resolves to `.hdr10`, because `supportsDolbyVision` is unclaimable there without a host assertion, while AVFoundation goes on playing the `dvh1` sample entry the engine served. Measured with the assertion off on a 16" XDR, a Profile 5 and a Profile 8.1 grade of Dolby's reference content both strobe, so the RPU reaches the pixels with no claim set anywhere and the clamp was moving nothing but the label. When the item's sample entry reads `dvh1` / `dvhe` and the probe agrees the source is Dolby Vision, the label is upgraded from `.hdr10` to `.dolbyVision` at `readyToPlay`. It is an upgrade and not a mirror of what AVFoundation parsed, for two reasons that both matter: an `.sdr` label is the clamp being right about a display presenting no HDR at all, and on tvOS and iOS the per-mode table answers the capability question, so the label follows it rather than a sample entry that a Profile 5 master carries on every panel. Profile 8.1 keeps `.hdr10` on macOS: it reports `hvc1` with the DV configuration alongside it, it composes on that display all the same, and nothing in the stack reports that.
 
 ## Audio
 

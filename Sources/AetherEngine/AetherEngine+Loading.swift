@@ -1264,6 +1264,17 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
+        // AE#515: the same parse `loadRemoteHLS` mirrors, read here as an upgrade only. This route has a
+        // probe, so `sourceVideoFormat` is already answered and `videoFormat` is the clamped label; what
+        // the item adds is the one thing the clamp cannot know on a platform without a capability table,
+        // namely that AVFoundation is playing a Dolby Vision sample entry. Mirroring the sink instead
+        // would overwrite a tvOS label the panel answered for.
+        host.$detectedVideoFormat
+            .compactMap { $0 }
+            .sink { [weak self] fmt in
+                self?.applyDolbyVisionLabelUpgrade(itemFormat: fmt)
+            }
+            .store(in: &nativeCancellables)
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
@@ -1695,14 +1706,13 @@ extension AetherEngine {
             .sink { [weak self] value in
                 guard let self = self else { return }
                 self.clock.currentTime = value
-                // bufferedPosition = newest demuxed source PTS, clamped to never trail the playhead (#54).
-                // #303: `bufferedSessionTime` is fed from `noteEdge`, which only runs on live
-                // sessions, so a VOD software session used to publish the playhead back as its own
-                // frontier. The decoded cushion is what it has instead.
+                // Both paths publish a real continuous cache frontier. Software VOD intersects
+                // selected A/V packet PTS coverage; the decoded cushion remains the unknown fallback.
                 self.clock.bufferedPosition = SoftwareBufferFrontier.bufferedPosition(
                     currentTime: value,
                     liveFrontier: host.bufferedSessionTime,
-                    cushion: host.displayCushionSeconds)
+                    cushion: host.displayCushionSeconds,
+                    cachedVODFrontier: host.cachedVODSessionTime)
             }
             .store(in: &softwareCancellables)
         // #107: sourceTime rides the RAW synchronizer clock (source axis) so subtitle cues
@@ -1731,20 +1741,22 @@ extension AetherEngine {
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
         let sequentialOrigin = loadedOptions.sequentialOrigin
+        let heldSourceConnection = loadedOptions.heldSourceConnection
         let declaredDuration = loadedOptions.declaredDurationSeconds
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
             Task { @MainActor in self?.setReaderNetworkPhase(phase) }
         }
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
+        let forwardBufferSegments = loadedOptions.forwardBufferSegments
         try await Task.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, declaredDuration, networkPhaseSink] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration), isLive: isLive)
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection), isLive: isLive)
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -1752,7 +1764,8 @@ extension AetherEngine {
                 startPosition: startPosition,
                 audioSourceStreamIndex: audioSourceStreamIndex,
                 isLive: isLive,
-                dvrWindowSeconds: dvrWindowSeconds
+                dvrWindowSeconds: dvrWindowSeconds,
+                forwardBufferSegments: forwardBufferSegments
             )
         }.value
         // Superseded: stop idempotently to tear down the demuxer the detached closure opened, then unwind.
@@ -1805,6 +1818,7 @@ extension AetherEngine {
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
         let sequentialOrigin = loadedOptions.sequentialOrigin
+        let heldSourceConnection = loadedOptions.heldSourceConnection
         let declaredDuration = loadedOptions.declaredDurationSeconds
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
@@ -1812,13 +1826,13 @@ extension AetherEngine {
         }
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
         try await Task.detached(priority: .userInitiated) {
-            [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration, sequentialOrigin, declaredDuration, networkPhaseSink] in
+            [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration))
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection))
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -2341,5 +2355,25 @@ extension AetherEngine {
         guard videoFormat == .hdr10 else { return }
         EngineLog.emit("[AetherEngine] HDR10+ T.35 detected, upgrading videoFormat .hdr10 → .hdr10Plus", category: .engine)
         videoFormat = .hdr10Plus
+    }
+
+    /// AE#515: republish a clamped Dolby Vision label once the item AVFoundation is playing says so.
+    /// Called from the loopback route's item-format sink; `dolbyVisionLabelUpgrade` carries the rule and
+    /// the reason for every term. `sourceVideoFormat` is untouched: the probe answered that one already,
+    /// and better than a sample entry can.
+    @MainActor
+    private func applyDolbyVisionLabelUpgrade(itemFormat: VideoFormat) {
+        guard let upgraded = Self.dolbyVisionLabelUpgrade(
+            publishedFormat: videoFormat,
+            sourceFormat: sourceVideoFormat,
+            itemFormat: itemFormat,
+            perModeCapabilitiesObservable: Self.perModeDisplayCapabilitiesObservable
+        ) else { return }
+        EngineLog.emit(
+            "[AetherEngine] item carries a Dolby Vision sample entry, upgrading videoFormat "
+            + "\(videoFormat) → \(upgraded); this display reports no per-mode capabilities and the "
+            + "clamp had nothing to read (#515)",
+            category: .engine)
+        videoFormat = upgraded
     }
 }

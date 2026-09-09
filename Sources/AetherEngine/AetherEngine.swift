@@ -1042,6 +1042,10 @@ public final class AetherEngine: ObservableObject {
     /// #240: the lead the running session was started with. A changed lead (the OCR worker arming)
     /// is the one anchor change that still needs a rebuild, since the loop captures it at start.
     var subtitleForwardPrefetchActiveLead: Double?
+    /// #496: why the last live prefetch session was cancelled. Set only when a task was actually
+    /// running, so it names a real teardown rather than the many no-op cancels on the way through
+    /// a selection. Mirrors the log line; kept as state so a test can assert the routing.
+    var lastSubtitleDrainStopReason: SubtitleDrainStopReason?
     /// #240: link arbitration between the video path and the subtitle side readers. On Matroska a
     /// side reader is a second full copy of the stream, so on a link with little headroom the two
     /// starve each other; the video path has priority. See `SideReaderLinkPolicy`.
@@ -1305,6 +1309,21 @@ public final class AetherEngine: ObservableObject {
         )
         #endif
     }
+
+    /// AE#515: whether this platform can be asked what the display presents, mode by mode.
+    ///
+    /// True exactly where `displayCapabilities` reads `AVPlayer.availableHDRModes`. Everywhere else the
+    /// per-mode terms are not an observation: HDR10 and HLG are answered from eligibility, and Dolby
+    /// Vision is left to a host assertion because nothing can observe it. `dolbyVisionLabelUpgrade` is
+    /// the one rule that turns on the difference, so it is named rather than re-derived from `#if`s at
+    /// the call site.
+    nonisolated static let perModeDisplayCapabilitiesObservable: Bool = {
+        #if os(tvOS) || os(iOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
 
     // MARK: - View binding
 
@@ -3485,6 +3504,7 @@ public final class AetherEngine: ObservableObject {
                     probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
                     .withSequentialOrigin(options.sequentialOrigin,
                                           declaredDuration: options.declaredDurationSeconds)
+                    .withHeldSourceConnection(options.heldSourceConnection)
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because
@@ -6202,7 +6222,7 @@ public final class AetherEngine: ObservableObject {
         liveWindowTimerTask = nil
 
         cancelSidecarTask()
-        stopSubtitleDrainer()                  // #112 rework: both channels
+        stopSubtitleDrainer(reason: .sessionStopped)   // #112 rework: both channels
         resetSubtitleOCRState()                // Phase D
         subtitleDrainTargets.removeAll()
         softwareSubtitlePacketStore = nil

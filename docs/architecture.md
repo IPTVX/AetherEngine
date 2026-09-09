@@ -36,7 +36,7 @@ Restart latency is self-localizing (#93 follow-up): the "producer restarted" lin
 
 A restart-window request must also never leave AVPlayer waiting in silence (#93 round 3): AVPlayer's media watchdog logs `-12889 "No response for media file"` after ~3.5 s without response HEADERS (holding the connection open does not help), and three strikes fail the item. A VOD serve still running at 2 s (`SlowServeSignal` armed by `VideoSegmentProvider.mediaSegment(at:onSlow:)`) therefore emits an early `200` with `Transfer-Encoding: chunked`; the segment follows as a single chunk when it lands, and a serve that ultimately misses aborts the connection (truncated transfer, AVPlayer retries) instead of framing a cacheable empty 200. Fast serves keep the byte-identical `Content-Length` response. If the item dies anyway, `failedToPlayToEndTime` parks it at rate 0 / `timeControlStatus == .paused` (with `item.status` often still `readyToPlay`), which every pause-guarded recovery layer used to misread as user intent, making the session terminal. The host now counts loopback-path end failures (`endFailureCount`), and the engine confirms the death through the same deferred window as the `.failed` KVO, then reloads the item through the stage-2 chain with the pause guard bypassed, bounded by `ItemDeathReviveGate` (3 attempts per dead spot; playback progress or a user seek away restores the budget).
 
-When a restart does run, it must reproduce segments on the SAME media timeline the continuous run gave them: the loopback's contract with AVPlayer is "static VOD server", and AVPlayer anchors fMP4 segments by their `tfdt`. Each restart allocates a fresh mp4 muxer, and movenc zero-bases a new instance's timeline by default, so a restart-produced segment used to carry `tfdt=0` while the playlist placed it at its plan offset: an implicit timeline discontinuity on every restart, papered over for plain playback but fatal to ancillary consumers (AVKit's legible renderer detaches mid-PiP, Sodalite#32; playhead/loaded-range decoupling, #93). The muxer therefore sets `movflags +frag_discont` with `avoid_negative_ts=disabled` so `tfdt` carries the producer's absolute output timestamps, the restart audio gate inherits the session shift (video shift rescaled) instead of snapping audio onto the video seam, and leading head-of-stream audio that would map below 0 is dropped (the muxer no longer absorbs negative timestamps). A restarted segment is byte-identical to its continuous twin modulo the per-muxer `mfhd` sequence number (pinned by `RestartTimelineContinuityTests` on a committed A/V fixture); on matroska sources, per-sample DTS synthesis after a demuxer seek scatters the DTS decomposition and boundary-frame membership by a frame or two, but presentation timestamps and `tfdt` anchoring stay epoch-invariant.
+When a restart does run, it must reproduce segments on the SAME media timeline the continuous run gave them: the loopback's contract with AVPlayer is "static VOD server", and AVPlayer anchors fMP4 segments by their `tfdt`. Each restart allocates a fresh mp4 muxer, and movenc zero-bases a new instance's timeline by default, so a restart-produced segment used to carry `tfdt=0` while the playlist placed it at its plan offset: an implicit timeline discontinuity on every restart, papered over for plain playback but fatal to ancillary consumers (AVKit's legible renderer detaches mid-PiP, Sodalite#32; playhead/loaded-range decoupling, #93). The muxer therefore sets `movflags +frag_discont` with `avoid_negative_ts=disabled` so `tfdt` carries the producer's absolute output timestamps, the restart audio gate inherits the session shift (video shift rescaled) instead of snapping audio onto the video seam, and leading head-of-stream audio that would map below 0 is dropped (the muxer no longer absorbs negative timestamps). A restarted segment is byte-identical to its continuous twin modulo the per-muxer `mfhd` sequence number (pinned by `RestartTimelineContinuityTests` on a committed A/V fixture); on matroska sources, per-sample DTS synthesis after a demuxer seek scatters the DTS decomposition and boundary-frame membership by a frame or two, but presentation timestamps and `tfdt` anchoring stay epoch-invariant. Because `tfdt` carries `unsigned int(64)`, that same setting makes a negative output axis unrepresentable rather than merely unusual, so the published first timestamp is clamped at zero (AE#509): libavformat serves an MPEG-TS whose first DTS sits within 60 s of the 33-bit PTS wrap with every timestamp `2^33` ticks low (`AV_PTS_WRAP_SUB_OFFSET`), and a live join there published `baseMediaDecodeTime = 2^64 - |dts|` against a playlist starting at 0, which AVPlayer answers by fetching the whole window and placing none of it, with no error and no stall of its own.
 
 ### Software decoder pipeline (AV1 + VP9 + VP8 + legacy fallback)
 
@@ -129,6 +129,62 @@ Routes the host did not ask for:
 | `.loopback` -> `.remoteBypass` | AE#154 / AE#246: an HLS playlist reached the loopback path, which cannot demux it. At load time. |
 
 Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
+
+## Software VOD compressed packet cache
+
+Seekable software VOD read through one of the engine's byte readers has a
+compressed packet producer separate from the renderer-paced decode consumer. The
+producer stores lossless packet envelopes in a session-owned temporary disk FIFO.
+Envelopes preserve payload, PTS/DTS, packet duration, position, flags, stream
+index, time base and every side-data entry; neither decoded pictures nor source
+URLs are retained in metadata. A source libavformat opens itself, which is a
+local path, stays on the direct loop: the spool exists to avoid a second trip to
+a source, and re-reading a file is a page-cache hit.
+
+The host uses the existing `forwardBufferSegments` clamp and native session
+retention/volume-safety policy. The forward-second limit is measured on the
+reservoir, from the packet the consumer last took to the newest one stored,
+because that is what the producer is building and two timestamps always say it.
+The coverage frontier below answers a stricter question and reports nothing at
+all once a hole or a single late presentation timestamp invalidates it, so it
+cannot be the only thing holding the limit up. Byte and forward-time thresholds
+stop prefetch, with bounded protected-chunk and single-record slack. Old consumed chunks can
+be reclaimed at the exact budget boundary so refill cannot deadlock. Metadata
+reads and seek intent are main-thread safe; disk operations and source reads
+stay on workers. Stop releases the session's directory, and bounded stale
+cleanup uses session leases without following symlinks or deleting live stores.
+If creating the store fails, the original direct playback loop remains available.
+Runtime cache corruption is a reported playback failure, not silently skipped data.
+
+The cache frontier is the intersection of selected audio and video presentation
+coverage containing the playhead. Unknown intervals remain unknown; byte counts
+are not converted to guessed seconds. H.264 uses a bounded presentation reorder
+queue and confirmed successor timestamps, because a VFR packet's decode duration
+can be shorter than the picture's actual display hold. Larger discontinuities,
+invalid or unexpectedly late timestamps invalidate or split coverage. Other
+codecs retain strict packet-duration coverage. Without a proven compressed
+frontier, the existing decoded-cushion fallback still applies.
+
+A cached seek restores a retained keyframe cursor, including an earlier keyframe
+for available preroll, and keeps the producer at its existing source frontier.
+A cache miss clears coverage and repositions the demuxer; discarding the spool
+is the worker's job, not the seek's, because removing every retained chunk costs
+more the longer the session has kept them and no seek waits on that work.
+Consumer generations
+and source epochs are separate: a cached seek must not discard an in-flight
+producer packet, and a superseded consumer must not steal the first packet of a
+new source epoch. Admission applies equally to packet, EOF, error and delayed
+end-of-media callbacks. At EOF the VOD consumer parks until a new seek or stop.
+
+This changes engine cache semantics, not host UI. Software `bufferedPosition`
+and `LiveTelemetry.cachedBytes` describe compressed coverage/residency;
+`forwardBufferSeconds` remains the native player's loaded-range metric and
+`displayCushionSeconds` still describes the small decoded queue. Native HLS
+`residentRanges` and live DVR are not repurposed.
+
+The CI packet-cache step runs the standalone coverage, VFR successor, disk FIFO,
+read-ahead concurrency, host admission and AVPacket-envelope regressions. These
+use generated numeric data and temporary records, not private video fixtures.
 
 ## SwiftUI `Menu` in custom player chrome
 

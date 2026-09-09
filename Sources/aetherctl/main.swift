@@ -157,11 +157,16 @@ func printUsage() {
                      (AVPlayer.availableHDRModes is unavailable there)
                      and HDR eligibility answers HDR10 and HLG but not
                      DV, so a DV source otherwise plays as its HDR10
-                     base layer with effective-format=hdr10. With the
-                     flag the session serves the DV route (dvh1 tags,
-                     SUPPLEMENTAL-CODECS, master playlist). A wrong
-                     claim costs one in-place media-playlist fallback
-                     (-11868 / -11848), not the item.
+                     base layer with effective-format=hdr10. The flag
+                     moves that label and the tvOS criteria request; it
+                     no longer moves the packaging of a P5 / P8.1 / P8.4
+                     source, which since 6.72.0 / 6.73.0 carries its
+                     dvcC and SUPPLEMENTAL-CODECS on every display (the
+                     served master, media playlist, init.mp4 and
+                     segments are byte-identical either way). P7 and AV1
+                     DV are still gated on it. A wrong claim costs one
+                     in-place media-playlist fallback (-11868 / -11848),
+                     not the item.
 
     Flags (serve / seektest):
       --throttle-kbps N
@@ -532,6 +537,10 @@ if first == "live" {
     // the device's own route, and every live leg before this ran media-direct, so nothing here had
     // ever exercised it.
     let liveForceMaster = takeFlag("--force-master", from: &rest)
+    // AE#509: --start-position S loads the live session with a resume anchor, the same one
+    // `load(url:startPosition:)` takes. Live callers normally pass nil, so the anchor's own live
+    // handling had never been drivable from here.
+    let liveStartPosition = takeDoubleFlag("--start-position", from: &rest)
     // --sliding: accepted but ignored; sliding is now unconditional for live sessions.
     _ = takeFlag("--sliding", from: &rest)
     rejectStrayFlags(rest, subcommand: "live")
@@ -547,7 +556,8 @@ if first == "live" {
                  forceRecoveryReloadAt: forceRecoveryReloadAt,
                  rewindHold: rewindHold,
                  blockingReload: noBlockingReload ? false : nil,
-                 liveOnly: liveOnly, forceMaster: liveForceMaster))
+                 liveOnly: liveOnly, forceMaster: liveForceMaster,
+                 startPosition: liveStartPosition))
 }
 
 if first == "play" {
@@ -631,10 +641,16 @@ if first == "play" {
     // open against the origin at once across every path it fetches on. `1` also switches off the
     // speculative parallel paths. This is the knob for reproducing a connection-metered CDN.
     let maxConcurrentRequests = takeIntFlag("--max-concurrent-requests", from: &rest)
+    // #377: LoadOptions.heldSourceConnection. The reader asks the origin once and pulls the file
+    // over that one connection, instead of ending at the window high water and asking again every
+    // drain cycle. This is the knob for an origin that refuses new requests in windows: run it
+    // against one and count the ranges in its own log, or read `conn start ... held` here.
+    let heldConnection = takeFlag("--held-connection", from: &rest)
     let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
     let frameTimes = takeFlag("--frame-times", from: &rest)
+    let presentTimes = takeFlag("--present-times", from: &rest)
     let pictureProbe = takeFlag("--picture-probe", from: &rest)
     // #316: declare sidecar subtitles at load, the LoadOptions.externalSubtitles a host passes.
     // Comma-separated `lang=path-or-url` entries, e.g. --sidecar en=/tmp/en.srt,de=/tmp/de.srt.
@@ -766,13 +782,14 @@ if first == "play" {
         exit(64)
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars,
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
                  audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
                  pausedMount: pausedMount,
                  optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
+                 heldConnection: heldConnection,
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,

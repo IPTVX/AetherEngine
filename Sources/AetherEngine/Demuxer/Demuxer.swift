@@ -61,6 +61,14 @@ struct DemuxerOpenProfile: Sendable {
     /// reopen (wedge restart, revive) inherit it together.
     var avioSequentialOnly: Bool = false
 
+    /// `LoadOptions.heldSourceConnection` (#377): the playback reader asks the origin once and
+    /// pulls, rather than ending at the window high water and asking again at low water. Rides in
+    /// the profile next to `avioSequentialOnly` so every reopen of the session (wedge restart,
+    /// revive) inherits it. The side demuxers build their own profiles from `playback` and are
+    /// deliberately left on the pushed path: their readers park for minutes at a time, which is
+    /// the one shape a held connection must not take.
+    var avioHeldConnection: Bool = false
+
     /// `LoadOptions.declaredDurationSeconds`: caller-trusted duration override consumed by
     /// `Demuxer.duration`. Rides in the profile next to `avioSequentialOnly` because the two are a
     /// pair: without the ranged tail read the container resolves no duration of its own.
@@ -121,6 +129,14 @@ struct DemuxerOpenProfile: Sendable {
         var copy = self
         copy.avioSequentialOnly = sequential
         if let declaredDuration { copy.declaredDurationSeconds = declaredDuration }
+        return copy
+    }
+
+    /// A copy of `self` carrying the host's held-connection request (#377), chainable in the style
+    /// of `withSequentialOrigin` so a call site can add it to the profile it already built.
+    func withHeldSourceConnection(_ held: Bool) -> DemuxerOpenProfile {
+        var copy = self
+        copy.avioHeldConnection = held
         return copy
     }
 
@@ -201,7 +217,7 @@ public final class Demuxer: @unchecked Sendable {
     /// producer, the segment plan, the software decoder, the still extractor) reads the same axis;
     /// a repair applied per host would have them disagree by the reorder delay. nil for every stream
     /// that is not the exact defect shape, which is decided once, on the first read.
-    private var compositionRepair: H264CompositionOffsetRepairSession?
+    private var compositionRepair: (any H264TimestampRepairSession)?
     private var compositionRepairEvaluated = false
 
     /// #407: video streams whose PTS `+genpts` invented out of decode order, because the container
@@ -228,6 +244,12 @@ public final class Demuxer: @unchecked Sendable {
 
     // Forward-only custom sources report false.
     var isSourceSeekable: Bool { avioProvider?.isSeekable ?? true }
+
+    /// True when libavformat opened the source itself, which it does only for a local path
+    /// (`openLocal`). Every network, disc and custom source is read through an `AVIOProvider`.
+    /// A caller that only wants to spend disk to avoid a re-READ asks this: re-reading a local
+    /// file costs a page-cache hit, so a second copy of it in the temporary directory buys nothing.
+    var readsSourceDirectly: Bool { avioProvider == nil }
 
     /// Timestamp of last unplanned reconnect (drop/stall, not a seek).
     /// Live producer correlates with backward source-PTS reset to detect
@@ -469,7 +491,8 @@ public final class Demuxer: @unchecked Sendable {
             chunkRequestTimeout: openProfile.avioRequestTimeout,
             chunkMaxRetries: openProfile.avioMaxRetries,
             boundedInitialFetch: openProfile.boundedInitialFetch,
-            sequentialOnly: openProfile.avioSequentialOnly
+            sequentialOnly: openProfile.avioSequentialOnly,
+            heldConnection: openProfile.avioHeldConnection
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         try openWithProvider(reader, isLive: isLive)
@@ -711,7 +734,7 @@ public final class Demuxer: @unchecked Sendable {
         generatedPTSStreams.removeAll()
         guard let nameC = ctx.pointee.iformat?.pointee.name else { return }
         let formatName = String(cString: nameC)
-        guard VFWDecodeOrderPTSRepair.isMatroska(formatName) else { return }
+        guard VFWDecodeOrderPTSRepair.containerWithholdsPTS(formatName) else { return }
         for index in 0..<Int32(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[Int(index)],
                   let par = stream.pointee.codecpar,
@@ -725,7 +748,8 @@ public final class Demuxer: @unchecked Sendable {
             else { continue }
             generatedPTSStreams.insert(index)
             EngineLog.emit(
-                "[Demuxer] AE#407 stream=\(index) is VFW-carried (tag=\(fourCC(par.pointee.codec_tag)) "
+                "[Demuxer] AE#407 stream=\(index) in \(formatName) is FourCC-carried "
+                + "(tag=\(fourCC(par.pointee.codec_tag)) "
                 + "videoDelay=\(par.pointee.video_delay)); the container carries no PTS, so the "
                 + "+genpts axis is decode order. Clearing PTS, the decoder's reorder owns presentation.",
                 category: .demux
@@ -1243,10 +1267,13 @@ public final class Demuxer: @unchecked Sendable {
         return result
     }
 
-    func readPacket() throws -> UnsafeMutablePointer<AVPacket>? {
+    func readPacket(isCurrent: @Sendable () -> Bool = { true }) throws -> UnsafeMutablePointer<AVPacket>? {
         accessLock.lock()
         defer { accessLock.unlock() }
         while true {
+            // A read-ahead decision made before a seek cannot start a NEW-position read after
+            // the seek releases this lock, then throw that first new packet away as stale.
+            guard isCurrent() else { throw CancellationError() }
             // #409: a packet the repair held during its sampling window is handed back before any
             // new read, so the container's own order survives the verdict. Checked every pass, not
             // once on entry: the packet that completes the sample flips the phase, and the queue
@@ -1297,7 +1324,7 @@ public final class Demuxer: @unchecked Sendable {
     /// #409: resolved once per demuxer, at the first read or at the explicit decision above,
     /// because it needs the stream parameters `avformat_find_stream_info` fills in and costs nothing
     /// for the streams it does not apply to.
-    private func armCompositionRepairIfNeeded() -> H264CompositionOffsetRepairSession? {
+    private func armCompositionRepairIfNeeded() -> (any H264TimestampRepairSession)? {
         if compositionRepairEvaluated { return compositionRepair }
         compositionRepairEvaluated = true
         guard let ctx = formatContext else { return nil }
@@ -1312,11 +1339,18 @@ public final class Demuxer: @unchecked Sendable {
         guard index >= 0, index < Int32(ctx.pointee.nb_streams),
               let stream = ctx.pointee.streams[Int(index)] else { return nil }
         guard stream.pointee.discard != AVDISCARD_ALL else { return nil }
+        // #511: the same defect on a container that never had composition offsets to lose. Its
+        // policy reads the presentation slots the writer misassigned rather than rebuilding them,
+        // so the two never apply to one stream and the container picks between them.
         compositionRepair = H264CompositionOffsetRepairSession(
             containerFormatName: containerFormatName,
             stream: stream,
             streamIndex: index,
             ladderStart: firstIndexedTimestamp(of: stream)
+        ) ?? H264MatroskaSlotPermutationSession(
+            containerFormatName: containerFormatName,
+            stream: stream,
+            streamIndex: index
         )
         return compositionRepair
     }

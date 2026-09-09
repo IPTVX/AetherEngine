@@ -12,6 +12,224 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.75.0] - 2026-09-09
+
+### Added
+
+- **`LoadOptions.heldSourceConnection`: one connection held open for the whole
+  session, instead of a fresh range request at every drain cycle.** The reader
+  ends its connection at the window high water and asks for a new range at every
+  low water, because a data task has no way to say stop sending: the suspend is
+  advisory, and a task that does park holds a dormant flow that takes the
+  process's networking down with it. Against an origin that rate-limits, that
+  cadence is the defect. The held path is an HTTP/1.1 transport over
+  `URLSessionStreamTask`, whose reads are demand driven, so it asks once and
+  pulls, and the framing URLSession would do is the engine's: request line,
+  response head, Content-Length or chunked, bounded redirects, OS TLS through
+  the engine's own trust delegate. Measured with `aetherctl` against a
+  Range-logging origin, 150 s of continuous playback of the same 66 MB source
+  with identical decode on both arms (14617 packets read, 6000 written): the
+  pushed path spent five ranges, each ending at the window high water, and the
+  held path one open-ended range in one generation, first data after 3 ms. The
+  pull budget keeps the dormant stretch to 64 KB over media rate, and a full
+  window past a 5 s budget ends the connection rather than parking a flow, so a
+  paused viewer stays on the invariant. The option names the session rather
+  than tuning it, since the transport is chosen when the source is opened, so a
+  reload that changes it is refused rather than silently ignored, and side
+  readers do not inherit it: their multi-minute parks are the one shape a held
+  connection must not take. `aetherctl --held-connection` drives it. Reported
+  by Rasmusmart57 (#377).
+
+- **`aetherctl live` prints the item clock beside the published clock, and
+  `live --start-position` drives a live join with a resume anchor.** A live
+  report's sharpest field is the playhead off `AVPlayerItem.currentTime()`, and
+  the harness had no counterpart for it: it printed the engine's published
+  clock, which is the item clock plus the playlist shift, and hours into an
+  encoder clock those two are thousands of seconds apart in a perfectly healthy
+  session. The 1 Hz tick now carries `item=<s> ranges=<n> status=<n>`, the three
+  fields a host dumps when a join fetches a window and presents none of it.
+  `ranges=0` is the discriminating one: it says nothing has been PLACED, which
+  `isPlaybackBufferEmpty` cannot say. A healthy join on the reporting axis reads
+  `t=95173.70s item=0.75s ranges=1 status=1`. The resume anchor is an ITEM-axis
+  value while a host only ever sees the published clock, so the mount seek that
+  spends it now names the axis it is spent on (#509).
+
+### Fixed
+
+- **A subtitle prefetcher held away from a move the viewer already made no
+  longer takes the region in front of him with it.** The forward prefetcher
+  takes a pending re-anchor at one point in its loop, and both of the loop's
+  waits sit in front of that point. A yield to a producing video path holds the
+  move for up to the whole 60 s cap, and the park holds it for as long as the
+  banked read position stays past the playhead, which after a backward seek
+  means until the viewer catches back up to where the reader already was. In
+  both states the reader goes on banking packets for the stretch the viewer has
+  left, the stretch he is in is harvested by nobody, and the drain has nothing
+  to publish there: subtitles drop out for tens of seconds in the middle of
+  otherwise healthy playback and return when the next transport change
+  re-anchors the drain. The reported probe carries the signature, and it was the
+  one number in it with no innocent reading: `prefetchLead=-215.8s` under a live
+  loop, 30 s after two probes reading +74.5 and +74.7. A pending move now counts
+  as freshly anchored for the arbitration, which is what the anchor grace
+  already exists for, and the park breaks on a pending move because that move is
+  what voids the position the park is judging. A seek in flight still wins the
+  link. Reported by RadicalMuffinMan (#496).
+
+- **The generated-PTS repair reaches AVI, so an XviD rip with a reorder delay
+  plays in presentation order.** The gate was Matroska-only for want of a
+  measured AVI. On a 2000 s XviD rip (mpeg4 ASP, tag XVID, video_delay 1, packed
+  B-frames) `aetherctl swdecode` reported 12 backward steps of 37 before and 0
+  of 37 after. AVI needs no `ms_compat` equivalence to establish the same fact,
+  because avidec has no other mode: the container carries no presentation
+  timestamps at all, so on an AVI input any PTS present was necessarily invented
+  by `+genpts`, and `video_delay > 0` carries the whole gate. What transposes
+  the axis is the packed bitstream: a plain coding-order XviD AVI of the same
+  shape already decodes in order (0 backward steps of 14), because there the
+  invented axis is the presentation ladder shifted by exactly one frame,
+  uniformly. A packed stream's N-VOP placeholder chunks hold a slot while the
+  picture they stand for rides inside the previous chunk, so packets and
+  pictures stop matching one to one and the shift stops being uniform. The
+  repair is preferred over libavcodec's `mpeg4_unpack_bframes` because it covers
+  every container that withholds timestamps, where the filter covers one codec.
+  Contributed by a1go3, who reported it and sent the patch (#516).
+
+- **A Dolby Vision item on the loopback route is no longer labelled HDR10 on
+  macOS.** `AVPlayer.availableHDRModes` is API_UNAVAILABLE there, so
+  `supportsDolbyVision` is false on every Mac unless the host asserts it, and a
+  Profile 5 PQ base was reported as `.hdr10` while the session went on playing
+  the `dvh1` sample entry the engine served. The host already parses the item's
+  sample entry for the remote-HLS bypass; the loopback route now reads the same
+  publisher, as an upgrade only. It fires only where the platform has no
+  per-mode capability table, only from `.hdr10`, only for a source the probe
+  called Dolby Vision, and only on a `dvh1` or `dvhe` item, because an
+  unconditional copy would relabel a session on a tvOS panel parked in SDR,
+  whose label is deliberately `.sdr`. Profile 8.1 keeps `.hdr10`: it reports
+  `hvc1`, it composes anyway, and nothing in the stack says so. The host's
+  format line is renamed from `remote-HLS videoFormat=` to `item videoFormat=`,
+  because it runs on every native session and naming the wrong route cost a
+  reporter time on a log where the route was the question. Reported and
+  diagnosed by Rasmusmart57, down to the two line numbers (#515).
+
+- **The live telemetry's lifetime average bitrate divides by active time, not by
+  the wall clock.** `demuxerBytesFetched` stops advancing while the transport is
+  paused, the wall clock does not, so a 2.8 Mbps file left paused for three
+  minutes reported 0.4 Mbps and climbed back only asymptotically on resume,
+  because the paused seconds never left the divisor again. Same shape after
+  end of media, where the sampler keeps ticking until the host tears the session
+  down. A tick now charges its second only when the playback phase says the
+  session is consuming media. `.seeking` deliberately still charges, against the
+  report's suggestion: a seek is where the bytes arrive hardest, so dropping
+  those seconds while keeping their bytes would push the average above the
+  media's real rate on every scrub, and the same holds for `.rebuffering` and
+  `.stalled`. The value is also nil rather than a confident `0.00 Mbps` until
+  both halves are measurable. Reported by classicjazz (#514).
+
+## [6.74.0] - 2026-09-08
+
+### Added
+
+- **The subtitle forward prefetcher's cancel says who cancelled it, and a
+  sidecar takeover announces itself.** `#151 forward prefetch exited
+  (reason=cancelled cancelled=true)` reported that a `cancel()` had happened
+  and nothing else, and it lands whenever the parked loop next looks, seconds
+  after the fact, so a capture showing a prefetcher that stops early and never
+  returns was indistinguishable from a teardown, a track switch and a rebuild.
+  Every teardown route now carries a reason to the cancel, which emits
+  `#151 forward prefetch cancelled (reason=sidecarSelected)` and its siblings
+  when a session was actually running. The sidecar path had the matching gap on
+  the other side: the drainer announced itself with `overlay fed by
+  packet-store drainer` and the whole-file path announced nothing, so a
+  complete track publishing into the overlay looked like a drainer that had
+  stopped filling. It now says `sidecar decode start:` and `overlay fed by
+  sidecar decode: ... (N cues)`, and a decode that starts and never publishes
+  leaves a trace instead of an empty overlay with no author. Raised by
+  RadicalMuffinMan (#496).
+
+- **`aetherctl play --present-times`: how many frames actually reached the
+  screen on the native path.** `--frame-times` reads the software renderer's own
+  reports, so the AVPlayer route had no frame observable at all and every judder
+  report against it could only be argued about from a track-rate estimate. The
+  flag attaches an `AVPlayerItemVideoOutput` to the engine's item, counts
+  distinct presentation times, and reports the largest gap between two of them,
+  which is what separates a late picture from a session presenting nothing but
+  its random access points.
+
+### Fixed
+
+- **A live join whose source timestamps sit just below the 33-bit PTS wrap
+  publishes a zero axis instead of an unsigned six million years.** The
+  producer pinned an epoch's first frame to the demuxed value and that value
+  was free to go negative, which for `tfdt` is not unusual but unrepresentable:
+  the box carries `unsigned int(64)`, so `movenc` wrote the bits and AVPlayer
+  read `baseMediaDecodeTime = 2^64 - |dts|` against a playlist starting at 0.
+  libavformat produces those timestamps by design, an MPEG-TS whose first DTS
+  falls within 60 s of the wrap at `2^33 / 90000` is classified
+  `AV_PTS_WRAP_SUB_OFFSET` and every timestamp afterwards comes out 2^33 ticks
+  low, which is an ordinary live join rather than the early-open case the pin
+  exists for. Measured on a seed 53.7 s below the wrap: before, `seg0` carried
+  `baseMediaDecodeTime=18446744073704717024` with a video `traf` only and the
+  clock never moved; after, `tfdt` is 0 on both `traf`s, audio is back in
+  `seg0`, and the clock runs across 25 s with no stall. Found while
+  investigating AE#509 (AttiK22), whose own capture has different gate values
+  and stays open.
+
+- **An MP4 that carries valid composition offsets at its head and none in a
+  later region gets that region's display order back.** A healthy head is not
+  proof of a healthy table: some writers fill `ctts` for the first sequences and
+  leave zeros behind them, so a whole-file verdict reads "healthy" where it looks
+  and every reordered sequence past that point is delivered in coding order for
+  the rest of the file. A corroborated healthy origin now also arms a bounded
+  watch for zero-offset IDR sequences, and a picture in one of them claims the
+  timestamp slot its own display rank owns, read from the file rather than fitted
+  to a cadence, so an interval change inside a sequence survives instead of being
+  guessed away. Decode timestamps, the published keyframe index, packet payloads
+  and audio never move, and a picture waits its mini-GOP rather than the end of
+  its sequence, so no sequence is too long to repair. Measured on a generated
+  twin whose second zero-offset sequence is 420 pictures: a deepest wait of 6
+  packets, and 1800 of 1800 packet times identical to the healthy twin's own
+  axis. Every refusal hands the held packets back exactly as they arrived and
+  lets the rest of that sequence stream through, because the judder this removes
+  is a far smaller failure than a session that stops. Diagnosed and contributed
+  by @orut34iop in PR #513.
+
+- **Software VOD reads compressed packets ahead of the decoder, and keeps what
+  it has read across a seek that lands inside it.** The software path had no
+  reservoir of its own: the demux loop read on renderer backpressure alone, so
+  arrived-but-unplayed media was the fraction of a second the decode queue held
+  (measured 0.33 s to 0.36 s on real hardware), and a seek backwards out of the
+  byte reader's resident window paid for the same bytes twice over the network,
+  blocking the demux thread while it did. A worker now fills a session-owned
+  disk FIFO of lossless packet envelopes ahead of the consumer, bounded by the
+  session's existing `forwardBufferSegments` window and volume-safety budget,
+  and a seek whose target is still retained moves only the consumer cursor: the
+  source reader stays at its own frontier and nothing already downloaded is
+  discarded. A local path stays on the direct loop: the spool exists to avoid a
+  second trip to a source, and re-reading a file is a page-cache hit.
+
+  Measured on a 600 s H.264 source over a 16 Mbit origin, seeking
+  back 198 s after 200 s of playback: before, two 4 MB detour fetches and two
+  blocking reads of 2658 ms and 2623 ms with the display cushion at 0.00 s;
+  after, no request at all and the cushion untouched. `bufferedPosition` on a
+  software VOD session is that cache frontier instead of the decoded cushion,
+  the intersection of the selected audio and video presentation coverage
+  containing the playhead; H.264 measures a picture's hold from its
+  presentation successor rather than from `AVPacket.duration`, which on a
+  variable-rate source describes decode cadence. Live, DVR and the native path
+  are untouched. Contributed by @orut34iop in PR #512.
+
+- **A Matroska H.264 stream whose block timestamps rise in coding order is
+  presented in display order again.** Matroska stores presentation timestamps,
+  so a writer that fills them packet by packet hands every slot to the picture
+  decoded at that position rather than the one displayed there, and the result
+  is a presentation clock that steps back once per mini-GOP for the length of
+  the file. The demuxer now hands each picture the slot its own display rank
+  owns, read from the file rather than computed, so the repaired times are the
+  container's own set including its rounding. Decode timestamps, the container
+  index, packet payloads and audio are untouched, and a picture waits at most
+  its mini-GOP for the packet carrying its slot. Measured on a generated twin
+  through the software decoder: 15 of 30 frame times stepped backwards before,
+  0 after. Diagnosed by @orut34iop on PR #511.
+
 ## [6.73.0] - 2026-09-07
 
 ### Changed

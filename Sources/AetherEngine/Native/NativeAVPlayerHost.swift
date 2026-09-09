@@ -841,6 +841,18 @@ final class NativeAVPlayerHost {
 
         // Explicit seek prevents AVPlayer from defaulting to the EVENT-playlist live edge. Remote-HLS and loopback live REJOINS set skipInitialSeek (backlog-start seek was the prime suspect for permanent waitingToPlay on rejoin; see LiveReloadPolicy.skipInitialSeek).
         if !skipInitialSeek {
+            // AE#509: name the seek and the axis it is spent on. This is the only unconditional
+            // reposition of a fresh item, it happens before the item can answer for itself, and
+            // nothing logged it: a session parked at an unreachable position looked exactly like a
+            // session that placed nothing. `startPosition` is an ITEM-axis anchor, while a live
+            // host only ever sees the published clock (item + shift), so a live anchor that is not
+            // nil is the one shape where those two axes can be confused.
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) mount seek: item axis "
+                + String(format: "%.2f", startPosition ?? 0) + "s "
+                + "(startPosition=\(startPosition.map { String(format: "%.2f", $0) } ?? "nil"), "
+                + "live=\(contract.isLive))",
+                category: .engine)
             // Load-time seek (not a user scrub): no seekInFlight needed; the async seek(to:) carries #37/#38 semantics for user seeks.
             avPlayer.seek(to: CMTime(seconds: startPosition ?? 0, preferredTimescale: 600),
                           toleranceBefore: .zero, toleranceAfter: .zero)
@@ -2230,6 +2242,10 @@ final class NativeAVPlayerHost {
     /// format instead of the `.sdr` default. Called at readyToPlay and again at first `.playing` (an HLS
     /// video track can be absent from `item.tracks` at the readyToPlay instant). No-op for the item once it
     /// has been replaced; leaves `detectedVideoFormat` nil while no video track resolves (audio-only black).
+    ///
+    /// AE#515: this runs on every native session, the loopback route included, where the engine reads it
+    /// as a Dolby Vision label upgrade rather than as the format itself. The line used to name itself
+    /// `remote-HLS` on both, which cost a reporter time on a log where the route was the question.
     @MainActor
     private func publishDetectedVideoFormat(from item: AVPlayerItem) async {
         let sid = sessionID
@@ -2249,7 +2265,7 @@ final class NativeAVPlayerHost {
             if detectedVideoFormat != fmt {
                 detectedVideoFormat = fmt
                 EngineLog.emit(
-                    "[NativeAVPlayerHost] #\(sessionID) remote-HLS videoFormat=\(fmt) "
+                    "[NativeAVPlayerHost] #\(sessionID) item videoFormat=\(fmt) "
                     + "subType='\(fourccString(subType))' transfer=\(transfer ?? "nil") "
                     + "rate=\(rate.map { String(format: "%.3f", $0) } ?? "nil")",
                     category: .engine

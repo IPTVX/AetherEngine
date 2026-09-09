@@ -381,19 +381,26 @@ public struct LoadOptions: Sendable, Equatable {
     ///
     /// AE#493: `AVPlayer.availableHDRModes` is `API_UNAVAILABLE(macos)`, so a Mac has no per-mode capability
     /// table at all, and `eligibleForHDRPlayback` answers HDR10 and HLG but cannot answer this one. Setting
-    /// it serves the source the way a DV display is served (`dvh1` sample entry, `SUPPLEMENTAL-CODECS`,
-    /// master playlist) and publishes `videoFormat = .dolbyVision`. HDR support rides along because DV is an
-    /// HDR format; HDR10 and HLG capability are not implied.
+    /// it publishes `videoFormat = .dolbyVision` and asks the tvOS display-criteria handshake for `dvh1`.
+    /// HDR support rides along because DV is an HDR format; HDR10 and HLG capability are not implied.
+    ///
+    /// It no longer decides the PACKAGING of a Profile 5, 8.1 or 8.4 source. 6.72.0 gave the non-DV branch
+    /// its `dvcC` back and 6.73.0 its `SUPPLEMENTAL-CODECS`, so those three grades serve byte-identical
+    /// manifests and segments either way (measured on macOS against the matched Dolby grades: master,
+    /// media playlist, `init.mp4` and `seg0.mp4` md5-identical with and without the claim). Profile 7,
+    /// whose RPU is converted to 8.1 per packet, and AV1 Dolby Vision, whose record is read only on a
+    /// display that takes it, are still gated on it.
     ///
     /// A wrong claim is cheap on the class of failure the engine classifies, and that class is not the whole
     /// space. AVPlayer refusing the master with -11868 / -11848 fails the ITEM, and the engine falls back to
     /// the media playlist once, in place, at the same position, where AVPlayer tone-maps the base layer;
     /// correctable mid-session through `reloadAtCurrentPosition(applying:)`. Two measured limits on that:
     /// on macOS the wrong claim was not refused at all (a DV master on a Mac with no DV display plays,
-    /// macOS 26.5.2), and on tvOS an asserted Profile 8.1 reaches the DV packaging (`dvvC` in the sample
-    /// entry plus `SUPPLEMENTAL-CODECS`), which on an HDR10-only panel was measured to reach `readyToPlay`,
-    /// play for a second or two and then stall with -15628 in the item's error log (2026-05-26, AE#4). A
-    /// stall is not an item failure, so the fallback above does not fire for it.
+    /// macOS 26.5.2), and a stall is not an item failure, so the fallback above does not fire for the
+    /// -15628 an HDR10-only panel showed on the DV packaging in May 2026 (AE#4). That stall is no longer
+    /// the claim's to own: since 6.72.0 / 6.73.0 the same packaging reaches such a panel with or without
+    /// it, and it did not reproduce on tvOS 26.6. What the claim can still move on the route is HDR
+    /// readiness, since `supportsHDR` rides along, and that is the -11848 the fallback does catch.
     ///
     /// Asserting also turns `forceDolbyVisionOnNonDVDisplay` off, since that one is gated on the display
     /// having no DV. On tvOS, DV composition on a panel without Dolby Vision is what that flag is for, and
@@ -568,6 +575,38 @@ public struct LoadOptions: Sendable, Equatable {
     /// engines on one origin are bounded by this value and by what the origin refuses, nothing else.
     public var maxConcurrentSourceRequests: Int? = nil
 
+    /// Ask the source ONCE and pull it, instead of ending the connection at the reader's window
+    /// high water and asking again every 8 to 16 MB of drain (#377).
+    ///
+    /// Set it when the origin punishes repeated requests rather than concurrency. Some CDNs refuse
+    /// new requests for minutes at a stretch while serving an already open connection at full
+    /// rate; against one of those, a reader that asks per drain cycle will ask inside a refusal
+    /// window on any long file, however large its ranges are (measured at the reporting origin:
+    /// 32 MB ranges raised to 256 MB, eight times fewer requests, the refusals unchanged). Holding
+    /// the connection is the only lever that removes the ask, which is why this exists as well as
+    /// `maxConcurrentSourceRequests`: that one bounds how many requests are in flight, this one
+    /// stops there being a second request at all.
+    ///
+    /// What it costs, and why it is opt in rather than the default:
+    ///
+    /// - **HTTP/1.1 only.** The framing is the engine's own over a demand-driven stream task, with
+    ///   no ALPN negotiation, so an origin that serves only HTTP/2 is out of scope for it.
+    /// - **The system proxy configuration is not in this read path.** A stream task connects to a
+    ///   host and port; `URLRequest` proxy handling does not apply.
+    /// - TLS is the OS's, through the same host trust decision as every other engine session, but
+    ///   it has not been exercised against a self-signed origin.
+    /// - A viewer who pauses ends the connection after five seconds, and resuming costs one
+    ///   request at the frontier. A held flow that nobody reads is the process-wide Network
+    ///   .framework starvation of #310, and a pause is where its worst episode came from.
+    ///
+    /// Applies to the playback reader. The subtitle and enrichment side readers keep the default
+    /// transport: they park deliberately for minutes, which is the one shape a held connection
+    /// must not take.
+    ///
+    /// Names the session rather than tuning it: the transport is chosen when the source is opened,
+    /// so a reload cannot change it. Default false, which is every reader shipped so far.
+    public var heldSourceConnection: Bool = false
+
     /// Trusted media duration in seconds, overriding the container/estimate-derived value (same
     /// trust family as the disc MPLS/IFO override, AE#105). Required alongside
     /// `sequentialOrigin` for VOD sources: with the tail read gone the demuxer resolves no
@@ -722,6 +761,7 @@ public struct LoadOptions: Sendable, Equatable {
         nativeSubtitlePreferredLanguages: [String] = [],
         sequentialOrigin: Bool = false,
         maxConcurrentSourceRequests: Int? = nil,
+        heldSourceConnection: Bool = false,
         declaredDurationSeconds: Double? = nil,
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
@@ -761,6 +801,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.nativeSubtitlePreferredLanguages = nativeSubtitlePreferredLanguages
         self.sequentialOrigin = sequentialOrigin
         self.maxConcurrentSourceRequests = maxConcurrentSourceRequests
+        self.heldSourceConnection = heldSourceConnection
         self.declaredDurationSeconds = declaredDurationSeconds
         self.probesize = probesize
         self.maxAnalyzeDuration = maxAnalyzeDuration

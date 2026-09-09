@@ -955,12 +955,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// beginning at 11.6 s, the restart-witness fixture at 0.083 s). Comparing them raw published
     /// every restarted epoch a whole anchor early, which is what the fixture-backed restart-continuity
     /// tests caught.
+    ///
+    /// AE#509: and never below zero. `tfdt` carries `unsigned int(64)` (ISO/IEC 14496-12), so a
+    /// negative item axis is not expressible at all: movenc writes the value as-is and AVPlayer reads
+    /// `baseMediaDecodeTime = 2^64 - |dts|`, about six million years, against a playlist that starts
+    /// at 0. The item then fetches the whole window and places none of it, with no error and no
+    /// stall of its own. libavformat produces those negative timestamps by design, not by accident:
+    /// an MPEG-TS whose first DTS sits within 60 s of the 33-bit PTS wrap is classified
+    /// `AV_PTS_WRAP_SUB_OFFSET` and every timestamp comes out 2^33 ticks low (demux.c, "correct first
+    /// time stamps to negative values"). That is an ordinary live join, not an early-opening gate,
+    /// and the clamp is what keeps the two apart.
     static func pinnedFirstTfdtPts(
         actualFirstDts: Int64, desiredTfdtPts: Int64, planAnchorPts: Int64
     ) -> Int64 {
         guard actualFirstDts != Int64.min else { return desiredTfdtPts }
         let actualItemPts = actualFirstDts &- planAnchorPts
-        return actualItemPts < desiredTfdtPts ? actualItemPts : desiredTfdtPts
+        return max(0, actualItemPts < desiredTfdtPts ? actualItemPts : desiredTfdtPts)
     }
 
     /// AE#418: the offset the HOST folds, which is not the offset the MUXER applies.

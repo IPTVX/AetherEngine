@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import CoreMedia
+import AVFoundation
 import AetherEngine
 
 // MARK: - play
@@ -77,13 +78,13 @@ enum LoadOptionChange {
 /// and log every overlay cue that arrives. Repro harness for "loads but never
 /// plays" reports and for live teletext end-to-end validation (#107).
 func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
-                    censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false,
+                    censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
                     teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil,
                     audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [],
                     pausedMount: Bool = false,
                     optionCorrection: LoadOptionCorrectionRequest? = nil,
-                    sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil,
+                    sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil,
                     httpHeaders: [String: String] = [:],
                     deinterlaceFieldRate: DeinterlaceFieldRate = .field,
                     assertDolbyVision: Bool = false) -> Int32 {
@@ -107,7 +108,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -137,6 +138,140 @@ private func networkTelemetryFragment(_ telemetry: LiveTelemetry?) -> String {
     if let dropped = telemetry.droppedFrameCount { out += " drop=\(dropped)" }
     if let delay = telemetry.accumulatedFrameDelaySeconds { out += String(format: " delay=%.2fs", delay) }
     return out
+}
+
+/// AE#510: what reached the screen on the NATIVE path, which had no frame observable at all.
+///
+/// `--frame-times` reads the software renderer's own reports, so every judder report on the AVPlayer
+/// route could only be argued about from `AVPlayerItemTrack.currentVideoFrameRate`, an estimate that
+/// is explicitly not a frame count. This attaches an `AVPlayerItemVideoOutput` to the engine's own
+/// item and counts DISTINCT presentation times, and it reports the largest gap between two of them,
+/// which is the observable that separates "the picture is late" from "only the random access points
+/// survive": a 29.97 fps session that presents nothing but its container keys shows a gap of one GOP.
+///
+/// Attaching an output gives AVPlayer a pixel-buffer consumer it would not otherwise have, so a run
+/// with this flag is not byte-for-byte the run without it. It is still the same decode path.
+final class PresentedFrameProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output: AVPlayerItemVideoOutput?
+    private weak var attachedItem: AVPlayerItem?
+    private var attachedID: ObjectIdentifier?
+    private var harvest: DispatchSourceTimer?
+    private var total = 0
+    private var sinceTick = 0
+    private var perTick: [Int] = []
+    private var last = Double.nan
+    private var largestGap = 0.0
+    private var largestGapAt = 0.0
+    private var suspended = false
+
+    /// The engine builds the item and can replace it, so attach to whichever one is current.
+    @MainActor
+    func attachIfNeeded(_ item: AVPlayerItem?) {
+        guard let item else { return }
+        let id = ObjectIdentifier(item)
+        lock.lock()
+        let already = attachedID == id
+        lock.unlock()
+        guard !already else { return }
+        let fresh = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ])
+        if let output, let attachedItem { attachedItem.remove(output) }
+        item.add(fresh)
+        lock.lock()
+        output = fresh
+        attachedItem = item
+        attachedID = id
+        last = .nan
+        lock.unlock()
+        startHarvest()
+    }
+
+    private func startHarvest() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard harvest == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "aetherctl.presented"))
+        // Poll well above the content rate: a missed poll is a frame this probe under-counts.
+        timer.schedule(deadline: .now(), repeating: .milliseconds(4))
+        timer.setEventHandler { [weak self] in self?.poll() }
+        timer.resume()
+        harvest = timer
+    }
+
+    private func poll() {
+        lock.lock()
+        let current = output
+        lock.unlock()
+        guard let current else { return }
+        let itemTime = current.itemTime(forHostTime: CACurrentMediaTime())
+        guard itemTime.isValid, current.hasNewPixelBuffer(forItemTime: itemTime) else { return }
+        var display = CMTime.zero
+        guard current.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &display) != nil,
+              display.isValid else { return }
+        let seconds = display.seconds
+        lock.lock()
+        defer { lock.unlock() }
+        guard last.isNaN || seconds > last else { return }
+        if !suspended, !last.isNaN, seconds - last > largestGap {
+            largestGap = seconds - last
+            largestGapAt = last
+        }
+        last = seconds
+        total += 1
+        sinceTick += 1
+    }
+
+    /// A seek moves the presentation axis, so neither the jump across it nor anything presented while
+    /// it is in flight is a gap in delivery. Suspending has to bracket the call, not follow it: the
+    /// landing frame arrives before `seek(to:)` returns, and the first version of this recorded that
+    /// jump as the session's largest gap on every run.
+    func beginDiscontinuity() {
+        lock.lock()
+        suspended = true
+        last = .nan
+        lock.unlock()
+    }
+
+    func endDiscontinuity() {
+        lock.lock()
+        suspended = false
+        last = .nan
+        lock.unlock()
+    }
+
+    func drainTick() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let frames = sinceTick
+        sinceTick = 0
+        perTick.append(frames)
+        return frames
+    }
+
+    /// Ticks before the first presented frame are the load, not a stall: they would drag every
+    /// summary down and say nothing about the session that ran.
+    func summary() -> (total: Int, min: Int, median: Int, max: Int, largestGap: Double, gapAt: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        let live = Array(perTick.drop(while: { $0 == 0 }))
+        let sorted = live.sorted()
+        return (total,
+                sorted.first ?? 0,
+                sorted.isEmpty ? 0 : sorted[sorted.count / 2],
+                sorted.last ?? 0,
+                largestGap,
+                largestGapAt)
+    }
+
+    func stop() {
+        lock.lock()
+        let timer = harvest
+        harvest = nil
+        lock.unlock()
+        timer?.cancel()
+    }
 }
 
 /// #311: records the software path's per-frame reports, from the decode thread. Also checks the
@@ -292,7 +427,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -382,6 +517,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         nativeRemoteHLS: nativeHLS,
         sequentialOrigin: sequentialOrigin,
         maxConcurrentSourceRequests: maxConcurrentRequests,
+        heldSourceConnection: heldConnection,
         declaredDurationSeconds: declaredDuration,
         externalSubtitles: sidecars,
         // AE#464 round 2: the reporter's mount. A host that drives transport itself loads with
@@ -399,6 +535,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // #311: installed BEFORE the load on purpose. The engine holds it and arms the host it builds,
     // which is the documented usage and the part a host would otherwise have to re-do per load.
     let frameProbe = frameTimes ? FrameTimeProbe() : nil
+    let presentProbe = presentTimes ? PresentedFrameProbe() : nil
     let picture = pictureProbe ? PictureProbe() : nil
     if let frameProbe {
         engine.setSoftwareVideoFrameTimeObserver { [weak frameProbe] frame in
@@ -642,6 +779,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                           engine.bufferedPosition,
                           engine.duration)
         line += " rfd=\(engine.hasFirstFrameReadyForDisplay ? "y" : "n")"
+        if let presentProbe {
+            presentProbe.attachIfNeeded(engine.currentAVPlayerItem)
+            line += " pres=\(presentProbe.drainTick())"
+        }
         // AE#441: the live rewind surfaces a host actually scales its strip on. Sampling them needed a
         // patched copy of this CLI before, which is how an over-promising lower bound stayed unseen.
         if engine.isLive {
@@ -806,10 +947,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                 target = max(0, engine.currentTime - 6)
             }
             print(String(format: "  SEEKCHURN seek(to: %.2f)", target))
+            presentProbe?.beginDiscontinuity()
             let began = DispatchTime.now()
             await engine.seek(to: target)
             let ms = Double(DispatchTime.now().uptimeNanoseconds - began.uptimeNanoseconds) / 1e6
             seekLandings.append(ms)
+            presentProbe?.endDiscontinuity()
             print(String(format: "  SEEKLANDED target=%.2f in %.0fms (clock=%.2f)",
                          target, ms, engine.currentTime))
         }
@@ -853,6 +996,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     }
     if let monitor {
         print("audio continuity: \(monitor.summary)")
+    }
+    if let presentProbe {
+        presentProbe.stop()
+        let p = presentProbe.summary()
+        print(String(format: "presented frames: total=%d perSecond min/median/max=%d/%d/%d largestGap=%.3fs at %.3fs",
+                     p.total, p.min, p.median, p.max, p.largestGap, p.gapAt))
     }
     if let frameProbe {
         print("frame times: \(frameProbe.summary())")
