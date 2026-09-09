@@ -47,11 +47,33 @@ import AetherLibavutil
 ///
 /// AVI needs no `ms_compat` equivalence to establish the same fact, because `avidec` has no other
 /// mode: the container has no presentation timestamps at all, every track carries a FourCC, and the
-/// demuxer puts the frame index on `pkt->dts`. So on an AVI input any PTS present was necessarily
-/// invented by `+genpts`, which makes `codec_tag != 0` a tautology there rather than a signal, and
-/// `video_delay > 0` carries the whole gate. Progressive source, evenly spaced timestamps, no
-/// telecine: the packed bitstream is the only unusual property, and it is not the cause — the
-/// invented axis is.
+/// demuxer puts the frame index on `pkt->dts` (it never assigns `pkt->pts` anywhere). So on an AVI
+/// input any PTS present was necessarily invented by `+genpts`, which makes `codec_tag != 0` a
+/// tautology there rather than a signal, and `video_delay > 0` carries the whole gate.
+///
+/// **What decides whether the invented axis transposes is the PACKED bitstream, and an AVI without
+/// one is already correct today.** Two files of the same shape (`mpeg4`, tag `XVID`,
+/// `video_delay = 1`, progressive, evenly spaced), through `aetherctl swdecode` before this repair:
+///
+///     packed B-frames (FATE mpeg4/packed_bframes.avi, looped x25)   64 backwards steps of 239
+///     plain coding-order chunks (ffmpeg -c:v mpeg4 -bf 2)            0 backwards steps of 14
+///
+/// `+genpts` writes a coding-order axis in both, but on a well-formed AVI that axis is the
+/// presentation ladder shifted by exactly one frame, uniformly, so no pair changes places:
+///
+///     pkt   0      1      2      3      4      5        (dts = the AVI frame index)
+///     dts   0.000  0.042  0.083  0.125  0.167  0.208
+///     pts   0.042  0.167  0.083  0.125  0.292  0.208    <- each picture's own slot, plus one
+///
+/// A packed stream breaks that correspondence. Its N-VOP placeholder chunks (7 bytes, no picture)
+/// hold a slot in the packet ladder while the picture they stand for rides inside the PREVIOUS
+/// chunk, so packets and pictures stop matching one to one and the shift stops being uniform.
+/// Hence the repair rather than libavcodec's `mpeg4_unpack_bframes` suggestion: clearing the axis
+/// covers every container that withholds PTS, where the bitstream filter would cover one codec.
+///
+/// Arming on every AVI with a reorder delay, packed or not, costs nothing: on the files that are
+/// already correct the cleared axis reproduces the same ladder frame for frame (measured on both
+/// `mpeg4` and `mpeg2video` in AVI with B-frames, identical before and after).
 ///
 /// One deliberate exclusion remains:
 ///
@@ -87,8 +109,8 @@ enum VFWDecodeOrderPTSRepair {
         // one, and clearing it would only cost. True for both containers.
         guard shape.videoDelay > 0 else { return false }
         // Matroska carries a codec tag only on the VFW-carried tracks that withhold PTS; a natively
-        // mapped track gets real timestamps and must keep them. AVI has no such split — every track
-        // is FourCC-carried and none carries PTS — so there the tag says nothing.
+        // mapped track gets real timestamps and must keep them. AVI has no such split (every track
+        // is FourCC-carried and none carries PTS), so there the tag says nothing.
         if isMatroska(formatName), shape.codecTag == 0 { return false }
         return !nativelyRoutableCodecs.contains(shape.codecID)
     }
