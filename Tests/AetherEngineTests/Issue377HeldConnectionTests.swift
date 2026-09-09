@@ -392,12 +392,19 @@ struct Issue377HeldReaderTests {
         reader.heldPausedBudgetSeconds = 3
         try reader.open()
 
+        // Well past the budget a paused consumer would have spent.
         try await Task.sleep(for: .seconds(8))
-
-        #expect(reader.hasLiveConnectionForTesting,
-                "a parked producer is not a paused viewer; the connection must still be open")
         #expect(dataRanges(server, totalSize: totalSize).count == 1,
-                "the whole point is one request: \(dataRanges(server, totalSize: totalSize))")
+                "the wait itself must not have re-requested: \(dataRanges(server, totalSize: totalSize))")
+
+        // Draw again. A connection that survived the wait serves this from the same request; one
+        // that was ended would refill at the frontier and the origin would see a second ask. That
+        // is the contract, and unlike a liveness flag it does not depend on when the check lands.
+        let more = 8 * 1024 * 1024
+        #expect(drain(reader, bytes: more) >= more, "the reader did not deliver after the wait")
+        let asks = dataRanges(server, totalSize: totalSize)
+        #expect(asks.count == 1,
+                "a parked producer is not a paused viewer; drawing again must not cost a request: \(asks)")
     }
 
     @Test("consumption after an idle end refills at the frontier without going backwards")
