@@ -61,6 +61,14 @@ struct DemuxerOpenProfile: Sendable {
     /// reopen (wedge restart, revive) inherit it together.
     var avioSequentialOnly: Bool = false
 
+    /// `LoadOptions.heldSourceConnection` (#377): the playback reader asks the origin once and
+    /// pulls, rather than ending at the window high water and asking again at low water. Rides in
+    /// the profile next to `avioSequentialOnly` so every reopen of the session (wedge restart,
+    /// revive) inherits it. The side demuxers build their own profiles from `playback` and are
+    /// deliberately left on the pushed path: their readers park for minutes at a time, which is
+    /// the one shape a held connection must not take.
+    var avioHeldConnection: Bool = false
+
     /// `LoadOptions.declaredDurationSeconds`: caller-trusted duration override consumed by
     /// `Demuxer.duration`. Rides in the profile next to `avioSequentialOnly` because the two are a
     /// pair: without the ranged tail read the container resolves no duration of its own.
@@ -121,6 +129,14 @@ struct DemuxerOpenProfile: Sendable {
         var copy = self
         copy.avioSequentialOnly = sequential
         if let declaredDuration { copy.declaredDurationSeconds = declaredDuration }
+        return copy
+    }
+
+    /// A copy of `self` carrying the host's held-connection request (#377), chainable in the style
+    /// of `withSequentialOrigin` so a call site can add it to the profile it already built.
+    func withHeldSourceConnection(_ held: Bool) -> DemuxerOpenProfile {
+        var copy = self
+        copy.avioHeldConnection = held
         return copy
     }
 
@@ -475,7 +491,8 @@ public final class Demuxer: @unchecked Sendable {
             chunkRequestTimeout: openProfile.avioRequestTimeout,
             chunkMaxRetries: openProfile.avioMaxRetries,
             boundedInitialFetch: openProfile.boundedInitialFetch,
-            sequentialOnly: openProfile.avioSequentialOnly
+            sequentialOnly: openProfile.avioSequentialOnly,
+            heldConnection: openProfile.avioHeldConnection
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         try openWithProvider(reader, isLive: isLive)
