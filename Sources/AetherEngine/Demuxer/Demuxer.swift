@@ -734,7 +734,7 @@ public final class Demuxer: @unchecked Sendable {
         generatedPTSStreams.removeAll()
         guard let nameC = ctx.pointee.iformat?.pointee.name else { return }
         let formatName = String(cString: nameC)
-        guard VFWDecodeOrderPTSRepair.isMatroska(formatName) else { return }
+        guard VFWDecodeOrderPTSRepair.containerWithholdsPTS(formatName) else { return }
         for index in 0..<Int32(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[Int(index)],
                   let par = stream.pointee.codecpar,
@@ -748,7 +748,8 @@ public final class Demuxer: @unchecked Sendable {
             else { continue }
             generatedPTSStreams.insert(index)
             EngineLog.emit(
-                "[Demuxer] AE#407 stream=\(index) is VFW-carried (tag=\(fourCC(par.pointee.codec_tag)) "
+                "[Demuxer] AE#407 stream=\(index) in \(formatName) is FourCC-carried "
+                + "(tag=\(fourCC(par.pointee.codec_tag)) "
                 + "videoDelay=\(par.pointee.video_delay)); the container carries no PTS, so the "
                 + "+genpts axis is decode order. Clearing PTS, the decoder's reorder owns presentation.",
                 category: .demux
