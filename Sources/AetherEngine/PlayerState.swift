@@ -575,6 +575,38 @@ public struct LoadOptions: Sendable, Equatable {
     /// engines on one origin are bounded by this value and by what the origin refuses, nothing else.
     public var maxConcurrentSourceRequests: Int? = nil
 
+    /// Ask the source ONCE and pull it, instead of ending the connection at the reader's window
+    /// high water and asking again every 8 to 16 MB of drain (#377).
+    ///
+    /// Set it when the origin punishes repeated requests rather than concurrency. Some CDNs refuse
+    /// new requests for minutes at a stretch while serving an already open connection at full
+    /// rate; against one of those, a reader that asks per drain cycle will ask inside a refusal
+    /// window on any long file, however large its ranges are (measured at the reporting origin:
+    /// 32 MB ranges raised to 256 MB, eight times fewer requests, the refusals unchanged). Holding
+    /// the connection is the only lever that removes the ask, which is why this exists as well as
+    /// `maxConcurrentSourceRequests`: that one bounds how many requests are in flight, this one
+    /// stops there being a second request at all.
+    ///
+    /// What it costs, and why it is opt in rather than the default:
+    ///
+    /// - **HTTP/1.1 only.** The framing is the engine's own over a demand-driven stream task, with
+    ///   no ALPN negotiation, so an origin that serves only HTTP/2 is out of scope for it.
+    /// - **The system proxy configuration is not in this read path.** A stream task connects to a
+    ///   host and port; `URLRequest` proxy handling does not apply.
+    /// - TLS is the OS's, through the same host trust decision as every other engine session, but
+    ///   it has not been exercised against a self-signed origin.
+    /// - A viewer who pauses ends the connection after five seconds, and resuming costs one
+    ///   request at the frontier. A held flow that nobody reads is the process-wide Network
+    ///   .framework starvation of #310, and a pause is where its worst episode came from.
+    ///
+    /// Applies to the playback reader. The subtitle and enrichment side readers keep the default
+    /// transport: they park deliberately for minutes, which is the one shape a held connection
+    /// must not take.
+    ///
+    /// Names the session rather than tuning it: the transport is chosen when the source is opened,
+    /// so a reload cannot change it. Default false, which is every reader shipped so far.
+    public var heldSourceConnection: Bool = false
+
     /// Trusted media duration in seconds, overriding the container/estimate-derived value (same
     /// trust family as the disc MPLS/IFO override, AE#105). Required alongside
     /// `sequentialOrigin` for VOD sources: with the tail read gone the demuxer resolves no
@@ -729,6 +761,7 @@ public struct LoadOptions: Sendable, Equatable {
         nativeSubtitlePreferredLanguages: [String] = [],
         sequentialOrigin: Bool = false,
         maxConcurrentSourceRequests: Int? = nil,
+        heldSourceConnection: Bool = false,
         declaredDurationSeconds: Double? = nil,
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
@@ -768,6 +801,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.nativeSubtitlePreferredLanguages = nativeSubtitlePreferredLanguages
         self.sequentialOrigin = sequentialOrigin
         self.maxConcurrentSourceRequests = maxConcurrentSourceRequests
+        self.heldSourceConnection = heldSourceConnection
         self.declaredDurationSeconds = declaredDurationSeconds
         self.probesize = probesize
         self.maxAnalyzeDuration = maxAnalyzeDuration

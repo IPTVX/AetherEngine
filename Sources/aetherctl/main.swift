@@ -636,6 +636,11 @@ if first == "play" {
     // open against the origin at once across every path it fetches on. `1` also switches off the
     // speculative parallel paths. This is the knob for reproducing a connection-metered CDN.
     let maxConcurrentRequests = takeIntFlag("--max-concurrent-requests", from: &rest)
+    // #377: LoadOptions.heldSourceConnection. The reader asks the origin once and pulls the file
+    // over that one connection, instead of ending at the window high water and asking again every
+    // drain cycle. This is the knob for an origin that refuses new requests in windows: run it
+    // against one and count the ranges in its own log, or read `conn start ... held` here.
+    let heldConnection = takeFlag("--held-connection", from: &rest)
     let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
@@ -779,6 +784,7 @@ if first == "play" {
                  pausedMount: pausedMount,
                  optionCorrection: optionCorrection,
                  sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
+                 heldConnection: heldConnection,
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,

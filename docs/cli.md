@@ -166,6 +166,14 @@ live-only session took a rebuild that rejoins at the edge.
 
 `--sequential-origin` declares `LoadOptions.sequentialOrigin`, the IPTV timeshift / catch-up shape whose `206` answers are fabricated (#346): one long-lived unranged GET, no ranged probes, no tail read, so **seeking is unavailable** in the run. On VOD it needs `--declared-duration S`, which fills `LoadOptions.declaredDurationSeconds`, because the estimate that the tail read would have produced is gone with the tail read.
 
+`--held-connection` declares `LoadOptions.heldSourceConnection` (#377): the reader asks the origin
+once and pulls the whole file over that connection, instead of ending at the window high water and
+asking again every drain cycle. The observable is the range count, in the origin's own log or in the
+`[AVIOReader] pump conn start ... held` lines, and against an origin that refuses in windows the
+point is that there is no second ask to refuse. Two shapes are worth running deliberately, because
+they are the two the flag has to survive: a long uninterrupted read, and a PAUSE, which must end the
+connection after five seconds and cost exactly one re-request at the frontier when playback resumes.
+
 `--picture-probe` attaches an `AVPlayerItemVideoOutput` to the running item and decodes the source
 time out of the picture itself, which is the one axis question nothing else here can answer: every
 other observable (`#260` frame times, `prodShift` / `hostShift`) describes what the engine WROTE, not

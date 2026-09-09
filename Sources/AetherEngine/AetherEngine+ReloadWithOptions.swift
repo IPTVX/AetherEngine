@@ -172,6 +172,7 @@ enum SessionOptionCorrection {
         "audioOnly",
         "nativeRemoteHLS",
         "sequentialOrigin",
+        "heldSourceConnection",
     ]
 
     /// Identity fields the proposal changed, in `loadIdentityFields` order. Empty means the
@@ -183,6 +184,11 @@ enum SessionOptionCorrection {
         if proposed.audioOnly != current.audioOnly { refused.append("audioOnly") }
         if proposed.nativeRemoteHLS != current.nativeRemoteHLS { refused.append("nativeRemoteHLS") }
         if proposed.sequentialOrigin != current.sequentialOrigin { refused.append("sequentialOrigin") }
+        // #377: the transport is chosen when the source is opened, so a correction here would be
+        // accepted and then not happen until something else reopened the source.
+        if proposed.heldSourceConnection != current.heldSourceConnection {
+            refused.append("heldSourceConnection")
+        }
         return refused
     }
 
@@ -262,7 +268,7 @@ enum SessionOptionCorrection {
         "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "confirmAtmos",
-        "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests",
+        "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "preferredAudioLanguages",
         "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "autoplay",
         "audioDelaySeconds", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",

@@ -3501,6 +3501,7 @@ public final class AetherEngine: ObservableObject {
                     probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
                     .withSequentialOrigin(options.sequentialOrigin,
                                           declaredDuration: options.declaredDurationSeconds)
+                    .withHeldSourceConnection(options.heldSourceConnection)
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because
