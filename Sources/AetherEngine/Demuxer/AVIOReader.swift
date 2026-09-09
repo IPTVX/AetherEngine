@@ -566,6 +566,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the first as the second re-requests every few seconds, which is what this flag exists to
     /// stop. A pause is the unbounded case #310's worst episode came from (11 minutes), so it is
     /// bounded here and nowhere else.
+    /// How often a held connection on a full window re-reads the play intent. A pause is not
+    /// broadcast on `winCond` -- nothing reads during one -- so this is what lets the paused
+    /// budget below start at all.
+    private static let heldPlayIntentPollSeconds: TimeInterval = 1
     static let heldPausedBudgetDefault: TimeInterval = 300
 
     /// Overridable so a test can express a pause without sleeping through the real budget.
@@ -2870,7 +2874,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         let gap = Double(DispatchTime.now().uptimeNanoseconds - lastDeliveryAt.uptimeNanoseconds)
             / 1_000_000_000
-        if gap < connStallTimeout {
+        // A held connection sitting on a full window has no read outstanding: the pump asked for a
+        // budget, was told there was no room, and is waiting. Nothing is late, so there is no gap to
+        // judge. The pushed path cannot reach this state -- it ends at the high water instead -- which
+        // is why the verdict was safe to take on a full window before. Re-arm rather than end, and the
+        // watchdog still owns the case this path can have: bytes asked for and none arriving.
+        let heldAndFull = heldConnectionEnabled
+            && (winHighWater - (window.count - max(0, Int(position - winStart)))) < Self.heldPullSlack
+        if heldAndFull || gap < connStallTimeout {
             winCond.unlock()
             // Data landed since this closure was scheduled; wait out what is left of the window.
             armDeliveryGapWatchdog(generation: generation, after: max(0.02, connStallTimeout - gap))
@@ -3949,8 +3960,14 @@ extension AVIOReader: HeldSourceConnectionDelegate {
                 // A full window under a playing consumer is the producer parked with a full
                 // segment cache, not a stopped one. Issue no read and wait: no byte is on the
                 // wire, the socket fills, and the sender stops itself.
+                //
+                // The wait carries a poll rather than blocking outright, because the thing it is
+                // waiting to hear about does not broadcast: nobody reads during a pause, so a
+                // consumer that pauses AFTER the window filled would never wake this loop and the
+                // paused budget below would never start. Measured: a 420 s pause held the
+                // connection to the end of the drill with no bound spent.
                 pauseDeadline = nil
-                winCond.wait()
+                _ = winCond.wait(until: Date().addingTimeInterval(Self.heldPlayIntentPollSeconds))
                 continue
             }
             let deadline = pauseDeadline ?? Date().addingTimeInterval(heldPausedBudgetSeconds)
