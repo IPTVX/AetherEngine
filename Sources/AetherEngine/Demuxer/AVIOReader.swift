@@ -589,6 +589,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the first as the second re-requests every few seconds, which is what this flag exists to
     /// stop. A pause is the unbounded case #310's worst episode came from (11 minutes), so it is
     /// bounded here and nowhere else.
+    ///
+    /// The number is half the longest dormancy measured clean on the device, which is the whole of
+    /// its derivation. Arm B on an Apple TV 4K 3rd gen (tvOS 26.6) held a stream task on a closed
+    /// receive window for 600 s against the origin from #377: 1180 canary requests at 1 Hz, to that
+    /// origin and to a host that is not it, all 206, and about 3 MB resident when the reads resumed
+    /// against the ~12 GB the wire could have carried, so the window really was shut for the whole
+    /// stretch. That is #310's wire condition itself rather than a proxy for it, and no cliff sits
+    /// under twice this value. It stays at half of it because a clean run is not a threshold, and
+    /// because being wrong here is cheap: one frontier request per pause that outlives the bound,
+    /// against the 218 an hour this flag used to spend on parked producers alone.
+    ///
+    /// Media rate is not on this axis. A paused consumer takes no bytes, so the dormant stretch is
+    /// the pause, whatever the file's rate; the rate only decides how quickly the socket buffer
+    /// fills before the window shuts, which is the 3 MB above. #310's window-over-media-rate dose
+    /// is the PLAYING case and it belongs to `heldPullSlack`, not here.
     static let heldPausedBudgetDefault: TimeInterval = 300
 
     /// Overridable so a test can express a pause without sleeping through the real budget.
@@ -3976,7 +3991,8 @@ extension AVIOReader: HeldSourceConnectionDelegate {
     /// stopped (#174 crashed at 3.4 GB still delivering, #220 measured 911 MB after a suspend);
     /// a pull transport has no such problem, so here the window fills and drains rather than being
     /// held under. On the device, arm B of the transport probe held a stream task on a closed
-    /// window for 60 s with 1 Hz canaries against the origin and a neutral host clean throughout.
+    /// window for 600 s with 1 Hz canaries against the origin and a neutral host clean throughout,
+    /// 1180 requests and not one refusal.
     ///
     /// Blocks on `winCond`, which is what the consumer broadcasts on after every read, so a
     /// generation that is abandoned (a seek, a close, a reconnect) wakes this immediately and
