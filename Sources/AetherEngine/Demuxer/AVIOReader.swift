@@ -566,7 +566,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the first as the second re-requests every few seconds, which is what this flag exists to
     /// stop. A pause is the unbounded case #310's worst episode came from (11 minutes), so it is
     /// bounded here and nowhere else.
-    private static let heldPausedBudgetSeconds: TimeInterval = 300
+    static let heldPausedBudgetDefault: TimeInterval = 300
+
+    /// Overridable so a test can express a pause without sleeping through the real budget.
+    nonisolated(unsafe) var heldPausedBudgetSeconds: TimeInterval = AVIOReader.heldPausedBudgetDefault
     /// Ceiling on a single pull. The window's remaining room is normally the smaller number; this
     /// only keeps one read from asking the transport for an unbounded amount while the window is
     /// empty (an open, a seek).
@@ -3950,7 +3953,7 @@ extension AVIOReader: HeldSourceConnectionDelegate {
                 winCond.wait()
                 continue
             }
-            let deadline = pauseDeadline ?? Date().addingTimeInterval(Self.heldPausedBudgetSeconds)
+            let deadline = pauseDeadline ?? Date().addingTimeInterval(heldPausedBudgetSeconds)
             pauseDeadline = deadline
             if Date() >= deadline {
                 connEndedByBackpressure = true
@@ -3966,7 +3969,7 @@ extension AVIOReader: HeldSourceConnectionDelegate {
         if let pausedEndAhead {
             EngineLog.emit(
                 "[AVIOReader] \(label) held connection paused for "
-                + "\(Int(Self.heldPausedBudgetSeconds))s with \(pausedEndAhead / 1024 / 1024)MB "
+                + "\(Int(heldPausedBudgetSeconds))s with \(pausedEndAhead / 1024 / 1024)MB "
                 + "ahead; ending it, will re-request at the frontier when playback resumes",
                 category: .demux)
         }
