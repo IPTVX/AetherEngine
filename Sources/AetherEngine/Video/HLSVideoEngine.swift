@@ -1037,6 +1037,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         demuxer = dem
         dem.onNetworkPhaseChanged = onNetworkPhaseChanged   // surface source stall/reconnect to playbackPhase (#85)
+        dem.playIntentProvider = playIntentProvider   // a held connection ends on a pause, not on a parked producer
 
         let videoIndex = dem.videoStreamIndex
         guard videoIndex >= 0, let videoStream = dem.stream(at: videoIndex) else {
