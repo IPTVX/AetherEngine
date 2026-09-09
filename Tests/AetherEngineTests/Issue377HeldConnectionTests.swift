@@ -407,6 +407,42 @@ struct Issue377HeldReaderTests {
                 "a parked producer is not a paused viewer; drawing again must not cost a request: \(asks)")
     }
 
+    @Test("a parked stretch longer than the stall timeout is not a delivery gap")
+    func parkedPastTheStallTimeoutKeepsTheHeldConnection() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { server.stop() }
+        // The field shape inside a test's budget: a producer that parks for longer than the
+        // delivery-gap watchdog's threshold. A 16 MB window is ~100 s of a 1.2 Mbps title, so the
+        // real 20 s is crossed by the regime this flag was asked for, not by an exotic one.
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                connStallTimeout: 2, heldConnection: true)
+        defer { reader.markClosed(); reader.close() }
+        reader.playIntentProvider = { true }
+        try reader.open()
+
+        try await Task.sleep(for: .seconds(5))
+        #expect(dataRanges(server, totalSize: totalSize).count == 1,
+                "the parked stretch itself asked for nothing: \(dataRanges(server, totalSize: totalSize))")
+        #expect(reader.hasLiveConnectionForTesting, "the park must not have ended the connection")
+
+        // The invariant, stated where a loopback can state it without a race: the watchdog judges an
+        // OUTSTANDING read, the park had none, so the park does not accumulate. Left accumulating it
+        // is handed to the read the drain below issues, and the next tick (20 ms away, because the
+        // remaining-gap re-arm collapses to its floor once the gap outgrows the timeout) ends a
+        // connection nothing is wrong with. Over a real link that race is the origin's round trip
+        // wide; on loopback the delivery wins it, which is why the count alone cannot say this.
+        let parkedGap = reader.deliveryGapSecondsForTesting
+        #expect(parkedGap < 3,
+                "a stretch with no read outstanding accumulated \(parkedGap)s of delivery gap, and the read that follows it is judged on that")
+
+        let more = 8 * 1024 * 1024
+        #expect(drain(reader, bytes: more) >= more, "the reader did not deliver after the parked stretch")
+        let asks = dataRanges(server, totalSize: totalSize)
+        #expect(asks.count == 1,
+                "a stretch with no read outstanding is not a gap; drawing again must not cost a request: \(asks)")
+    }
+
     @Test("consumption after an idle end refills at the frontier without going backwards")
     func refillAfterIdleEnd() async throws {
         let totalSize: Int64 = 256 * 1024 * 1024
