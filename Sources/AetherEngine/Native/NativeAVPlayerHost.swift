@@ -1505,7 +1505,8 @@ final class NativeAVPlayerHost {
             return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead,
                                          playheadSeconds: now,
                                          loadedRangeCount: placement.count,
-                                         nearestRangeOffsetSeconds: placement.nearestOffset)
+                                         nearestRangeOffsetSeconds: placement.nearestOffset,
+                                         itemStatus: item.status)
         }
     }
 
@@ -1520,6 +1521,9 @@ final class NativeAVPlayerHost {
         /// positive when the nearest one STARTS that far ahead, negative when the nearest one ENDED
         /// that far behind. nil when a range contains the playhead, or when there are none.
         var nearestRangeOffsetSeconds: Double? = nil
+        /// AVPlayer's own verdict on the item, read in the same batch as everything above it.
+        /// nil only where a caller builds a reading without one.
+        var itemStatus: AVPlayerItem.Status? = nil
     }
 
     /// AE#447 follow-up: `ahead 0.00s` is two different facts and the line printed one word for both.
@@ -1544,6 +1548,31 @@ final class NativeAVPlayerHost {
         return (usable.count, nearest)
     }
 
+    /// AE#509: the item's own verdict, said out loud by the account that describes the wedge.
+    ///
+    /// `item.status` is otherwise carried by a KVO observer that fires on a CHANGE, so an item that
+    /// never leaves `.unknown` produces no status line at all: the engine is silent about the item in
+    /// exactly the state where the item is the question. A 20 s field wedge arrived with "nothing
+    /// placed" from here and `.unknown` from the host's own private dump, and only the pair of them
+    /// said anything. The two readings point opposite ways: `.unknown` is AVPlayer never accepting the
+    /// media (look at the segment bytes), `.readyToPlay` is an accepted item that places nothing (look
+    /// at the fetch).
+    nonisolated static func liveJoinStatusClause(_ status: AVPlayerItem.Status?) -> String {
+        switch status {
+        case .unknown:
+            return ", and the item's own status has not left unknown, so AVPlayer has not accepted "
+                + "the media at all"
+        case .readyToPlay:
+            return ", on an item AVPlayer has accepted (status readyToPlay)"
+        case .failed:
+            return ", on an item AVPlayer has failed (status failed)"
+        case .none:
+            return ""
+        @unknown default:
+            return ""
+        }
+    }
+
     /// The placement clause the two accounts below carry when the cushion reads zero. nil when a range
     /// contains the playhead: there the depth is the whole story and this would only add noise.
     nonisolated static func liveJoinPlacementClause(reading: LiveJoinBufferReading) -> String? {
@@ -1551,20 +1580,21 @@ final class NativeAVPlayerHost {
         let head = reading.playheadSeconds.isFinite
             ? String(format: "%.2f", reading.playheadSeconds) + "s"
             : "an unreadable position"
+        let status = liveJoinStatusClause(reading.itemStatus)
         if reading.loadedRangeCount == 0 {
             return "the item holds no loaded range at all, so nothing has been placed on its axis "
-                + "since it was mounted (playhead \(head))"
+                + "since it was mounted (playhead \(head))" + status
         }
         guard let offset = reading.nearestRangeOffsetSeconds else {
             // A range does contain the playhead and the depth is simply zero: starved at the edge.
             return "the item holds \(reading.loadedRangeCount) loaded range(s) and the playhead sits "
-                + "inside one of them with nothing ahead of it (playhead \(head))"
+                + "inside one of them with nothing ahead of it (playhead \(head))" + status
         }
         let where_ = offset > 0
             ? "starts \(String(format: "%.2f", offset))s AHEAD of it"
             : "ended \(String(format: "%.2f", -offset))s BEHIND it"
         return "the item holds \(reading.loadedRangeCount) loaded range(s) but none at the playhead: "
-            + "the nearest \(where_) (playhead \(head))"
+            + "the nearest \(where_) (playhead \(head))" + status
     }
 
     func play() {
