@@ -466,7 +466,18 @@ extension AetherEngine {
                     // Only an explicit user pause; ignore transient pre-roll paused at load. AE#440: the
                     // pre-play reading is delivered AFTER the autostart has written .playing, so before
                     // the first roll a .paused is the outgoing value rather than anyone's intent.
-                    if self.hasTransportRolled, self.state == .playing { self.state = .paused }
+                    // Unless the session was ASKED to pause before it ever rolled (a host that pauses
+                    // the resumed frame after a background reload): its own pause carries the same
+                    // status and must still land, or `state` stays where the start left it on a
+                    // transport that is not moving and the phase reads `.loading` for good.
+                    // `.loading` is a source state here, not just `.playing`: this bypass autostarts
+                    // without writing `.playing` (the sink does that when AVPlayer renders), so a pause
+                    // that lands during startup finds `.loading` and has nowhere else to settle.
+                    // `.seeking` is left alone, the seek finalize owns it.
+                    if Self.publishesTransportPause(
+                        hasTransportRolled: self.hasTransportRolled,
+                        transportIntentIsPlaying: self.nativeHost?.transportIntentIsPlaying ?? true
+                    ), self.state == .playing || self.state == .loading { self.state = .paused }
                 @unknown default:
                     break
                 }
@@ -1334,7 +1345,18 @@ extension AetherEngine {
                     // has already declared .playing, so latching it before the first roll published a
                     // millisecond of `.paused` on every native start. Before the transport has moved
                     // once, a .paused is the status the item was mounted with, not a pause.
-                    if self.hasTransportRolled, self.state != .paused { self.state = .paused }
+                    //
+                    // A pause the engine was ASKED for is the exception, and it has the same shape: the
+                    // background-return reload autostarts, the host pauses on the resumed frame before
+                    // the rate rolls, and AVPlayer's pre-pause .waitingToPlayAtSpecifiedRate lands after
+                    // that pause and re-declares .playing. Swallowing the .paused that follows left the
+                    // session at `state == .playing` with no roll to come, which the phase reports as
+                    // `.loading` forever: a host spinner over a black screen that only a Play press
+                    // could clear.
+                    if Self.publishesTransportPause(
+                        hasTransportRolled: self.hasTransportRolled,
+                        transportIntentIsPlaying: self.nativeHost?.transportIntentIsPlaying ?? true
+                    ), self.state != .paused { self.state = .paused }
                 case .playing, .waitingToPlayAtSpecifiedRate:
                     if self.state != .playing { self.state = .playing }
                 @unknown default:
