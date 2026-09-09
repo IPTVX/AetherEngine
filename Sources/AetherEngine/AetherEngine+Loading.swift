@@ -765,6 +765,9 @@ extension AetherEngine {
             probesize: loadedOptions.probesize,
             maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration,
             sequentialOrigin: loadedOptions.sequentialOrigin,
+            // #377: the session's own opens (fallback, live reopen, restart reopen) keep the transport
+            // the host asked for; without it the flag lasts exactly as long as the pre-opened demuxer.
+            heldSourceConnection: loadedOptions.heldSourceConnection,
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
             forwardBufferSegments: loadedOptions.forwardBufferSegments
         )

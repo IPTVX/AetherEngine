@@ -165,10 +165,29 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     /// Whether the consumer intends to play, mirrored from the same source the segment producer
-    /// reads (`HLSVideoEngine.playIntentProvider`). Nil means playing, so a reader nobody wired
-    /// keeps today's behaviour. Read on the held connection's pump thread; a plain stored property
-    /// is enough because it is written once during open and the closure itself is `@Sendable`.
-    nonisolated(unsafe) var playIntentProvider: (@Sendable () -> Bool)?
+    /// reads (`HLSVideoEngine.playIntentProvider`). Nil is an intent nobody reported, and that is
+    /// read as stopped rather than as playing: every path that plays wires this, so the reader
+    /// left without it is one whose consumer the engine cannot vouch for, and the safe answer
+    /// there is the bounded one. Choosing "playing" would let such a reader hold a dormant flow
+    /// for as long as it lives, which is the #310 exposure this flag is supposed to bound.
+    ///
+    /// Behind a leaf lock like the phase sink below, and for the same reason: the demuxer forwards
+    /// it whenever the engine assigns it, which may be after `open()`, while the held connection's
+    /// pump thread reads it. Taken UNDER `winCond`, never the other way round.
+    var playIntentProvider: (@Sendable () -> Bool)? {
+        get {
+            playIntentLock.lock()
+            defer { playIntentLock.unlock() }
+            return _playIntentProvider
+        }
+        set {
+            playIntentLock.lock()
+            _playIntentProvider = newValue
+            playIntentLock.unlock()
+        }
+    }
+    private let playIntentLock = NSLock()
+    private var _playIntentProvider: (@Sendable () -> Bool)?
 
     /// Leaf lock over the sink and its gate: takes no other lock, and no other lock is held across it.
     private let networkPhaseLock = NSLock()
@@ -561,15 +580,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// at that same 1.2 Mbps and 7 ms at 70 Mbps, so the steady state sits in the regime that
     /// never fired rather than relying on a measurement nobody can take on demand.
     private static let heldPullSlack = 64 * 1024
+    /// How often a held connection on a full window re-reads the play intent. A pause is not
+    /// broadcast on `winCond` -- nothing reads during one -- so this is what lets the paused
+    /// budget below start at all.
+    private static let heldPlayIntentPollSeconds: TimeInterval = 1
     /// How long a held connection may stay open while the consumer is PAUSED before it is ended.
     /// Playback never spends this: a parked producer is not a stopped one, and a reader that reads
     /// the first as the second re-requests every few seconds, which is what this flag exists to
     /// stop. A pause is the unbounded case #310's worst episode came from (11 minutes), so it is
     /// bounded here and nowhere else.
-    /// How often a held connection on a full window re-reads the play intent. A pause is not
-    /// broadcast on `winCond` -- nothing reads during one -- so this is what lets the paused
-    /// budget below start at all.
-    private static let heldPlayIntentPollSeconds: TimeInterval = 1
     static let heldPausedBudgetDefault: TimeInterval = 300
 
     /// Overridable so a test can express a pause without sleeping through the real budget.
@@ -578,27 +597,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// only keeps one read from asking the transport for an unbounded amount while the window is
     /// empty (an open, a seek).
     private static let heldMaxPullBytes = 1 * 1024 * 1024
-    /// A held connection issues no read while the window is full and is not ended for it.
-    ///
-    /// The 16 MB window is a ceiling on a transport that could not be stopped: #174 crashed at
-    /// 3.4 GB with the muxer correctly backpressured and the network thread still delivering, and
-    /// #220 measured 911 MB arriving after a suspend. A pull transport has no such problem, so on
-    /// this path the window is not a thing to be held under, it is a thing that fills when the
-    /// consumer stops drawing and drains when it resumes. Waiting on it costs nothing on the wire:
-    /// no read is issued, the socket buffer fills, and the sender stops itself.
-    ///
-    /// Ending it instead is what a pushed range does, and doing that here spends the flag's whole
-    /// purpose. A field hour on a refusing origin ended 213 held connections this way, none of them
-    /// at a pause: the segment producer races ahead, parks with a full cache while the muxer works,
-    /// and a reader that reads a parked consumer as a stopped one re-requests every 17 seconds. That
-    /// is 218 requests where the design describes one, and against an origin that refuses requests
-    /// it is 218 chances to be refused.
-    ///
-    /// The dormancy that leaves is the one every immune player already has. ffmpeg's HTTP reader
-    /// sits exactly like this whenever its demuxer stops reading, and Infuse, VLC and mpv are built
-    /// on it. On the device, arm B of the transport probe held a stream task on a closed window for
-    /// 60 s while 1 Hz canaries against the origin and a neutral host stayed 206 throughout, and
-    /// arm C could not reproduce #220's mechanism there at all.
     // #377: how long a pump range waits for an origin slot before going on the link anyway. The
     // pump is the main line and everything that can be holding a slot ahead of it is short (a 4 MB
     // detour block, a size probe), so this is "wait for the short thing", not "give up". Generous
@@ -741,6 +739,22 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         defer { winCond.unlock() }
         return rateLimitStreak
+    }
+
+    /// Bytes the window holds ahead of the cursor. Caller holds `winCond`. The held pull budget
+    /// and the delivery-gap watchdog both decide on the room this leaves, and they have to agree:
+    /// the watchdog stands aside exactly where the pump waits.
+    private func windowAheadLocked() -> Int {
+        window.count - max(0, Int(position - winStart))
+    }
+
+    /// The delivery gap the watchdog would judge right now. A test reads it to state the invariant
+    /// the field case turns on: a stretch with no read outstanding does not accumulate against the
+    /// read that follows it.
+    var deliveryGapSecondsForTesting: Double {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return Double(DispatchTime.now().uptimeNanoseconds - lastDeliveryAt.uptimeNanoseconds) / 1_000_000_000
     }
 
     /// Whether a transfer is still installed. A test that needs a range to have COMPLETED, rather
@@ -2880,8 +2894,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // is why the verdict was safe to take on a full window before. Re-arm rather than end, and the
         // watchdog still owns the case this path can have: bytes asked for and none arriving.
         let heldAndFull = heldConnectionEnabled
-            && (winHighWater - (window.count - max(0, Int(position - winStart)))) < Self.heldPullSlack
-        if heldAndFull || gap < connStallTimeout {
+            && (winHighWater - windowAheadLocked()) < Self.heldPullSlack
+        if heldAndFull {
+            // The clock restarts with the stretch it must not measure. Left running, it spends the
+            // whole parked stretch, and the read the consumer's return issues is then born already
+            // late: the next tick ends a connection that was healthy throughout, which is the
+            // re-request this flag exists to remove, booked as a stall. A full period rather than
+            // what is left of one, because once the gap has outgrown the timeout that remainder is
+            // 20 ms and this would re-arm at 50 Hz for the length of the park.
+            lastDeliveryAt = DispatchTime.now()
+            winCond.unlock()
+            armDeliveryGapWatchdog(generation: generation, after: connStallTimeout)
+            return
+        }
+        if gap < connStallTimeout {
             winCond.unlock()
             // Data landed since this closure was scheduled; wait out what is left of the window.
             armDeliveryGapWatchdog(generation: generation, after: max(0.02, connStallTimeout - gap))
@@ -3932,11 +3958,25 @@ extension AVIOReader: HeldSourceConnectionDelegate {
     /// #310's dose is the LENGTH of a dormant stretch rather than its existence, and a pull that
     /// tops the window up as the consumer takes bytes is dormant for `heldPullSlack` over media
     /// rate, which is the regime the starvation never fired in. The stretch that is NOT bounded
-    /// that way is a consumer which has stopped: a paused viewer holds one for the length of the
-    /// pause, and that is where #310's worst episode came from. So the wait carries a budget, and
+    /// that way is a consumer which has STOPPED: a paused viewer holds one for the length of the
+    /// pause, and that is where #310's worst episode came from. So a pause carries a budget, and
     /// running it out ends the connection exactly the way the high water ends a pushed one. The
-    /// read loop then re-requests at the frontier when the consumer draws down again, which is the
-    /// same path a completed range takes.
+    /// read loop then re-requests at the frontier when playback resumes, which is the same path a
+    /// completed range takes.
+    ///
+    /// A FULL WINDOW IS NOT THAT CASE, and reading it as one is what this method got wrong until
+    /// the field hour on the reporter's origin: 213 connections ended in 60 minutes with the viewer
+    /// never pausing once, because the segment producer races ahead, parks with a full cache while
+    /// the muxer works, and looks from here exactly like a consumer that stopped. That is 218
+    /// requests where the design describes one, and against an origin that refuses requests it is
+    /// 218 chances to be refused. So a playing consumer on a full window is waited out, not ended.
+    /// Waiting costs nothing on the wire: no read is issued, the socket buffer fills, and the
+    /// sender stops itself, which is what ffmpeg's reader does whenever its demuxer stops reading.
+    /// The 16 MB window stays what it always was, a ceiling on a transport that could not be
+    /// stopped (#174 crashed at 3.4 GB still delivering, #220 measured 911 MB after a suspend);
+    /// a pull transport has no such problem, so here the window fills and drains rather than being
+    /// held under. On the device, arm B of the transport probe held a stream task on a closed
+    /// window for 60 s with 1 Hz canaries against the origin and a neutral host clean throughout.
     ///
     /// Blocks on `winCond`, which is what the consumer broadcasts on after every read, so a
     /// generation that is abandoned (a seek, a close, a reconnect) wakes this immediately and
@@ -3949,13 +3989,18 @@ extension AVIOReader: HeldSourceConnectionDelegate {
         winCond.lock()
         while true {
             guard connection.generation == connGeneration, !connEnded, !isClosed else { break }
-            let ahead = window.count - max(0, Int(position - winStart))
+            let ahead = windowAheadLocked()
             let room = winHighWater - ahead
             if room >= Self.heldPullSlack {
                 budget = min(room, Self.heldMaxPullBytes)
+                // A read begins here, and the gap watchdog judges an OUTSTANDING one. Without this
+                // the wait that preceded the grant counts against the read it granted: coming back
+                // from a park longer than connStallTimeout, the first tick after this would see a
+                // gap older than the timeout and end a connection nothing is wrong with.
+                lastDeliveryAt = DispatchTime.now()
                 break
             }
-            let playing = playIntentProvider?() ?? true
+            let playing = playIntentProvider?() ?? false
             if playing {
                 // A full window under a playing consumer is the producer parked with a full
                 // segment cache, not a stopped one. Issue no read and wait: no byte is on the
