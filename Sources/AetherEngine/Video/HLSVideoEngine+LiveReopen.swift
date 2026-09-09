@@ -998,6 +998,7 @@ extension HLSVideoEngine {
         // reporting a transport that no longer exists for the rest of the session.
         oldDem?.onNetworkPhaseChanged = nil
         dem.onNetworkPhaseChanged = onNetworkPhaseChanged
+        dem.playIntentProvider = playIntentProvider   // #377: the reopened held connection is bounded by a pause, not by a parked producer
         let (nextIndex, outputEnd) = prov.liveContinuationPoint()
         do {
             let newProd = try makeProducer(

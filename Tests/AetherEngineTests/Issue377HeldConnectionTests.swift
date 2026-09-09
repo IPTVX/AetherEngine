@@ -473,3 +473,33 @@ struct Issue377HeldReaderTests {
         #expect(asks[1] > 0, "the refill asked from byte 0 again instead of at the frontier")
     }
 }
+
+/// The transport is decided at OPEN time (`loadIdentityFields` refuses to change it on a reload), so
+/// a session that opens again on its own has to carry it. It opens again more often than the flag's
+/// design suggests: a preopen that failed, a live reopen, and the VOD scrub restart that replaces a
+/// wedged demuxer. Each of those is a fresh AVIOReader, and one built without the flag is back on
+/// ranged requests against the origin the flag was turned on for, silently and for the rest of the
+/// session.
+@Suite("#377 the held transport survives the session's own reopens")
+struct Issue377SessionProfileTests {
+    private func engine(held: Bool) -> HLSVideoEngine {
+        HLSVideoEngine(url: URL(string: "file:///dev/null")!, dvModeAvailable: false,
+                       sequentialOrigin: false, heldSourceConnection: held)
+    }
+
+    @Test("a session asked to hold a connection opens every reopen of its own that way")
+    func reopensCarryTheHeldTransport() {
+        let session = engine(held: true)
+        #expect(session.openProfile.avioHeldConnection,
+                "the fallback open and the live reopen both use this profile")
+        #expect(session.restartReopenProfile.avioHeldConnection,
+                "the VOD scrub restart opens a replacement demuxer of its own")
+    }
+
+    @Test("a session that never asked for it opens none of them that way")
+    func reopensStayOnTheDefaultTransport() {
+        let session = engine(held: false)
+        #expect(!session.openProfile.avioHeldConnection)
+        #expect(!session.restartReopenProfile.avioHeldConnection)
+    }
+}
