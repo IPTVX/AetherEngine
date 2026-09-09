@@ -164,6 +164,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
+    /// Whether the consumer intends to play, mirrored from the same source the segment producer
+    /// reads (`HLSVideoEngine.playIntentProvider`). Nil means playing, so a reader nobody wired
+    /// keeps today's behaviour. Read on the held connection's pump thread; a plain stored property
+    /// is enough because it is written once during open and the closure itself is `@Sendable`.
+    nonisolated(unsafe) var playIntentProvider: (@Sendable () -> Bool)?
+
     /// Leaf lock over the sink and its gate: takes no other lock, and no other lock is held across it.
     private let networkPhaseLock = NSLock()
     private var _onNetworkPhaseChanged: (@Sendable (ReaderNetworkPhase) -> Void)?
@@ -555,17 +561,44 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// at that same 1.2 Mbps and 7 ms at 70 Mbps, so the steady state sits in the regime that
     /// never fired rather than relying on a measurement nobody can take on demand.
     private static let heldPullSlack = 64 * 1024
+    /// How long a held connection may stay open while the consumer is PAUSED before it is ended.
+    /// Playback never spends this: a parked producer is not a stopped one, and a reader that reads
+    /// the first as the second re-requests every few seconds, which is what this flag exists to
+    /// stop. A pause is the unbounded case #310's worst episode came from (11 minutes), so it is
+    /// bounded here and nowhere else.
+    /// How often a held connection on a full window re-reads the play intent. A pause is not
+    /// broadcast on `winCond` -- nothing reads during one -- so this is what lets the paused
+    /// budget below start at all.
+    private static let heldPlayIntentPollSeconds: TimeInterval = 1
+    static let heldPausedBudgetDefault: TimeInterval = 300
+
+    /// Overridable so a test can express a pause without sleeping through the real budget.
+    nonisolated(unsafe) var heldPausedBudgetSeconds: TimeInterval = AVIOReader.heldPausedBudgetDefault
     /// Ceiling on a single pull. The window's remaining room is normally the smaller number; this
     /// only keeps one read from asking the transport for an unbounded amount while the window is
     /// empty (an open, a seek).
     private static let heldMaxPullBytes = 1 * 1024 * 1024
-    /// How long a held connection may sit on a full window before it is ended. This bounds the one
-    /// dormant stretch the slack cannot: a consumer that has STOPPED. A paused viewer would
-    /// otherwise hold a dormant flow for the length of the pause, which is exactly where #310's
-    /// worst single episode (11 minutes) came from, so a pause ends the connection here and the
-    /// read loop re-requests at the frontier when playback resumes. The reader's own delivery-gap
-    /// watchdog sits at 20 s, well above this, so the deliberate end always gets there first.
-    private static let heldIdleBudgetSeconds: TimeInterval = 5
+    /// A held connection issues no read while the window is full and is not ended for it.
+    ///
+    /// The 16 MB window is a ceiling on a transport that could not be stopped: #174 crashed at
+    /// 3.4 GB with the muxer correctly backpressured and the network thread still delivering, and
+    /// #220 measured 911 MB arriving after a suspend. A pull transport has no such problem, so on
+    /// this path the window is not a thing to be held under, it is a thing that fills when the
+    /// consumer stops drawing and drains when it resumes. Waiting on it costs nothing on the wire:
+    /// no read is issued, the socket buffer fills, and the sender stops itself.
+    ///
+    /// Ending it instead is what a pushed range does, and doing that here spends the flag's whole
+    /// purpose. A field hour on a refusing origin ended 213 held connections this way, none of them
+    /// at a pause: the segment producer races ahead, parks with a full cache while the muxer works,
+    /// and a reader that reads a parked consumer as a stopped one re-requests every 17 seconds. That
+    /// is 218 requests where the design describes one, and against an origin that refuses requests
+    /// it is 218 chances to be refused.
+    ///
+    /// The dormancy that leaves is the one every immune player already has. ffmpeg's HTTP reader
+    /// sits exactly like this whenever its demuxer stops reading, and Infuse, VLC and mpv are built
+    /// on it. On the device, arm B of the transport probe held a stream task on a closed window for
+    /// 60 s while 1 Hz canaries against the origin and a neutral host stayed 206 throughout, and
+    /// arm C could not reproduce #220's mechanism there at all.
     // #377: how long a pump range waits for an origin slot before going on the link anyway. The
     // pump is the main line and everything that can be holding a slot ahead of it is short (a 4 MB
     // detour block, a size probe), so this is "wait for the short thing", not "give up". Generous
@@ -2841,7 +2874,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         let gap = Double(DispatchTime.now().uptimeNanoseconds - lastDeliveryAt.uptimeNanoseconds)
             / 1_000_000_000
-        if gap < connStallTimeout {
+        // A held connection sitting on a full window has no read outstanding: the pump asked for a
+        // budget, was told there was no room, and is waiting. Nothing is late, so there is no gap to
+        // judge. The pushed path cannot reach this state -- it ends at the high water instead -- which
+        // is why the verdict was safe to take on a full window before. Re-arm rather than end, and the
+        // watchdog still owns the case this path can have: bytes asked for and none arriving.
+        let heldAndFull = heldConnectionEnabled
+            && (winHighWater - (window.count - max(0, Int(position - winStart)))) < Self.heldPullSlack
+        if heldAndFull || gap < connStallTimeout {
             winCond.unlock()
             // Data landed since this closure was scheduled; wait out what is left of the window.
             armDeliveryGapWatchdog(generation: generation, after: max(0.02, connStallTimeout - gap))
@@ -3902,9 +3942,10 @@ extension AVIOReader: HeldSourceConnectionDelegate {
     /// generation that is abandoned (a seek, a close, a reconnect) wakes this immediately and
     /// answers 0 rather than waiting out its budget.
     func heldConnectionPullBudget(_ connection: HeldSourceConnection) -> Int {
-        let deadline = Date().addingTimeInterval(Self.heldIdleBudgetSeconds)
         var budget = 0
-        var idleEndAhead: Int? = nil
+        var pausedEndAhead: Int? = nil
+        // Only a paused consumer carries a deadline, and only from the moment it paused.
+        var pauseDeadline: Date? = nil
         winCond.lock()
         while true {
             guard connection.generation == connGeneration, !connEnded, !isClosed else { break }
@@ -3914,22 +3955,39 @@ extension AVIOReader: HeldSourceConnectionDelegate {
                 budget = min(room, Self.heldMaxPullBytes)
                 break
             }
+            let playing = playIntentProvider?() ?? true
+            if playing {
+                // A full window under a playing consumer is the producer parked with a full
+                // segment cache, not a stopped one. Issue no read and wait: no byte is on the
+                // wire, the socket fills, and the sender stops itself.
+                //
+                // The wait carries a poll rather than blocking outright, because the thing it is
+                // waiting to hear about does not broadcast: nobody reads during a pause, so a
+                // consumer that pauses AFTER the window filled would never wake this loop and the
+                // paused budget below would never start. Measured: a 420 s pause held the
+                // connection to the end of the drill with no bound spent.
+                pauseDeadline = nil
+                _ = winCond.wait(until: Date().addingTimeInterval(Self.heldPlayIntentPollSeconds))
+                continue
+            }
+            let deadline = pauseDeadline ?? Date().addingTimeInterval(heldPausedBudgetSeconds)
+            pauseDeadline = deadline
             if Date() >= deadline {
                 connEndedByBackpressure = true
                 connEnded = true
                 activeTransfer = nil
-                idleEndAhead = ahead
+                pausedEndAhead = ahead
                 winCond.broadcast()
                 break
             }
             _ = winCond.wait(until: deadline)
         }
         winCond.unlock()
-        if let idleEndAhead {
+        if let pausedEndAhead {
             EngineLog.emit(
-                "[AVIOReader] \(label) held connection idle for \(Int(Self.heldIdleBudgetSeconds))s "
-                + "with \(idleEndAhead / 1024 / 1024)MB ahead; ending it, will re-request at the "
-                + "frontier once the consumer drains",
+                "[AVIOReader] \(label) held connection paused for "
+                + "\(Int(heldPausedBudgetSeconds))s with \(pausedEndAhead / 1024 / 1024)MB "
+                + "ahead; ending it, will re-request at the frontier when playback resumes",
                 category: .demux)
         }
         return budget

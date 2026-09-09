@@ -273,6 +273,13 @@ public final class Demuxer: @unchecked Sendable {
         didSet { (avioProvider as? AVIOReader)?.onNetworkPhaseChanged = onNetworkPhaseChanged }
     }
 
+    /// Passed to the source reader so a held connection can tell a parked producer from a paused
+    /// viewer. Same provider the segment producer reads. `didSet` re-forwards for the same reason
+    /// `onNetworkPhaseChanged` does: it may be set before or after `open()`.
+    var playIntentProvider: (@Sendable () -> Bool)? {
+        didSet { (avioProvider as? AVIOReader)?.playIntentProvider = playIntentProvider }
+    }
+
     /// #361: emitted as each stage of `open()` finishes, so the engine can publish startup progress
     /// through the one stretch of a load a host cannot otherwise see. Called on whatever thread the
     /// open runs on (the playback open is detached off the main actor), never after `open()` returns.
@@ -495,6 +502,7 @@ public final class Demuxer: @unchecked Sendable {
             heldConnection: openProfile.avioHeldConnection
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
+        reader.playIntentProvider = playIntentProvider
         try openWithProvider(reader, isLive: isLive)
     }
 
