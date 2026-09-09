@@ -12,6 +12,59 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.76.1] - 2026-09-09
+
+### Fixed
+
+- **A held source connection is bounded by a pause, not by a full window
+  (#377).** The 5 s full-window end inferred "the consumer has stopped" from a
+  window nobody was draining, and `HLSSegmentProducer` races ahead, fills its
+  segment cache and parks while the muxer works, which from inside the reader
+  is the same picture. A field hour against the reporting origin ended 213 held
+  connections that way with the viewer never pausing once: 218 requests where
+  the design describes one, and against an origin that refuses requests, 218
+  chances to be refused. The wait now carries a deadline only while the consumer
+  is actually paused, read from the same `playIntentProvider` the segment
+  producer already gets, and that paused bound is 300 s rather than 5. Ten
+  minutes on the same device and source after the change: 6 requests, all from
+  the open phase, and the count stops growing once the file is open.
+- **The delivery-gap watchdog no longer counts a stretch that has no read
+  outstanding (#377).** A held connection waiting on a full window has nothing
+  in flight that could be late, so the watchdog stands aside; its clock kept
+  running through the wait anyway. Two consequences, one cause: the re-arm
+  interval collapses to its 20 ms floor once the gap outgrows the stall
+  timeout, so the watchdog re-armed at 50 Hz on the window lock for the length
+  of the park, and the read that the consumer's return issues inherited the
+  whole park as lateness, so the next tick ended a healthy connection and
+  re-requested at the frontier, booked in the log as a stall. The clock now
+  belongs to an outstanding read, restarted where the watchdog stands aside and
+  where the pull budget grants one.
+- **A session asked to hold its connection keeps that transport across the
+  reopens it makes itself (#377).** `LoadOptions.heldSourceConnection` reached
+  only the reader inside the pre-opened demuxer. The fallback open, the live
+  reopen and the VOD scrub restart each build from a profile that never carried
+  the flag, so any one of them silently put the rest of the session back on
+  ranged requests, against the one kind of origin the flag is turned on for.
+- **A pause the host asked for lands before the first roll (#440).** A session
+  paused before its rate had ever rolled kept reporting `state == .playing`,
+  which `PlaybackPhase.derive` reads as `.loading`, so a host drawing chrome on
+  the phase sat on a spinner over a black screen until the viewer pressed Play.
+  Returning from the background is exactly that shape: the reload autostarts,
+  the host pauses on the resumed frame, and AVPlayer's pre-pause
+  `.waitingToPlayAtSpecifiedRate` arrives after that pause and re-declares
+  `.playing`. The pre-roll gate that swallowed the correction exists for a good
+  reason, and the durable transport intent is what tells a pause the engine was
+  asked for apart from a mount that means to play.
+
+### Changed
+
+- The live-join wedge account carries the item's own `status` (#509). It is
+  otherwise published by a KVO observer that fires on a change, so an item that
+  never leaves `.unknown` produced no status line at all, in exactly the state
+  where the item is the question. The two values point opposite ways:
+  `.unknown` is AVPlayer never accepting the media, `.readyToPlay` is an
+  accepted item that places nothing.
+
 ## [6.76.0] - 2026-09-09
 
 ### Added
