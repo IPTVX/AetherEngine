@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.79.0] - 2026-09-10
+
 ### Fixed
 
 - **A live gap the close deadline was built to absorb still closed the window
