@@ -145,18 +145,41 @@ enum LiveEdgePolicy {
                              HLSSegmentProducer.liveSourceStarvationTimeoutSeconds - late))
     }
 
-    /// AE#446 round 7: how little runway is left in front of the consumer before the window is closed
-    /// whatever the clock says.
+    /// AE#520: does the content in front of the consumer end the wait before the clock does?
     ///
     /// Waiting is only free while there is something to wait WITH. A consumer that walks off the end of
     /// an open window does not get a `didPlayToEndTime` to hand the session a controlled swap: it stalls
-    /// at an edge that is not moving, and when the playlist moves again it rejoins at
-    /// edge-minus-HOLD-BACK on its own (measured, AE#446 round 2: a 117.76 s forward step with no
-    /// recovery line of ours anywhere near it). So the deadline above is an upper bound on the wait, and
-    /// this is the other one: two target durations of content, which at the several polls per target
-    /// duration a stalled client makes is a comfortable few polls plus the segment it is sitting on.
-    /// Below it the old behaviour is exactly right and the window closes at once.
-    static let outageCloseRunwayFloorMultiplier: Double = 2.0
+    /// at an edge that is not moving, and past about half a minute of that the item dies and the client
+    /// rejoins forward on its own (measured on the harness with the close suppressed entirely: a 30 s
+    /// outage came back `POSITION LOST`, 4 segments skipped, against `position held` with it). So the
+    /// deadline is one bound on the wait and the runway is the other.
+    ///
+    /// AE#446 round 7 wrote the second one as a CONSTANT, two target durations of content, on the
+    /// premise that a stalled client makes several polls per target duration. Both halves were wrong,
+    /// and the constant is what AE#520 reported as Atmos dropping on live:
+    ///
+    /// - The client polls about ONCE per target duration, not several times. Measured over three
+    ///   harness runs with the advert withdrawn (which is the state every close candidate is in):
+    ///   31, 35 and 38 polls at a mean gap of 4.83, 4.85 and 4.86 s against TARGETDURATION 6, so
+    ///   0.81 x TD per poll. Two target durations is two and a half polls, not "a comfortable few".
+    /// - A viewer at the live edge holds the holdback, `3 x TD`, and is not asked about any of this
+    ///   until the source is late at `1.5 x TD`, by which point half of that is spent. It therefore
+    ///   stands at `1.5 x TD` and UNDER a `2 x TD` floor at the very first moment the question can be
+    ///   asked. The floor fired at once for every viewer who had not deliberately rewound, so round 7's
+    ///   `3 x TD` deadline was unreachable for exactly the viewer it was written for, and the effective
+    ///   close threshold stayed the cheap `1.5 x TD` that round set out to remove.
+    ///
+    /// So the runway is compared against the clock rather than against a number: it ends the wait only
+    /// when the content ahead will not carry it to the deadline. Both are seconds, and one of them is
+    /// already a measured, argued bound. Measured on the harness, same command line in both arms:
+    /// a 12 s gap at TARGETDURATION 6 with 12.0 s of runway closed the window and swapped the item
+    /// before, and is absorbed with no ENDLIST and no swap after, at an identical playhead (89.40 s
+    /// against 89.60 s of advance, largest step 1.10 s in both). A 30 s outage holds its position in
+    /// both arms.
+    static func outageCloseOnRunway(runwaySeconds: Double, silenceSeconds: Double,
+                                    deadlineSeconds: Double) -> Bool {
+        runwaySeconds <= max(0, deadlineSeconds - silenceSeconds)
+    }
 
     /// The TARGETDURATION a measured arrival cadence requires: enough that `1.5 x TD` of patience covers
     /// the gap. AE#447: the floor used to enter as `ceil(gap)`, which demands `1.5 x` the gap in patience
@@ -1642,6 +1665,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// it, so it waits for `LiveEdgePolicy.outageCloseSilenceMultiplier` rather than firing the moment
     /// the source misses its cadence, which is where the cheap and reversible half of this fix (the
     /// blocking-reload withdrawal, `liveDeliveryStalled`) belongs.
+    ///
+    /// AE#520: the wait's second bound, the runway, is a comparison against that deadline and not a
+    /// constant. As a constant it was shorter than what an edge viewer holds when the question is first
+    /// asked, so it decided every ordinary live session and the deadline above decided none of them.
+    /// `LiveEdgePolicy.outageCloseOnRunway` carries the measurement.
     var liveOutageEndlist: Bool {
         let consumerTarget = cache.targetIndex
         stateLock.lock()
@@ -1659,7 +1687,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             return silence > deadline
         }()
         let runway = runwayAheadOfConsumerLocked(fetchPoint: consumerTarget)
-        let runwayFloor = LiveEdgePolicy.outageCloseRunwayFloorMultiplier * Double(targetDuration ?? 0)
+        // AE#520: what is left of the wait, on the same axis as the runway. Both are seconds, so the
+        // content bound is a comparison against the clock rather than a constant of its own.
+        let clockLeft = max(0, (deadline ?? 0) - (silence ?? 0))
         // One line per episode, at both ends of it: a source that goes late and comes back without the
         // window ever closing is the case this round exists for, and it is otherwise invisible.
         let noteWentLate = late && !_liveOutageSourceLateNoted
@@ -1675,8 +1705,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 + (hasRunway
                    ? "the consumer is at \(consumerTarget) of \(total) with "
                      + "\(String(format: "%.1f", runway))s of runway, and the window stays live until "
-                     + "\(String(format: "%.1f", deadline))s of silence or "
-                     + "\(String(format: "%.1f", runwayFloor))s of runway, whichever comes first"
+                     + "\(String(format: "%.1f", deadline))s of silence, or sooner if that runway "
+                     + "would not carry the wait that far (\(String(format: "%.1f", clockLeft))s of it "
+                     + "left)"
                    : "the consumer is at the end of what the window holds, so there is no runway to "
                      + "serve as a finished asset"),
                 category: .session
@@ -1692,7 +1723,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         }
 
         // The wait is bounded from both ends: by the clock, and by the content left to wait with.
-        let outOfRunway = late && runway <= runwayFloor
+        let outOfRunway = late && LiveEdgePolicy.outageCloseOnRunway(
+            runwaySeconds: runway, silenceSeconds: silence ?? 0, deadlineSeconds: deadline ?? 0)
         guard isLive, hasRunway, quiet || outOfRunway else { return false }
         stateLock.lock()
         _liveOutageEndlistLatched = true
@@ -1707,8 +1739,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             + (quiet
                ? ", past the \(String(format: "%.1f", deadline ?? 0))s deadline for TARGETDURATION "
                  + "\(targetDuration.map(String.init) ?? "?")s"
-               : ", under the \(String(format: "%.1f", runwayFloor))s floor, so the wait has run out of "
-                 + "content rather than out of clock")
+               : ", which will not carry the wait to the \(String(format: "%.1f", deadline ?? 0))s "
+                 + "deadline (\(String(format: "%.1f", clockLeft))s of it left), so the wait has run "
+                 + "out of content rather than out of clock")
             + "); serving the rest of the window as a finished asset (ENDLIST) so AVPlayer keeps "
             + "fetching the runway it already holds instead of striking out on an unchanged playlist",
             category: .session

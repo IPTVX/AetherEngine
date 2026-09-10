@@ -470,6 +470,45 @@ struct Issue440LiveJoinRollTests {
         #expect(clause?.contains("95258.48s") == true)
     }
 
+    // MARK: - The item's own verdict (AE#509)
+
+    /// The field wedge: nothing placed AND the item never accepted the media. The status observer
+    /// cannot report that, because it fires on a change and this item never changes, so the account
+    /// that describes the wedge has to carry it or no engine line ever names it.
+    @Test("a wedged join names the item status it never left")
+    func nothingPlacedNamesAnUnknownStatus() {
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95173.75,
+                           loadedRangeCount: 0, nearestRangeOffsetSeconds: nil,
+                           itemStatus: .unknown))
+        #expect(clause?.contains("no loaded range at all") == true)
+        #expect(clause?.contains("has not left unknown") == true)
+    }
+
+    /// The opposite half of the same zero, and the reason the field is worth printing: an accepted item
+    /// that places nothing is a fetch problem, an unaccepted one is a segment-bytes problem. Both read
+    /// as "nothing placed" without this.
+    @Test("an accepted item that places nothing says so")
+    func nothingPlacedOnAReadyItemSaysSo() {
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95173.75,
+                           loadedRangeCount: 0, nearestRangeOffsetSeconds: nil,
+                           itemStatus: .readyToPlay))
+        #expect(clause?.contains("readyToPlay") == true)
+        #expect(clause?.contains("has not left unknown") == false)
+    }
+
+    /// A reading taken without a status must not invent one: the clause is silent rather than claiming
+    /// `.unknown`, which is itself one of the answers.
+    @Test("a reading with no status carries no status clause")
+    func absentStatusAddsNothing() {
+        #expect(NativeAVPlayerHost.liveJoinStatusClause(nil).isEmpty)
+        let clause = NativeAVPlayerHost.liveJoinPlacementClause(
+            reading: .init(bufferEmpty: false, aheadSeconds: 0, playheadSeconds: 95258.48,
+                           loadedRangeCount: 1, nearestRangeOffsetSeconds: 29.52))
+        #expect(clause?.contains("status") == false)
+    }
+
     /// The opposite fact, printed identically before this: the item HAS media, just not where the
     /// playhead is. That points at the item and the playlist disagreeing about placement, not at a
     /// fetch that never landed, and the two need opposite investigations.

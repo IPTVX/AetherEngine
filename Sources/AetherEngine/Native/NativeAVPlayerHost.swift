@@ -375,6 +375,10 @@ final class NativeAVPlayerHost {
         var armIngestFallback: Bool = false
         /// #334: the ceiling on silence for a path with no other readiness watchdog.
         var readinessDeadline: Double?
+        /// AE#520: this session stream-copies an EAC3 bitstream that carries JOC. HDMI passthrough
+        /// then tunnels it through a 2-channel MAT carrier, so the route's channel count is not a
+        /// statement about the audio and the surround-downmix warning below must not read it as one.
+        var audioIsAtmosStreamCopy: Bool = false
     }
 
     /// AE#446 round 5: a fresh item is about to attach, invoked before anything can fetch a playlist
@@ -676,7 +680,8 @@ final class NativeAVPlayerHost {
                         guard let self = self, let item = self.playerItem else { return }
                         Self.dumpAudioRoute(sid: sid, phase: "settled")
                         await Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
-                        await Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                        await Self.warnIfEAC3SurroundOnStereoRoute(
+                            item, sid: sid, isAtmosStreamCopy: contract.audioIsAtmosStreamCopy)
                         // #168: the video track can be absent from item.tracks at readyToPlay for HLS;
                         // re-read once playing so the remote-HLS badge settles on the real dynamic range.
                         await self.publishDetectedVideoFormat(from: item)
@@ -1505,7 +1510,8 @@ final class NativeAVPlayerHost {
             return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead,
                                          playheadSeconds: now,
                                          loadedRangeCount: placement.count,
-                                         nearestRangeOffsetSeconds: placement.nearestOffset)
+                                         nearestRangeOffsetSeconds: placement.nearestOffset,
+                                         itemStatus: item.status)
         }
     }
 
@@ -1520,6 +1526,9 @@ final class NativeAVPlayerHost {
         /// positive when the nearest one STARTS that far ahead, negative when the nearest one ENDED
         /// that far behind. nil when a range contains the playhead, or when there are none.
         var nearestRangeOffsetSeconds: Double? = nil
+        /// AVPlayer's own verdict on the item, read in the same batch as everything above it.
+        /// nil only where a caller builds a reading without one.
+        var itemStatus: AVPlayerItem.Status? = nil
     }
 
     /// AE#447 follow-up: `ahead 0.00s` is two different facts and the line printed one word for both.
@@ -1544,6 +1553,31 @@ final class NativeAVPlayerHost {
         return (usable.count, nearest)
     }
 
+    /// AE#509: the item's own verdict, said out loud by the account that describes the wedge.
+    ///
+    /// `item.status` is otherwise carried by a KVO observer that fires on a CHANGE, so an item that
+    /// never leaves `.unknown` produces no status line at all: the engine is silent about the item in
+    /// exactly the state where the item is the question. A 20 s field wedge arrived with "nothing
+    /// placed" from here and `.unknown` from the host's own private dump, and only the pair of them
+    /// said anything. The two readings point opposite ways: `.unknown` is AVPlayer never accepting the
+    /// media (look at the segment bytes), `.readyToPlay` is an accepted item that places nothing (look
+    /// at the fetch).
+    nonisolated static func liveJoinStatusClause(_ status: AVPlayerItem.Status?) -> String {
+        switch status {
+        case .unknown:
+            return ", and the item's own status has not left unknown, so AVPlayer has not accepted "
+                + "the media at all"
+        case .readyToPlay:
+            return ", on an item AVPlayer has accepted (status readyToPlay)"
+        case .failed:
+            return ", on an item AVPlayer has failed (status failed)"
+        case .none:
+            return ""
+        @unknown default:
+            return ""
+        }
+    }
+
     /// The placement clause the two accounts below carry when the cushion reads zero. nil when a range
     /// contains the playhead: there the depth is the whole story and this would only add noise.
     nonisolated static func liveJoinPlacementClause(reading: LiveJoinBufferReading) -> String? {
@@ -1551,20 +1585,21 @@ final class NativeAVPlayerHost {
         let head = reading.playheadSeconds.isFinite
             ? String(format: "%.2f", reading.playheadSeconds) + "s"
             : "an unreadable position"
+        let status = liveJoinStatusClause(reading.itemStatus)
         if reading.loadedRangeCount == 0 {
             return "the item holds no loaded range at all, so nothing has been placed on its axis "
-                + "since it was mounted (playhead \(head))"
+                + "since it was mounted (playhead \(head))" + status
         }
         guard let offset = reading.nearestRangeOffsetSeconds else {
             // A range does contain the playhead and the depth is simply zero: starved at the edge.
             return "the item holds \(reading.loadedRangeCount) loaded range(s) and the playhead sits "
-                + "inside one of them with nothing ahead of it (playhead \(head))"
+                + "inside one of them with nothing ahead of it (playhead \(head))" + status
         }
         let where_ = offset > 0
             ? "starts \(String(format: "%.2f", offset))s AHEAD of it"
             : "ended \(String(format: "%.2f", -offset))s BEHIND it"
         return "the item holds \(reading.loadedRangeCount) loaded range(s) but none at the playhead: "
-            + "the nearest \(where_) (playhead \(head))"
+            + "the nearest \(where_) (playhead \(head))" + status
     }
 
     func play() {
@@ -2362,9 +2397,21 @@ final class NativeAVPlayerHost {
         #endif
     }
 
-    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Atmos excluded (ch=2 MAT carrier is correct for Atmos passthrough). Cause: Sonos Arc reports ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline bug (dec3 bitstream is identical across runs).
-    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int) async {
+    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Cause: Sonos Arc reports
+    /// ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline
+    /// bug (dec3 bitstream is identical across runs).
+    ///
+    /// AE#520: Atmos is excluded, and until this the exclusion existed only in the docstring and in
+    /// the warning's own closing sentence. Every EAC3+JOC session matches the condition by
+    /// construction, because a 6-channel `ec-3` track tunnelling through a 2-channel MAT carrier is
+    /// what correct Atmos passthrough looks like, so the line fired on exactly the sessions it then
+    /// told the reader to ignore it for. The reporter had to reason it away himself while chasing a
+    /// real defect. The route cannot answer this (a MAT carrier and a stereo LPCM route both report
+    /// two channels); the session can, and now says so through the contract.
+    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int,
+                                                        isAtmosStreamCopy: Bool) async {
         #if os(iOS) || os(tvOS)
+        guard !isAtmosStreamCopy else { return }
         var trackChannels: Int = 0
         var codecID: String = ""
         for itemTrack in item.tracks {

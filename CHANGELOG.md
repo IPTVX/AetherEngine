@@ -12,6 +12,203 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.79.0] - 2026-09-10
+
+### Fixed
+
+- **A live gap the close deadline was built to absorb still closed the window
+  and swapped the AVPlayer item, and on an EAC3+JOC passthrough track every swap
+  is an audible Atmos drop-and-relock (#520).** AE#446 round 7 lifted the
+  irreversible close off the cheap `1.5 x TARGETDURATION` threshold and gave it a
+  `3 x TD` deadline, but wrote the wait's second bound, the content in front of
+  the consumer, as a CONSTANT `2 x TD` of runway. A viewer at the live edge holds
+  the holdback, `3 x TD`, and is not asked about any of this until the source is
+  late at `1.5 x TD`, by which point half of it is spent: it stands at `1.5 x TD`,
+  under the `2 x TD` floor, at the first moment the question can be asked. So the
+  floor decided every ordinary live session, the new deadline decided none of
+  them, and the effective close threshold stayed the `1.5 x TD` that round set out
+  to remove. Round 7 looked correct because its reporter had `7 x TD` of runway.
+  The constant's own premise was measured wrong too: it was sized on "several
+  polls per target duration", and a client whose blocking-reload advert has been
+  withdrawn, which is the state every close candidate is in, polls once per
+  **0.81 x TD** (31, 35 and 38 polls at a mean gap of 4.83, 4.85 and 4.86 s
+  against TARGETDURATION 6). The runway is now compared against the clock instead
+  of against a number: it ends the wait only when it will not carry it to the
+  deadline. Measured on the harness, same command line in both arms, a 12 s gap at
+  TARGETDURATION 6 with 12.0 s of runway: before, ENDLIST plus an item swap;
+  after, absorbed with no ENDLIST and no swap, at an identical playhead (89.40 s
+  against 89.60 s of advance, largest step 1.10 s in both). A real 30 s outage
+  still closes and still holds its position in both arms, and suppressing the
+  close entirely there loses it (`POSITION LOST`, 4 segments skipped), so the
+  bound is not removable, only mis-sized.
+
+- **The software VOD read-ahead could not drain the link it was given, because
+  its producer sat in the efficiency QoS class (#519).** The compressed packet
+  producer ran on a `.utility` dispatch queue while the demux consumer that
+  waits on it runs `.userInitiated`, and an `NSCondition` donates no priority to
+  the thread it is waiting for, so the dependency was invisible to the
+  scheduler. Thread Performance Checker reports it as a priority inversion; what
+  it costs is throughput, and the cost needs no contention for cycles. Measured
+  on an idle 8-core M1 with the consumer's decode cost made negligible (360p
+  content, seven cores free, the process itself under 30 % of one core), the
+  efficiency-class producer pulled **147 MB** of an 80 Mbit/s source in 60 s
+  where a responsive one pulled **438 MB**. Lifting only the thread's
+  disk-I/O policy, on the same efficiency class, restored it to **528 MB**,
+  which names the cause: the class throttles the spool writes this producer
+  makes for every packet. On a 1080p 8.2 Mbit/s source capped at 10 Mbit/s the
+  same arms pulled 60.7 MB against 77.5 MB with the consumer blocked **60.2 s
+  against 27.3 s** of a 61 s session, and with the box saturated by eight
+  software decodes the demoted arm fell to 35.4 MB. A healthy link is
+  unaffected: both arms fill and hold the 40 s reserve, because 8.2 Mbit/s fits
+  under the throttled ceiling of about 19 Mbit/s on this machine. The producer
+  now owns its thread and moves its own class: responsive at start, after every
+  seek, while any consumer is parked in a read, and below a quarter of the
+  forward window; elective again above half of it. The two depths differ so a
+  source sitting on one threshold does not retune once per packet. Raising the
+  class permanently would have worked too and was measured worse: over a 100 s
+  steady state the adaptive producer keeps **2165 ms** of efficiency-class CPU
+  against 2145 ms for the demoted one and 1 ms for a permanently responsive
+  one, at identical total CPU. Consumer starvation is now a diagnostic line of
+  its own (`consumer starved: waits= blocked= reservoir= qos=`), rate-limited to
+  one a second, so "the source cannot keep up" is readable rather than inferred.
+  Reported by Roman Tatarenkov.
+
+## [6.78.0] - 2026-09-10
+
+### Added
+
+- **The legacy `.flv` chain plays whole, video and audio (FFmpegBuild 3.2.0).**
+  The `flv` demuxer always shipped, so a Flash file from after 2008 (H.264 +
+  AAC) already played; what was missing is the era's own codecs. In on the video
+  side: FLV1 / Sorenson Spark and the On2 family `vp6` / `vp6f` / `vp6a`. On the
+  audio side the whole tail, Nellymoser Asao, ADPCM-SWF, Speex and FLV's PCM
+  shapes (`pcm_s16be`, `pcm_u8`, G.711 A-law and mu-law), each routed through
+  `AudioBridge` by `AudioCodecCompat`. Both halves move together because they
+  fail differently: a missing video decoder ends the load with
+  `unsupportedCodec`, while a missing audio decoder plays the film silently
+  (`AudioBridge` cannot open the source and the cascade ends in
+  `droppedNoPipeline`). `pcm_s16be` and `pcm_u8` were already routed to the
+  bridge and had no decoder behind them until now. Flash Screen Video stays out, it needs zlib, which the build does
+  not link. Requested in the Sodalite Discord.
+
+### Fixed
+
+- **The "unsupported, video-only" audio line said the opposite of what happens.**
+  A codec `AudioCodecCompat` does not name has been reaching the bridge cascade
+  since that cascade was rewired in May 2026: it asks libavcodec for a decoder by
+  id and never reads the routing table, so such a source plays with sound
+  whenever the FFmpeg build carries its decoder. Measured on Nellymoser-in-FLV
+  before its table entry existed: this line, and then a NELLYMOSER to FLAC bridge
+  with a full audio track. The line now says what the table entry actually
+  decides, which is the stream-copy question, and leaves the verdict to the
+  cascade, which already reports the one real cause of silence, an absent
+  decoder, as `falling back to SILENT video-only`.
+
+## [6.77.0] - 2026-09-10
+
+### Fixed
+
+- **A live HLS join now takes the backlog the origin is already holding, so the
+  startup cushion is filled at I/O speed instead of in wall clock (#521).** The
+  ingest entered a live playlist three segments behind the edge, and three
+  joined segments finalize only two downstream, because the last one stays open
+  until the next arrives. The loopback startup cushion wants three, so the first
+  `/media.m3u8` was withheld until the origin produced its next segment, at
+  wall-clock speed, with the content for it already sitting in the window. The
+  bound that caused it was in the wrong unit: `joinStart` targets a coverage in
+  SECONDS and `edgeOffset` capped that at three SEGMENTS, while the coverage
+  term already bounds long-segment providers on its own (6 s segments break at
+  12 s), so the count only ever bound the short-segment sources the 8 s
+  coverage floor was written for. Measured on `hlsfixture --window 8` with
+  `play --live --fast-zap`, three runs per row: first picture on a 2 s-segment
+  channel **2.22 s before, 0.20 s after**, on 1 s segments **0.41 to 1.22 s
+  before, 0.18 to 0.20 s after**, and that spread is half the finding, since
+  before the change the cost depended on where in the upstream segment cycle
+  the tune landed. The join is not paid back as lag: read off the origin's
+  request log, both arms reach the same upstream segment number at the same
+  wall clock, so the deeper entry is caught up at I/O speed rather than
+  standing as a lag behind the live edge. A window at the three-segment floor
+  is unchanged, a long-segment provider is unchanged, and the oldest listed
+  segment of a deeper window is now deliberately left alone so the burst does
+  not race the origin for a segment about to be dropped. Raw MPEG-TS with no
+  playlist is untouched: there is no window to enter further back into.
+
+## [6.76.1] - 2026-09-09
+
+### Fixed
+
+- **A held source connection is bounded by a pause, not by a full window
+  (#377).** The 5 s full-window end inferred "the consumer has stopped" from a
+  window nobody was draining, and `HLSSegmentProducer` races ahead, fills its
+  segment cache and parks while the muxer works, which from inside the reader
+  is the same picture. A field hour against the reporting origin ended 213 held
+  connections that way with the viewer never pausing once: 218 requests where
+  the design describes one, and against an origin that refuses requests, 218
+  chances to be refused. The wait now carries a deadline only while the consumer
+  is actually paused, read from the same `playIntentProvider` the segment
+  producer already gets, and that paused bound is 300 s rather than 5. Ten
+  minutes on the same device and source after the change: 6 requests, all from
+  the open phase, and the count stops growing once the file is open.
+- **The delivery-gap watchdog no longer counts a stretch that has no read
+  outstanding (#377).** A held connection waiting on a full window has nothing
+  in flight that could be late, so the watchdog stands aside; its clock kept
+  running through the wait anyway. Two consequences, one cause: the re-arm
+  interval collapses to its 20 ms floor once the gap outgrows the stall
+  timeout, so the watchdog re-armed at 50 Hz on the window lock for the length
+  of the park, and the read that the consumer's return issues inherited the
+  whole park as lateness, so the next tick ended a healthy connection and
+  re-requested at the frontier, booked in the log as a stall. The clock now
+  belongs to an outstanding read, restarted where the watchdog stands aside and
+  where the pull budget grants one.
+- **A session asked to hold its connection keeps that transport across the
+  reopens it makes itself (#377).** `LoadOptions.heldSourceConnection` reached
+  only the reader inside the pre-opened demuxer. The fallback open, the live
+  reopen and the VOD scrub restart each build from a profile that never carried
+  the flag, so any one of them silently put the rest of the session back on
+  ranged requests, against the one kind of origin the flag is turned on for.
+- **A pause the host asked for lands before the first roll (#440).** A session
+  paused before its rate had ever rolled kept reporting `state == .playing`,
+  which `PlaybackPhase.derive` reads as `.loading`, so a host drawing chrome on
+  the phase sat on a spinner over a black screen until the viewer pressed Play.
+  Returning from the background is exactly that shape: the reload autostarts,
+  the host pauses on the resumed frame, and AVPlayer's pre-pause
+  `.waitingToPlayAtSpecifiedRate` arrives after that pause and re-declares
+  `.playing`. The pre-roll gate that swallowed the correction exists for a good
+  reason, and the durable transport intent is what tells a pause the engine was
+  asked for apart from a mount that means to play.
+
+### Changed
+
+- The live-join wedge account carries the item's own `status` (#509). It is
+  otherwise published by a KVO observer that fires on a change, so an item that
+  never leaves `.unknown` produced no status line at all, in exactly the state
+  where the item is the question. The two values point opposite ways:
+  `.unknown` is AVPlayer never accepting the media, `.readyToPlay` is an
+  accepted item that places nothing.
+
+## [6.76.0] - 2026-09-09
+
+### Added
+
+- **Windows Media audio routes through the AudioBridge, which is what makes
+  native `.wmv` / `.asf` playable.** FFmpegBuild 3.1.0 adds the `asf` demuxer
+  and every WMA decoder (Standard, Pro, Lossless, Voice); without a matching
+  entry in `AudioCodecCompat` that build would be worse than the one before it,
+  because an id the table does not know maps to `.unsupported`, which does not
+  bridge, so the file would open and play its picture with no audio track at
+  all. No WMA flavour is fMP4-legal, so all five bridge, like MP2 and Blu-ray
+  LPCM. The software path never needed the entry: it opens its own
+  `AudioDecoder` and would have decoded WMA the moment the build carried it. It
+  is the native path and its HLS serving that the table gates. Verified with
+  `aetherctl` on real media: `wmv3` + `wmav2` plays through, WMA Pro 5.1 opens
+  at 48 kHz across six channels into CoreAudio, WMA Voice decodes at 8 kHz.
+
+### Changed
+
+- FFmpegBuild pinned to 3.1.0 (from 3.0.0). Same `n8.1.2` FFmpeg, plus the
+  `asf` demuxer and the WMA decoders, at 177 KB on `libavcodec` and 16 KB on
+  `libavformat` per arm64 slice.
+
 ## [6.75.0] - 2026-09-09
 
 ### Added

@@ -142,6 +142,20 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputePlaybackPhase() }
     }
 
+    /// Whether a `.paused` transport reading is this session's own pause, or the status its mount is
+    /// still carrying (AE#440 follow-up).
+    ///
+    /// AE#440 held the pre-roll `.paused` back: AVPlayer delivers it AFTER the autostart has written
+    /// `.playing`, so latching it published a millisecond of `.paused` on every native start. A host
+    /// that pauses a session before its rate ever rolled produces the same status with the opposite
+    /// meaning, and the roll gate alone swallowed that one too. The durable #122 intent tells them
+    /// apart: a pause the engine was asked for has already cleared it, a mount that means to play
+    /// has not.
+    nonisolated static func publishesTransportPause(hasTransportRolled: Bool,
+                                                    transportIntentIsPlaying: Bool) -> Bool {
+        hasTransportRolled || !transportIntentIsPlaying
+    }
+
     /// Reader source-fetch axis feeding `playbackPhase`. Updated off the demux thread via
     /// `setReaderNetworkPhase`. `didSet` keeps `playbackPhase` in sync (#85).
     private var readerStall: ReaderNetworkPhase = .flowing {

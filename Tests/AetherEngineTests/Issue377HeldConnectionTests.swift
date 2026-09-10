@@ -314,6 +314,15 @@ struct Issue377HeldReaderTests {
         return got
     }
 
+    /// Thread-safe because `playIntentProvider` is read on the held connection's pump thread.
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ value: Bool) { self.value = value }
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
+    }
+
     @Test("a held reader serves a long read on one request where the pushed reader needs several")
     func oneRequestForALongRead() async throws {
         let totalSize: Int64 = 256 * 1024 * 1024
@@ -345,26 +354,93 @@ struct Issue377HeldReaderTests {
                 "a held connection asked \(heldAsks.count) times for one continuous read: \(heldAsks)")
     }
 
-    @Test("a stalled consumer ends the held connection inside the idle budget and holds no flow")
-    func stalledConsumerEndsTheHeldConnection() async throws {
+    @Test("a PAUSED consumer ends the held connection inside its budget and holds no flow")
+    func pausedConsumerEndsTheHeldConnection() async throws {
         let totalSize: Int64 = 256 * 1024 * 1024
         let server = try #require(ThrottledOriginServer(totalSize: totalSize))
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
                                 heldConnection: true)
         defer { reader.markClosed(); reader.close() }
+        reader.playIntentProvider = { false }
+        reader.heldPausedBudgetSeconds = 3
         try reader.open()
 
-        // Nobody consumes: the paused-viewer shape. #310's worst episode came out of exactly this
-        // state, so the connection has to be gone rather than merely quiet.
+        // Nobody consumes AND the consumer says it is paused. #310's worst episode came out of
+        // exactly this state, so the connection has to be gone rather than merely quiet.
         try await Task.sleep(for: .seconds(8))
 
         #expect(!reader.hasLiveConnectionForTesting,
                 "a paused consumer must hold no flow, which is the #310 invariant 6.11.0 shipped")
         let diag = reader.windowDiagnostics
-        #expect(diag.parked, "the idle end must be recorded as backpressure so the refill owns it")
+        #expect(diag.parked, "the end must be recorded as backpressure so the refill owns it")
         #expect(dataRanges(server, totalSize: totalSize).count == 1,
                 "nothing drained, so nothing may have been re-requested")
+    }
+
+    @Test("a PLAYING consumer that has stopped drawing keeps the held connection")
+    func playingStalledConsumerKeepsTheHeldConnection() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { server.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                heldConnection: true)
+        defer { reader.markClosed(); reader.close() }
+        // The segment producer's shape: it fills its cache, parks while the muxer works, and draws
+        // again. Reading that as a stopped consumer is what cost a field hour 213 re-requests.
+        reader.playIntentProvider = { true }
+        reader.heldPausedBudgetSeconds = 3
+        try reader.open()
+
+        // Well past the budget a paused consumer would have spent.
+        try await Task.sleep(for: .seconds(8))
+        #expect(dataRanges(server, totalSize: totalSize).count == 1,
+                "the wait itself must not have re-requested: \(dataRanges(server, totalSize: totalSize))")
+
+        // Draw again. A connection that survived the wait serves this from the same request; one
+        // that was ended would refill at the frontier and the origin would see a second ask. That
+        // is the contract, and unlike a liveness flag it does not depend on when the check lands.
+        let more = 8 * 1024 * 1024
+        #expect(drain(reader, bytes: more) >= more, "the reader did not deliver after the wait")
+        let asks = dataRanges(server, totalSize: totalSize)
+        #expect(asks.count == 1,
+                "a parked producer is not a paused viewer; drawing again must not cost a request: \(asks)")
+    }
+
+    @Test("a parked stretch longer than the stall timeout is not a delivery gap")
+    func parkedPastTheStallTimeoutKeepsTheHeldConnection() async throws {
+        let totalSize: Int64 = 256 * 1024 * 1024
+        let server = try #require(ThrottledOriginServer(totalSize: totalSize))
+        defer { server.stop() }
+        // The field shape inside a test's budget: a producer that parks for longer than the
+        // delivery-gap watchdog's threshold. A 16 MB window is ~100 s of a 1.2 Mbps title, so the
+        // real 20 s is crossed by the regime this flag was asked for, not by an exotic one.
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                connStallTimeout: 2, heldConnection: true)
+        defer { reader.markClosed(); reader.close() }
+        reader.playIntentProvider = { true }
+        try reader.open()
+
+        try await Task.sleep(for: .seconds(5))
+        #expect(dataRanges(server, totalSize: totalSize).count == 1,
+                "the parked stretch itself asked for nothing: \(dataRanges(server, totalSize: totalSize))")
+        #expect(reader.hasLiveConnectionForTesting, "the park must not have ended the connection")
+
+        // The invariant, stated where a loopback can state it without a race: the watchdog judges an
+        // OUTSTANDING read, the park had none, so the park does not accumulate. Left accumulating it
+        // is handed to the read the drain below issues, and the next tick (20 ms away, because the
+        // remaining-gap re-arm collapses to its floor once the gap outgrows the timeout) ends a
+        // connection nothing is wrong with. Over a real link that race is the origin's round trip
+        // wide; on loopback the delivery wins it, which is why the count alone cannot say this.
+        let parkedGap = reader.deliveryGapSecondsForTesting
+        #expect(parkedGap < 3,
+                "a stretch with no read outstanding accumulated \(parkedGap)s of delivery gap, and the read that follows it is judged on that")
+
+        let more = 8 * 1024 * 1024
+        #expect(drain(reader, bytes: more) >= more, "the reader did not deliver after the parked stretch")
+        let asks = dataRanges(server, totalSize: totalSize)
+        #expect(asks.count == 1,
+                "a stretch with no read outstanding is not a gap; drawing again must not cost a request: \(asks)")
     }
 
     @Test("consumption after an idle end refills at the frontier without going backwards")
@@ -375,20 +451,55 @@ struct Issue377HeldReaderTests {
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
                                 heldConnection: true)
         defer { reader.markClosed(); reader.close() }
+        // A pause is what ends a held connection, so that is what this drives before resuming.
+        let playing = LockedFlag(false)
+        reader.playIntentProvider = { playing.get() }
+        reader.heldPausedBudgetSeconds = 3
         try reader.open()
 
-        try await Task.sleep(for: .seconds(8))   // past the idle budget
+        try await Task.sleep(for: .seconds(8))   // past the paused budget
         let afterIdle = dataRanges(server, totalSize: totalSize)
         #expect(afterIdle.count == 1)
 
+        playing.set(true)
         let target = 48 * 1024 * 1024
         #expect(drain(reader, bytes: target) >= target,
-                "the reader did not resume after the idle end")
+                "the reader did not resume after the pause ended")
 
         let asks = dataRanges(server, totalSize: totalSize)
         #expect(asks.count == 2,
                 "resuming should cost exactly one re-request at the frontier, got \(asks)")
         #expect(asks == asks.sorted(), "a refill went backwards past the frontier: \(asks)")
         #expect(asks[1] > 0, "the refill asked from byte 0 again instead of at the frontier")
+    }
+}
+
+/// The transport is decided at OPEN time (`loadIdentityFields` refuses to change it on a reload), so
+/// a session that opens again on its own has to carry it. It opens again more often than the flag's
+/// design suggests: a preopen that failed, a live reopen, and the VOD scrub restart that replaces a
+/// wedged demuxer. Each of those is a fresh AVIOReader, and one built without the flag is back on
+/// ranged requests against the origin the flag was turned on for, silently and for the rest of the
+/// session.
+@Suite("#377 the held transport survives the session's own reopens")
+struct Issue377SessionProfileTests {
+    private func engine(held: Bool) -> HLSVideoEngine {
+        HLSVideoEngine(url: URL(string: "file:///dev/null")!, dvModeAvailable: false,
+                       sequentialOrigin: false, heldSourceConnection: held)
+    }
+
+    @Test("a session asked to hold a connection opens every reopen of its own that way")
+    func reopensCarryTheHeldTransport() {
+        let session = engine(held: true)
+        #expect(session.openProfile.avioHeldConnection,
+                "the fallback open and the live reopen both use this profile")
+        #expect(session.restartReopenProfile.avioHeldConnection,
+                "the VOD scrub restart opens a replacement demuxer of its own")
+    }
+
+    @Test("a session that never asked for it opens none of them that way")
+    func reopensStayOnTheDefaultTransport() {
+        let session = engine(held: false)
+        #expect(!session.openProfile.avioHeldConnection)
+        #expect(!session.restartReopenProfile.avioHeldConnection)
     }
 }
