@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.78.0] - 2026-09-10
+
+### Added
+
+- **The legacy `.flv` chain plays whole, video and audio (FFmpegBuild 3.2.0).**
+  The `flv` demuxer always shipped, so a Flash file from after 2008 (H.264 +
+  AAC) already played; what was missing is the era's own codecs. In on the video
+  side: FLV1 / Sorenson Spark and the On2 family `vp6` / `vp6f` / `vp6a`. On the
+  audio side the whole tail, Nellymoser Asao, ADPCM-SWF, Speex and FLV's PCM
+  shapes (`pcm_s16be`, `pcm_u8`, G.711 A-law and mu-law), each routed through
+  `AudioBridge` by `AudioCodecCompat`. Both halves move together because they
+  fail differently: a missing video decoder ends the load with
+  `unsupportedCodec`, a missing audio decoder plays the film silently. `pcm_s16be`
+  and `pcm_u8` were already routed to the bridge and had no decoder behind them
+  until now. Flash Screen Video stays out, it needs zlib, which the build does
+  not link. Requested in the Sodalite Discord.
+
 ## [6.77.0] - 2026-09-10
 
 ### Fixed
