@@ -12,6 +12,48 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.80.0] - 2026-09-10
+
+### Fixed
+
+- **A live join whose source stops before it delivers one video packet had no
+  deadline at all, so the session sat at `readyToPlay` placing nothing until
+  AVPlayer gave up on its own (#446).** The no-cut watchdog's window is armed by
+  the first cut, which the producer stamps when the video gate opens, so a source
+  that declares video and never delivers a packet on that PID was never judged:
+  `evaluate` returned on its own nil window, once a second, for as long as the
+  session lasted, and nothing was logged or reported to the host. Measured against
+  an origin whose PMT advertises H.264 on a PID that never carries a packet, audio
+  arriving normally at 123 pkt/s: before, the session held `state=playing
+  phase=loading cur=0.00` in silence until AVPlayer failed the item itself at 38 s
+  with NSURLError -1008 / CoreMedia -12884 "resource unavailable", which is late,
+  wrong as a diagnosis, and terminal rather than recoverable. The window is now
+  armed when the live pump starts reading, and the two shapes stay apart:
+  `everProduced` says whether a window follows a cut or a join. A join is never
+  classified as a wedge, because a cutter that has not reached its first keyframe
+  reads exactly like one that cannot cut what it is given, and the wedge deadline
+  (10 s, measured on a mid-session SSAI pod) would retune a healthy channel with a
+  long GOP. So a join is judged on the 35 s starvation deadline at any read rate,
+  and neither hold applies to it. After the change the same origin exits at 35 s
+  naming the cause and the host gets a retune request; the retune line no longer
+  blames an SSAI ad pod for a session that never had a cutter to stall. Healthy
+  control on the same harness, link at roughly the content bitrate: seg-0 finalized
+  at t+2 s, 13 segments in 50 s, the new line never fires.
+
+### Added
+
+- **`aetherctl play --trust-any-certificate`, so the AE#495 origin relay has a
+  harness.** The relay stands up when the system refuses an origin's certificate
+  and a host has answered `EngineTLS.serverTrustEvaluator` for it, because
+  `AVURLAsset` asks no delegate and cannot be told about a private certificate.
+  Nothing in the CLI could answer that, so every run reached an origin the system
+  already trusts, which is the one case the relay is deliberately not used for.
+  Measured against a self-signed https origin serving an HLS master, the shape a
+  transcoding server hands out: without the flag the session ends classified ("The
+  system does not trust the origin's certificate"), with it the relay reads the
+  refusal (NSURLError -1202), routes the master through the loopback origin, and
+  the master plus all ten segments are served over that https connection.
+
 ## [6.79.0] - 2026-09-10
 
 ### Fixed
