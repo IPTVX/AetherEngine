@@ -754,17 +754,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// session froze, three campaigns running.
     private static let liveResidentSegmentCap = 180
 
-    static func qosName(_ c: qos_class_t) -> String {
-        switch c {
-        case QOS_CLASS_USER_INTERACTIVE: return "userInteractive"
-        case QOS_CLASS_USER_INITIATED: return "userInitiated"
-        case QOS_CLASS_DEFAULT: return "default"
-        case QOS_CLASS_UTILITY: return "utility"
-        case QOS_CLASS_BACKGROUND: return "background"
-        default: return "unspecified"
-        }
-    }
-
     /// AE#286: how much produced-but-unfetched content has to sit ahead of the consumer before the
     /// pump's work stops being latency-critical. `HLSLocalServer` answers segment requests from a
     /// `.userInitiated` work queue, and a cache miss parks that thread in `cache.fetch` until this pump
@@ -2553,8 +2542,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // Read the class back: a thread that was opted out of the QoS system silently keeps the old
         // one, and then the whole mechanism is a no-op that still looks configured.
         EngineLog.emit(
-            "[HLSSegmentProducer] pump qos -> \(Self.qosName(desired)) "
-            + "(now=\(Self.qosName(qos_class_self())) epochHead=\(pumpEpochHighestStored) "
+            "[HLSSegmentProducer] pump qos -> \(QoSClass.name(desired)) "
+            + "(now=\(QoSClass.name(qos_class_self())) epochHead=\(pumpEpochHighestStored) "
             + "target=\(target) lead=\(lead))",
             category: .session
         )
@@ -2779,7 +2768,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         pumpEpochHighestStored = Int.min
         pthread_set_qos_class_self_np(pumpQoSCurrent, 0)
         EngineLog.emit(
-            "[HLSSegmentProducer] pump thread qos=\(Self.qosName(qos_class_self()))",
+            "[HLSSegmentProducer] pump thread qos=\(QoSClass.name(qos_class_self()))",
             category: .session
         )
         if restartTargetVideoPts > Int64.min {

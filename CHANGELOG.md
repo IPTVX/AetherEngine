@@ -10,7 +10,38 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The software VOD read-ahead could not drain the link it was given, because
+  its producer sat in the efficiency QoS class (#519).** The compressed packet
+  producer ran on a `.utility` dispatch queue while the demux consumer that
+  waits on it runs `.userInitiated`, and an `NSCondition` donates no priority to
+  the thread it is waiting for, so the dependency was invisible to the
+  scheduler. Thread Performance Checker reports it as a priority inversion; what
+  it costs is throughput, and the cost needs no contention for cycles. Measured
+  on an idle 8-core M1 with the consumer's decode cost made negligible (360p
+  content, seven cores free, the process itself under 30 % of one core), the
+  efficiency-class producer pulled **147 MB** of an 80 Mbit/s source in 60 s
+  where a responsive one pulled **438 MB**. Lifting only the thread's
+  disk-I/O policy, on the same efficiency class, restored it to **528 MB**,
+  which names the cause: the class throttles the spool writes this producer
+  makes for every packet. On a 1080p 8.2 Mbit/s source capped at 10 Mbit/s the
+  same arms pulled 60.7 MB against 77.5 MB with the consumer blocked **60.2 s
+  against 27.3 s** of a 61 s session, and with the box saturated by eight
+  software decodes the demoted arm fell to 35.4 MB. A healthy link is
+  unaffected: both arms fill and hold the 40 s reserve, because 8.2 Mbit/s fits
+  under the throttled ceiling of about 19 Mbit/s on this machine. The producer
+  now owns its thread and moves its own class: responsive at start, after every
+  seek, while any consumer is parked in a read, and below a quarter of the
+  forward window; elective again above half of it. The two depths differ so a
+  source sitting on one threshold does not retune once per packet. Raising the
+  class permanently would have worked too and was measured worse: over a 100 s
+  steady state the adaptive producer keeps **2165 ms** of efficiency-class CPU
+  against 2145 ms for the demoted one and 1 ms for a permanently responsive
+  one, at identical total CPU. Consumer starvation is now a diagnostic line of
+  its own (`consumer starved: waits= blocked= reservoir= qos=`), rate-limited to
+  one a second, so "the source cannot keep up" is readable rather than inferred.
+  Reported by Roman Tatarenkov.
 
 ## [6.78.0] - 2026-09-10
 

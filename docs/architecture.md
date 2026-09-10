@@ -182,6 +182,29 @@ and `LiveTelemetry.cachedBytes` describe compressed coverage/residency;
 `displayCushionSeconds` still describes the small decoded queue. Native HLS
 `residentRanges` and live DVR are not repurposed.
 
+The producer owns a thread rather than a dispatch queue, because a queue's QoS
+is fixed at creation while this producer's urgency changes inside one
+long-running loop. It starts latency-critical, drops to the efficiency class
+once the reserve reaches half the forward window, and returns to
+latency-critical at a quarter of it, the instant a consumer parks in a read, or
+whenever the reserve cannot be expressed in seconds at all, which is the state a
+cold start and a seek landing are both in. The two depths differ so a source
+sitting on one threshold does not retune once per packet. A permanently demoted
+producer is an inversion the scheduler cannot see, since the consumer waits on
+an `NSCondition` and a condition donates no priority to the thread it waits for,
+and it was measured costing throughput rather than only fairness: on an idle
+8-core M1 with the consumer's decode cost made negligible, the efficiency-class
+producer drained 147 MB of an 80 Mbit/s source in 60 s where the responsive one
+drained 438 MB, with seven cores free the whole time. Lifting only the thread's
+disk-I/O policy on the same class restored it to 528 MB, which names the cause:
+the class throttles the spool writes the producer makes for every packet, so the
+effect needs no contention for cycles. The adaptive choice keeps what the
+demotion was for; over a 100 s steady state it retains 2165 ms of
+efficiency-class CPU against 2145 ms for a permanently demoted producer and 1 ms
+for a permanently responsive one, at identical total CPU. Consumer starvation is
+reported as its own rate-limited line, so a source that cannot keep up is
+readable instead of inferred from a stalled clock.
+
 The CI packet-cache step runs the standalone coverage, VFR successor, disk FIFO,
 read-ahead concurrency, host admission and AVPacket-envelope regressions. These
 use generated numeric data and temporary records, not private video fixtures.
