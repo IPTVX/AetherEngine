@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.77.0] - 2026-09-10
+
 ### Fixed
 
 - **A live HLS join now takes the backlog the origin is already holding, so the
