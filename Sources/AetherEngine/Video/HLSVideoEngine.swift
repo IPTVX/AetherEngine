@@ -1706,8 +1706,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             } else {
+                // Not video-only, and the line used to say so. The bridge cascade below asks for a
+                // decoder by id, not for a routing-table entry, so a codec the table does not name
+                // still gets sound as long as the FFmpeg build carries its decoder (measured
+                // 2026-09-10 on Nellymoser-in-FLV before its table entry existed: this line, then a
+                // NELLYMOSER -> FLAC bridge and a session with audio). What the missing entry costs
+                // is the stream-copy decision, which is why the next thing that happens is a bridge.
+                // The genuinely silent case is one line further down: no decoder in the build at
+                // all, which the cascade reports as `falling back to SILENT video-only`.
                 EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec id=\(codecID.rawValue) unsupported, video-only",
+                    "[HLSVideoEngine] audio: codec id=\(codecID.rawValue) is not in the routing table, "
+                    + "no stream-copy decision to make; the bridge cascade decides whether it plays",
                     category: .session
                 )
             }
