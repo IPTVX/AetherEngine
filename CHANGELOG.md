@@ -12,6 +12,32 @@ the public-API contract.
 
 ### Fixed
 
+- **A live gap the close deadline was built to absorb still closed the window
+  and swapped the AVPlayer item, and on an EAC3+JOC passthrough track every swap
+  is an audible Atmos drop-and-relock (#520).** AE#446 round 7 lifted the
+  irreversible close off the cheap `1.5 x TARGETDURATION` threshold and gave it a
+  `3 x TD` deadline, but wrote the wait's second bound, the content in front of
+  the consumer, as a CONSTANT `2 x TD` of runway. A viewer at the live edge holds
+  the holdback, `3 x TD`, and is not asked about any of this until the source is
+  late at `1.5 x TD`, by which point half of it is spent: it stands at `1.5 x TD`,
+  under the `2 x TD` floor, at the first moment the question can be asked. So the
+  floor decided every ordinary live session, the new deadline decided none of
+  them, and the effective close threshold stayed the `1.5 x TD` that round set out
+  to remove. Round 7 looked correct because its reporter had `7 x TD` of runway.
+  The constant's own premise was measured wrong too: it was sized on "several
+  polls per target duration", and a client whose blocking-reload advert has been
+  withdrawn, which is the state every close candidate is in, polls once per
+  **0.81 x TD** (31, 35 and 38 polls at a mean gap of 4.83, 4.85 and 4.86 s
+  against TARGETDURATION 6). The runway is now compared against the clock instead
+  of against a number: it ends the wait only when it will not carry it to the
+  deadline. Measured on the harness, same command line in both arms, a 12 s gap at
+  TARGETDURATION 6 with 12.0 s of runway: before, ENDLIST plus an item swap;
+  after, absorbed with no ENDLIST and no swap, at an identical playhead (89.40 s
+  against 89.60 s of advance, largest step 1.10 s in both). A real 30 s outage
+  still closes and still holds its position in both arms, and suppressing the
+  close entirely there loses it (`POSITION LOST`, 4 segments skipped), so the
+  bound is not removable, only mis-sized.
+
 - **The software VOD read-ahead could not drain the link it was given, because
   its producer sat in the efficiency QoS class (#519).** The compressed packet
   producer ran on a `.utility` dispatch queue while the demux consumer that

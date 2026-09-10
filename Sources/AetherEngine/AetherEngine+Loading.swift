@@ -1591,7 +1591,11 @@ extension AetherEngine {
                   contract: .init(
                       isLive: isLive,
                       // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
-                      liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately))
+                      liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately,
+                      // AE#520: the session knows whether the bitstream it stream-copied carries JOC;
+                      // the HDMI route cannot, because Atmos passthrough and a stereo LPCM route
+                      // report the same two channels.
+                      audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true))
         forceNativeLegibleDeselectedUntilHostSelects()
     }
 
