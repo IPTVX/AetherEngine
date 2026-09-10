@@ -19,7 +19,7 @@ struct AVFoundationOffMainTests {
         #expect(wasOffMain)
     }
 
-    @Test("a blocked body must not block the main actor", .timeLimit(.minutes(2)))
+    @Test("a blocked body must not block the main actor", .timeLimit(.minutes(3)))
     func blockedBodyKeepsMainActorResponsive() async {
         let queue = DispatchQueue(label: "test.avfread.stall")
         let release = DispatchSemaphore(value: 0)

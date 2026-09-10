@@ -9,7 +9,7 @@ import AVFoundation
 /// a process kill. The reads now run as one coalesced batch on a dedicated background queue;
 /// these tests pin the off-main behavior via an injected read in place of the AVFoundation batch.
 @MainActor
-@Suite(.timeLimit(.minutes(2)))
+@Suite(.timeLimit(.minutes(3)))
 struct LiveTelemetrySamplerTests {
 
     private func makeNativeEngine() throws -> AetherEngine {

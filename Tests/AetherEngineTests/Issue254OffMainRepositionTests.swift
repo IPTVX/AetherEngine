@@ -35,7 +35,7 @@ struct Issue254OffMainRepositionTests {
     }
 
     @MainActor
-    @Test("a reposition waiting on the demuxer leaves the main actor free", .timeLimit(.minutes(2)))
+    @Test("a reposition waiting on the demuxer leaves the main actor free", .timeLimit(.minutes(3)))
     func blockedRepositionKeepsMainActorLive() async {
         let demuxer = Demuxer()
         let queue = DispatchQueue(label: "test.issue254.blocked")
@@ -47,7 +47,11 @@ struct Issue254OffMainRepositionTests {
         // opposite, so the cap is the discriminator however generous it is (CI starved the main
         // actor's 100 ms of hops past a 90 s cap twice on 2026-09-09/10). The regression this guards
         // is a blocked main actor, and a blocked main actor never reaches `release.signal()`, so its
-        // honest report is the trait's time limit. The defer covers an early exit.
+        // honest report is the trait's time limit. Three minutes rather than the repo's usual two:
+        // the suite's own measurement puts a limit under two minutes at a coin flip (612 of 2554
+        // tests reported over 60 s in a 93 s run), and this is one of the tests that MEASURES that
+        // starvation, so it is the likeliest to be caught by it. A permanent hang is caught by any
+        // finite limit; a longer one only delays the report. The defer covers an early exit.
         defer { release.signal() }
         queue.async { release.wait() }
 
