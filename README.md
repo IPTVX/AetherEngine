@@ -57,9 +57,9 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Containers | MKV, MP4, WebM, MPEG-TS, AVI, ASF / WMV, OGG, FLV |
 | Disc | DVD-Video and Blu-ray ISO (decrypted): selectable titles and chapters, demuxed through the normal path |
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 where HW AV1 exists |
-| Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, QuickTime RLE and anything else the FFmpeg build carries a decoder for (software is the default route; only HEVC, H.264 and HW-decodable AV1 go native), H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext where VideoToolbox has no HW decoder (Intel Macs, older chips), interlaced H.264 (AVPlayer does not deinterlace; on VOD the declared field order is verified against decoded frames, so progressive-in-interlaced-carriage keeps hardware decode); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
+| Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, QuickTime RLE, the Flash tail (Sorenson Spark, On2 VP6) and anything else the FFmpeg build carries a decoder for (software is the default route; only HEVC, H.264 and HW-decodable AV1 go native), H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext where VideoToolbox has no HW decoder (Intel Macs, older chips), interlaced H.264 (AVPlayer does not deinterlace; on VOD the declared field order is verified against decoded frames, so progressive-in-interlaced-carriage keeps hardware decode); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG |
-| Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / LPCM (incl. Blu-ray) / WMA (Standard, Pro, Lossless, Voice) bridge to EAC3 5.1 (default) or lossless FLAC |
+| Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / LPCM (incl. Blu-ray, G.711) / WMA (Standard, Pro, Lossless, Voice) / Nellymoser / ADPCM-SWF / Speex bridge to EAC3 5.1 (default) or lossless FLAC |
 | Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix). No container reliably declares JOC pre-decode, so an honest `TrackInfo.isAtmos` needs a bounded decode: `AetherEngine.probeDetectingAtmos(url:/source:)` answers for a details screen without starting playback, and `LoadOptions.confirmAtmos` has the running session confirm its own tracks in the background and republish `audioTracks`. Both are opt-in and neither sits on the playback-start path |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
@@ -339,7 +339,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.77.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.78.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -579,10 +579,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.77.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.78.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.77.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "6.78.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
