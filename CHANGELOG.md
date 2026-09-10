@@ -24,10 +24,24 @@ _Nothing yet._
   shapes (`pcm_s16be`, `pcm_u8`, G.711 A-law and mu-law), each routed through
   `AudioBridge` by `AudioCodecCompat`. Both halves move together because they
   fail differently: a missing video decoder ends the load with
-  `unsupportedCodec`, a missing audio decoder plays the film silently. `pcm_s16be`
-  and `pcm_u8` were already routed to the bridge and had no decoder behind them
-  until now. Flash Screen Video stays out, it needs zlib, which the build does
+  `unsupportedCodec`, while a missing audio decoder plays the film silently
+  (`AudioBridge` cannot open the source and the cascade ends in
+  `droppedNoPipeline`). `pcm_s16be` and `pcm_u8` were already routed to the
+  bridge and had no decoder behind them until now. Flash Screen Video stays out, it needs zlib, which the build does
   not link. Requested in the Sodalite Discord.
+
+### Fixed
+
+- **The "unsupported, video-only" audio line said the opposite of what happens.**
+  A codec `AudioCodecCompat` does not name has been reaching the bridge cascade
+  since that cascade was rewired in May 2026: it asks libavcodec for a decoder by
+  id and never reads the routing table, so such a source plays with sound
+  whenever the FFmpeg build carries its decoder. Measured on Nellymoser-in-FLV
+  before its table entry existed: this line, and then a NELLYMOSER to FLAC bridge
+  with a full audio track. The line now says what the table entry actually
+  decides, which is the stream-copy question, and leaves the verdict to the
+  cascade, which already reports the one real cause of silence, an absent
+  decoder, as `falling back to SILENT video-only`.
 
 ## [6.77.0] - 2026-09-10
 

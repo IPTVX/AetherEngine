@@ -14,14 +14,19 @@ extension HLSVideoEngine {
         case aacLatm
         /// Every Windows Media audio flavour (Standard, Pro, Lossless, Voice), which arrives with the
         /// native .wmv / .asf support of FFmpegBuild 3.1.0. None is fMP4-legal, so all bridge. One case
-        /// rather than five: nothing downstream distinguishes them, and a missing entry is not an error
-        /// but a silent film, since `.unsupported` does not bridge and the session goes video-only.
+        /// rather than five: nothing downstream distinguishes them.
         case wma
         /// The Flash era's own audio, which arrives with the native `.flv` decoders of FFmpegBuild
         /// 3.2.0. Three cases rather than one family, unlike `wma` above: these are unrelated codecs
         /// that only share a container, and the routing log prints this name, so an operator reading
         /// `codec=nellymoser` learns what the file carries. None is fMP4-legal, so all three bridge.
         case nellymoser, adpcmSwf, speex
+        /// What this case costs is the STREAM-COPY decision, not the audio. Since the bridge cascade
+        /// was rewired (2026-05-13) it asks libavcodec for a decoder by id and never consults this
+        /// table, so a codec that lands here still plays if the build carries its decoder; measured
+        /// 2026-09-10 on Nellymoser-in-FLV before its entry existed. Silence has one cause and it is
+        /// the FFmpeg build: no decoder, `AudioBridge` init fails, and the cascade ends in
+        /// `droppedNoPipeline`. That is why a format chain ships whole, decoders and all.
         case unsupported
 
         static func from(_ codecID: AVCodecID) -> AudioCodecCompat {
