@@ -375,6 +375,10 @@ final class NativeAVPlayerHost {
         var armIngestFallback: Bool = false
         /// #334: the ceiling on silence for a path with no other readiness watchdog.
         var readinessDeadline: Double?
+        /// AE#520: this session stream-copies an EAC3 bitstream that carries JOC. HDMI passthrough
+        /// then tunnels it through a 2-channel MAT carrier, so the route's channel count is not a
+        /// statement about the audio and the surround-downmix warning below must not read it as one.
+        var audioIsAtmosStreamCopy: Bool = false
     }
 
     /// AE#446 round 5: a fresh item is about to attach, invoked before anything can fetch a playlist
@@ -676,7 +680,8 @@ final class NativeAVPlayerHost {
                         guard let self = self, let item = self.playerItem else { return }
                         Self.dumpAudioRoute(sid: sid, phase: "settled")
                         await Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
-                        await Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                        await Self.warnIfEAC3SurroundOnStereoRoute(
+                            item, sid: sid, isAtmosStreamCopy: contract.audioIsAtmosStreamCopy)
                         // #168: the video track can be absent from item.tracks at readyToPlay for HLS;
                         // re-read once playing so the remote-HLS badge settles on the real dynamic range.
                         await self.publishDetectedVideoFormat(from: item)
@@ -2392,9 +2397,21 @@ final class NativeAVPlayerHost {
         #endif
     }
 
-    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Atmos excluded (ch=2 MAT carrier is correct for Atmos passthrough). Cause: Sonos Arc reports ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline bug (dec3 bitstream is identical across runs).
-    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int) async {
+    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Cause: Sonos Arc reports
+    /// ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline
+    /// bug (dec3 bitstream is identical across runs).
+    ///
+    /// AE#520: Atmos is excluded, and until this the exclusion existed only in the docstring and in
+    /// the warning's own closing sentence. Every EAC3+JOC session matches the condition by
+    /// construction, because a 6-channel `ec-3` track tunnelling through a 2-channel MAT carrier is
+    /// what correct Atmos passthrough looks like, so the line fired on exactly the sessions it then
+    /// told the reader to ignore it for. The reporter had to reason it away himself while chasing a
+    /// real defect. The route cannot answer this (a MAT carrier and a stereo LPCM route both report
+    /// two channels); the session can, and now says so through the contract.
+    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int,
+                                                        isAtmosStreamCopy: Bool) async {
         #if os(iOS) || os(tvOS)
+        guard !isAtmosStreamCopy else { return }
         var trackChannels: Int = 0
         var codecID: String = ""
         for itemTrack in item.tracks {

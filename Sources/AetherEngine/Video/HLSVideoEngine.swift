@@ -450,6 +450,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// second is a reason for a fallback ladder to demote. Set at each of the cascade's three exits.
     public internal(set) var audioDelivery: AudioDelivery = .none
 
+    /// AE#520: the stream-copied audio bitstream carries JOC, so this session's `ec-3` track is
+    /// Atmos and reaches the receiver as a 2-channel MAT carrier. A host that reads a channel count
+    /// off the HDMI route has to know that, or it reads the carrier as a downmix.
+    public internal(set) var audioIsAtmosStreamCopy = false
+
     /// Producer's `videoShiftPts` in seconds, updated on every gate open. AVPlayer clock =
     /// `source_pts - playlistShiftSeconds`. Lock-guarded: written on pump thread, read on others.
     public var playlistShiftSeconds: Double {
@@ -1698,6 +1703,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // The only EAC3 case that can't stream-copy is EAC3-from-MKV without dec3 extradata;
                 // `probeWriteHeader` in buildProducerWithAudioCascade catches and bridges that.
                 let isJOC = compat == .eac3 && acp.profile == 30
+                audioIsAtmosStreamCopy = isJOC
                 audioHLSCodecs = compat.hlsCodecsString
                 EngineLog.emit(
                     "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(audioHLSCodecs ?? "?")` "
