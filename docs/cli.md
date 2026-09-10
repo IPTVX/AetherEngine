@@ -85,6 +85,7 @@ swift run aetherctl play --host-calls reloadlive,play,extractor,setrate <url>   
 swift run aetherctl play --live --dvr-window 1800 --audio-stats <url>           # decoded-PCM continuity + per-second audio lead
 swift run aetherctl play --live --native-hls <master.m3u8>      # nativeRemoteHLS bypass (carriage watchdog + #293 probe)
 swift run aetherctl play --sidecar de=/tmp/de.srt --subs de <master.m3u8>   # declare a sidecar at load (#316)
+swift run aetherctl play --native-hls --trust-any-certificate <https master.m3u8>  # the AE#495 origin relay
 ```
 
 `--sidecar <lang>=<path-or-url>[,<lang>=<path>...]` fills `LoadOptions.externalSubtitles`, the load-time
@@ -125,6 +126,15 @@ here to drive the engine end of a device A/B, not to prove anything from a Mac. 
 numbers.
 
 `--header "Name: Value"` (repeatable) fills `LoadOptions.httpHeaders` and, on `--live-ingest`, the reader's own fetches. Origins that enforce a per-request `User-Agent` / `Referer` / `Authorization` (tokenized IPTV, STB profiles) could not be driven from the CLI at all before AE#363; pair it with `hlsfixture --require-header` below to have both ends of the contract in one run.
+
+`--trust-any-certificate` answers `EngineTLS.serverTrustEvaluator` for every origin, which is what a host
+does for a media server behind a self-signed or private-CA certificate (AE#495). It is the only way to reach
+the loopback ORIGIN RELAY from the CLI: the relay stands up when the system refuses the origin's certificate
+and a host has answered for it, because `AVURLAsset` asks no delegate and cannot be told about that
+certificate. Every other run here reaches an origin the system already trusts, which is the one case the
+relay is deliberately not used for. Serve an HLS master over https with a self-signed certificate and the two
+arms read as `The system does not trust the origin's certificate` without the flag, and
+`AE#495: routing <host> through the relay so the handshake runs where the evaluator is asked` with it.
 
 `--native-hls` sets `LoadOptions.nativeRemoteHLS`, the path a host uses for a live channel AVPlayer can play itself. It is the only way to exercise the #168 carriage watchdog, the #293 carriage probe and the AE#363 origin-refusal reroute from the CLI (`hlslive` loads the ingest reader directly and never mounts natively). Pair it with `--live`; without that the m3u8 takes the raw live path, which since AE#363 routes it onto the ingest instead of mounting AVPlayer at all.
 

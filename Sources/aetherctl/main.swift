@@ -567,6 +567,12 @@ if first == "play" {
     // AE#293: the nativeRemoteHLS bypass, the path the #168 carriage watchdog and the carriage probe
     // live on. Pair with --live; without it the m3u8 goes to the raw live path, which rejects it.
     let nativeHLS = takeFlag("--native-hls", from: &rest)
+    // AE#495: stand in for a host that has answered `EngineTLS.serverTrustEvaluator`, which is what
+    // decides whether a remote https master is relayed through the loopback origin instead of being
+    // handed to AVPlayer (which asks no delegate and cannot be told about a private certificate).
+    // Without it the relay had no harness at all: every run here reaches an origin the system
+    // already trusts, which is the one case the relay is deliberately not used for.
+    let trustAnyCertificate = takeFlag("--trust-any-certificate", from: &rest)
     let liveIngest = takeFlag("--live-ingest", from: &rest)
     // AE#374: the join profile a host ships, against an origin of its own rather than the built-in
     // fixture `live` carries. fastZap plus an external HLS origin is the shape a downstream player
@@ -780,6 +786,11 @@ if first == "play" {
         print("")
         printUsage()
         exit(64)
+    }
+    if trustAnyCertificate {
+        // The blunt answer the engine documents, which is the one a harness wants: every origin.
+        EngineTLS.serverTrustEvaluator = { _ in true }
+        print("[aetherctl] AE#495: accepting any server certificate for this run")
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,
