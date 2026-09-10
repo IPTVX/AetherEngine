@@ -610,14 +610,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// playing, so the source delivering again at +76 s was never seen and the session held its last
     /// frame for the rest of the run. Bounded by the same hold budget, so a consumer that stops
     /// fetching with runway still listed cannot keep a dead source open for the whole session.
+    /// AE#446 round 8: `hasEverProduced` is false while the producer has not cut anything at all,
+    /// which is the window a JOIN is judged on rather than an outage. It decides one thing: a join
+    /// is never classified as a wedge. The wedge reading is "the cutter is being fed and cannot
+    /// cut", and before the first cut there is no evidence for it, because a cutter that has not
+    /// reached its first keyframe reads exactly like one that cannot cut what it is given. Its
+    /// deadline is 10 s, measured on a mid-session SSAI pod, and applying it to a join would retune
+    /// a healthy channel with a long GOP. So a join waits out the 35 s starvation deadline, at any
+    /// read rate, and neither hold applies to it: the #177 hold defers to video PTS that is still
+    /// advancing, and the round-3 hold to a closed window still feeding its consumer, and a join
+    /// that has cut nothing is delivering to nobody either way.
     static func noCutStallAction(
         stalledFor: TimeInterval,
         readRate: Double,
         videoPtsAdvanceSeconds: Double,
         consecutiveHolds: Int,
-        servingOutageRunway: Bool = false
+        servingOutageRunway: Bool = false,
+        hasEverProduced: Bool = true
     ) -> NoCutStallAction {
-        let isWedge = readRate >= liveWedgeProgressRateThreshold
+        let isWedge = hasEverProduced && readRate >= liveWedgeProgressRateThreshold
+        guard hasEverProduced else {
+            return stalledFor > liveSourceStarvationTimeoutSeconds ? .exitForRetune : .keepReading
+        }
         let timeout = isWedge ? liveSegmentStallTimeoutSeconds : liveSourceStarvationTimeoutSeconds
         guard stalledFor > timeout else { return .keepReading }
         if isWedge,
@@ -2689,7 +2703,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// its own plan and has no live edge to fall behind.
     private func startNoCutWatchdog() {
         let watchdog = NoCutStallWatchdog(videoTimeBaseSeconds: sourceVideoTbSeconds)
-        if let already = lastLiveSegmentFinalizeAt { watchdog.noteFinalize(at: already) }
+        // AE#446 round 8: the window used to begin at the first cut, which is stamped when the video
+        // gate opens. A source that stops before it delivers one video packet therefore had no
+        // deadline at all: nothing to time out, nothing logged, the host never told. Arm the window
+        // here, so "the pump has been reading and nothing was ever cut" is judged like any other
+        // starved source.
+        if let already = lastLiveSegmentFinalizeAt {
+            watchdog.noteFinalize(at: already)
+        } else {
+            watchdog.armForJoin(at: Date())
+        }
         noCutWatchdog = watchdog
         let timer = DispatchSource.makeTimerSource(queue: noCutWatchdogQueue)
         timer.schedule(deadline: .now() + Self.noCutWatchdogTickSeconds,
@@ -2734,11 +2757,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         case .exitForRetune(let w):
             EngineLog.emit(
-                "[HLSSegmentProducer] no-cut stall: no segment finalized for "
+                (w.everProduced
+                 ? "[HLSSegmentProducer] no-cut stall: no segment finalized for "
+                 : "[HLSSegmentProducer] #446 the join never cut anything: nothing produced in ")
                 + "\(Int(w.stalledFor))s (packetsRead=\(w.packetsRead), "
                 + "sinceFinalize=\(w.progress), "
                 + "rate=\(String(format: "%.1f", w.readRate))pkt/s, "
-                + "\(w.isWedge ? "cutter wedge" : "source starvation")); "
+                + "\(w.everProduced ? (w.isWedge ? "cutter wedge" : "source starvation") : "the video gate never opened, so nothing was ever cut to serve")); "
                 + "window video=\(w.videoPackets) key=\(w.videoKeyframes) "
                 + "audio=\(w.audioPackets) foreign=\(w.foreignPackets)"
                 + (w.synthesizedVideoPackets > 0
