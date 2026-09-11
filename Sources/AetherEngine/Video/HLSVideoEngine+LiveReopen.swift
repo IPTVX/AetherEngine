@@ -315,8 +315,15 @@ extension HLSVideoEngine {
             return
         case .segmentStall:
             // SSAI ad pod the cutter can't cut through; URL reopen would re-enter it. Delegate to host for server-muxed fallback.
+            //
+            // AE#446 round 8: unless the gate never opened, in which case there was no cutter to
+            // stall and no pod to blame. Same delegation, but the line has to say which of the two
+            // it saw, because the two send a reader looking in different places.
             EngineLog.emit(
-                "[HLSVideoEngine] live segment cutter stalled (likely SSAI ad pod); "
+                (prod.videoGateOpened
+                 ? "[HLSVideoEngine] live segment cutter stalled (likely SSAI ad pod); "
+                 : "[HLSVideoEngine] live join produced nothing at all (no video packet ever "
+                   + "reached the cutter, so the source is not delivering the video it declares); ")
                 + "requesting host retune to the server route",
                 category: .session
             )
