@@ -10,11 +10,15 @@ import AetherEngine
 /// the segment carries no usable IRAP to start from, i.e. it is not independently decodable, which is
 /// exactly what AVPlayer hits on a fresh decode at a mid-stream open-GOP boundary (#92).
 func runSegVerify(url: URL, from: Int, count: Int, dvModeAvailable: Bool,
-                  forceDVWithoutDisplay: Bool = false, dumpDir: String? = nil) -> Int32 {
+                  forceDVWithoutDisplay: Bool = false,
+                  dolbyVisionHandling: DolbyVisionHandling = .automatic,
+                  dumpDir: String? = nil) -> Int32 {
     setvbuf(stdout, nil, _IONBF, 0)   // unbuffered: progressive output survives a long-running run
     print("segverify: starting engine for \(url.absoluteString)")
     let engine = HLSVideoEngine(url: url, dvModeAvailable: dvModeAvailable,
-                                forceDolbyVisionOnNonDVDisplay: forceDVWithoutDisplay)
+                                forceDolbyVisionOnNonDVDisplay: forceDVWithoutDisplay,
+                                dolbyVisionHandling: dolbyVisionHandling,
+                                dolbyVisionRPUProfile: DolbyVisionRecordAudit.rpuCorrection(url: url))
     let playbackURL: URL
     do {
         playbackURL = try engine.start()

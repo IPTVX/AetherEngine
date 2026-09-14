@@ -19,6 +19,10 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     let maxLedgerDriftAbs = UncheckedBox<Double>(0)
     let ledgerCount = UncheckedBox<Int>(0)
     let parkCount = UncheckedBox<Int>(0)
+    // AE#528: a park whose PARK line says stuck=0s is backpressure behind a consumer that is still
+    // fetching (a viewer scrubbing through resident content), and the breaker deliberately does not
+    // fire there. Counted apart so the verdict cannot read a healthy park as an unrecovered wedge.
+    let liveConsumerParkCount = UncheckedBox<Int>(0)
     // #65 fix signals: did the VOD wedge breaker fire and recover (Piece A producer re-anchor + Piece B
     // engine seek-deadline clock reconcile)? A wedge that is BROKEN + re-anchored is the fix engaging.
     let wedgeBrokenCount = UncheckedBox<Int>(0)
@@ -67,7 +71,10 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
             }
         }
         // "[HLSSegmentProducer] #65 backpressure PARK ...". Count abnormal parks (VOD wedge signature).
-        if line.contains("#65 backpressure PARK") { parkCount.value += 1 }
+        if line.contains("#65 backpressure PARK") {
+            parkCount.value += 1
+            if line.contains("stuck=0s") { liveConsumerParkCount.value += 1 }
+        }
         // Fix engaging: the wedge breaker exited the pump, the host re-anchored, and/or the seek deadline reconciled.
         if line.contains("#65 backpressure WEDGE BROKEN") { wedgeBrokenCount.value += 1 }
         if line.contains("#65 backpressure wedge: re-anchoring") { reanchorCount.value += 1 }
@@ -281,7 +288,8 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
                  distinctPub.count))
     print("  clockLead settle = \(String(format: "%.2f", settleClockLead))s  (headless ~0 by design; #65 is presented-vs-clock, invisible to ct-src)")
     print("  ledger segments opened = \(ledgerCount.value)  maxContentDrift = \(String(format: "%.3f", maxLedgerDriftAbs.value))s  (the POSITIVE Root-B signal)")
-    print("  abnormal backpressure parks (VOD wedge signature) = \(parkCount.value)")
+    print("  abnormal backpressure parks (VOD wedge signature) = \(parkCount.value)"
+          + "  (of those, \(liveConsumerParkCount.value) with the consumer still fetching, AE#528)")
     print("  #65 FIX signals: wedge breaks=\(wedgeBrokenCount.value)  producer re-anchors=\(reanchorCount.value)  seek-deadline reconciles=\(seekReconcileCount.value)")
     let fixEngaged = wedgeBrokenCount.value > 0 || reanchorCount.value > 0 || seekReconcileCount.value > 0
     if fixEngaged {
@@ -302,6 +310,10 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
         print("  >> ROOT A (cross-epoch shift divergence): the producer published MORE THAN ONE shift across")
         print("     the burst. Buffered bytes from a superseded epoch fold with the latest scalar -> picture")
         print("     leads the clock. The live seam-history port is the fix.")
+    } else if parkCount.value > 0, parkCount.value == liveConsumerParkCount.value, !fixEngaged {
+        print("  >> PARKED BEHIND A LIVE CONSUMER (not a wedge): \(parkCount.value) park(s), every one of them")
+        print("     logged stuck=0s, so the consumer kept declaring new fetch targets the whole time. The")
+        print("     breaker staying quiet here is AE#528 working; a wedge is a park whose stuck= climbs.")
     } else if parkCount.value > 0 {
         if fixEngaged {
             print("  >> PRODUCER WEDGE DETECTED AND BROKEN: \(parkCount.value) abnormal park(s) but the breaker fired")

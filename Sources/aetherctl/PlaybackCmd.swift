@@ -42,14 +42,18 @@ struct LoadOptionCorrectionRequest {
 }
 
 /// The corrections the harness can drive. Deliberately a short list of levers whose effect is
-/// visible from a CLI run, plus `isLive`, which exists to drive the refusal path: a load-identity
-/// field has to be observably refused, not observably ignored.
+/// visible from a CLI run, plus two that exist to drive the two ways a correction can NOT happen:
+/// `isLive`, a load-identity field, which has to be observably refused rather than observably
+/// ignored, and `autoplay`, which is neither refused nor applied (the rebuild takes the session's
+/// own transport, AE#464 round 2) and could until round 3 only be read off the code.
 enum LoadOptionChange {
     case header(name: String, value: String)
     case audioBridgeMode(AudioBridgeMode)
     case preferredAudioLanguages([String])
     case decodePath(DecodePath)
+    case dolbyVisionHandling(DolbyVisionHandling)
     case isLive(Bool)
+    case autoplay(Bool)
 
     var label: String {
         switch self {
@@ -57,7 +61,9 @@ enum LoadOptionChange {
         case .audioBridgeMode(let mode): return "audioBridgeMode=\(mode.rawValue)"
         case .preferredAudioLanguages(let langs): return "preferredAudioLanguages=\(langs.joined(separator: ","))"
         case .decodePath(let path): return "preferredDecodePath=\(path.rawValue)"
+        case .dolbyVisionHandling(let handling): return "dolbyVisionHandling=\(handling.rawValue)"
         case .isLive(let value): return "isLive=\(value)"
+        case .autoplay(let value): return "autoplay=\(value)"
         }
     }
 
@@ -67,7 +73,9 @@ enum LoadOptionChange {
         case .audioBridgeMode(let mode): options.audioBridgeMode = mode
         case .preferredAudioLanguages(let langs): options.preferredAudioLanguages = langs
         case .decodePath(let path): options.preferredDecodePath = path
+        case .dolbyVisionHandling(let handling): options.dolbyVisionHandling = handling
         case .isLive(let value): options.isLive = value
+        case .autoplay(let value): options.autoplay = value
         }
     }
 }
@@ -87,7 +95,8 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
                     sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil,
                     httpHeaders: [String: String] = [:],
                     deinterlaceFieldRate: DeinterlaceFieldRate = .field,
-                    assertDolbyVision: Bool = false) -> Int32 {
+                    assertDolbyVision: Bool = false,
+                    dolbyVisionHandling: DolbyVisionHandling = .automatic) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         AetherEngine.setLargeAllocationCensusEnabled(
@@ -108,7 +117,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision, dolbyVisionHandling: dolbyVisionHandling)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -427,7 +436,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false, dolbyVisionHandling: DolbyVisionHandling = .automatic) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -509,6 +518,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // AE#493: the Dolby Vision claim a macOS host has to make itself, because there is no per-mode
         // capability API to read there. Without the flag a Mac run cannot exercise the DV route at all,
         // which is how the reporter ended up A/B-ing a local patch instead of a session option.
+        // The base layer of a Dolby Vision source, the Dolby Vision left out of the container: the
+        // harness for a record the bitstream contradicts.
+        dolbyVisionHandling: dolbyVisionHandling,
         panelPresentsDolbyVision: assertDolbyVision,
         isLive: live,
         dvrWindowSeconds: dvrWindow,
@@ -609,12 +621,12 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // off the transport itself, not off anything the engine remembers.
             print("  HOSTCALL setRate(\(Issue436RateHold.rate)) (held across a pause/resume)")
             engine.setRate(Issue436RateHold.rate)
-        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek":
+        case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -642,14 +654,24 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // the load option it was already able to measure before.
     // AE#464 round 2: repeatable, because a stepper press is repeatable. Three of them inside
     // one runloop turn is the leg that stacked three reloads and lost the playhead.
-    for audioDelaySwitch in audioDelaySwitches {
+    //
+    // Round 3: presses that share a delay are delivered by ONE task, in argument order, with no
+    // await between them, which is what "inside one runloop turn" means. A task per press does not
+    // reproduce that: three of them three milliseconds apart arrive in whatever order the scheduler
+    // picks, measured as a 50/100/150 series landing 100, 150, 50, so the engine delivered 50 and
+    // the arm read as a defect that was the harness. The suffix still groups them, so presses at
+    // different times stay ordered by time.
+    for (delay, group) in Dictionary(grouping: audioDelaySwitches, by: \.delayMilliseconds)
+        .sorted(by: { $0.key < $1.key }) {
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(max(0, audioDelaySwitch.delayMilliseconds)) * 1_000_000)
-            print("  HOSTCALL setAudioDelay(\(audioDelaySwitch.milliseconds) ms) at "
-                  + "+\(audioDelaySwitch.delayMilliseconds) ms "
-                  + "(was \(Int((engine.audioDelaySeconds * 1000).rounded())) ms, "
-                  + "route=\(engine.videoRoute.rawValue), t=\(String(format: "%.2f", engine.currentTime))s)")
-            engine.setAudioDelay(Double(audioDelaySwitch.milliseconds) / 1000.0)
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay)) * 1_000_000)
+            for audioDelaySwitch in group {
+                print("  HOSTCALL setAudioDelay(\(audioDelaySwitch.milliseconds) ms) at "
+                      + "+\(delay) ms "
+                      + "(was \(Int((engine.audioDelaySeconds * 1000).rounded())) ms, "
+                      + "route=\(engine.videoRoute.rawValue), t=\(String(format: "%.2f", engine.currentTime))s)")
+                engine.setAudioDelay(Double(audioDelaySwitch.milliseconds) / 1000.0)
+            }
         }
     }
 
@@ -768,6 +790,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     }
 
     let ticks = max(1, Int(seconds))
+    // Sodalite#104: where the playhead stood when the pause-and-hold drill parked it, so the run can
+    // say whether it moved.
+    var pauseHoldPlayhead: Double?
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         var line = String(format: "  t=%02d state=%@ phase=%@ cur=%.2f src=%.2f buf=%.2f dur=%.1f",
@@ -786,7 +811,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // AE#441: the live rewind surfaces a host actually scales its strip on. Sampling them needed a
         // patched copy of this CLI before, which is how an over-promising lower bound stayed unseen.
         if engine.isLive {
-            line += String(format: " edge=%.2f behind=%.2f", engine.liveEdgeTime, engine.behindLiveSeconds)
+            // Sodalite#104: `atEdge` is the flag a host draws its LIVE badge and its return-to-live
+            // affordance from, and it is not readable from `behind` alone, because the tolerance it
+            // is judged against follows the segment cadence. Printing the distance without the
+            // verdict is what let a flag that toggles twice per cut go unnoticed here.
+            line += String(format: " edge=%.2f behind=%.2f atEdge=%@",
+                           engine.liveEdgeTime, engine.behindLiveSeconds,
+                           engine.isAtLiveEdge ? "y" : "n")
             line += " range=" + (engine.seekableLiveRange.map {
                 String(format: "%.2f...%.2f", $0.lowerBound, $0.upperBound) } ?? "nil")
         }
@@ -882,6 +913,38 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // only at play(), so whatever the 1 Hz `[SWDiag]` line reports for the five paused ticks after
         // the landing comes from state the seek path itself had to keep honest. `--seek-pattern`'s
         // first entry picks the target, else 20 s ahead.
+        // Sodalite#104: what a live session does while it is PAUSED for longer than its DVR window.
+        //
+        // The question a host has to answer is whether pausing keeps recording, and what happens when
+        // the recording reaches the depth the session asked for: a producer that parks stops draining
+        // the origin, and a window that slides instead walks past the position the viewer is parked
+        // on. Neither is reachable from a device in less than the buffer depth, which is ninety
+        // minutes on a real session; with `--dvr-window 30` it is a ninety second run.
+        //
+        // Pauses at t=10 and resumes ten seconds before the end, so the run covers the fill, whatever
+        // the engine does at the cap, and the return.
+        if hostCalls.contains("pausehold") {
+            if tick == 10 {
+                print("  HOSTCALL pause() and HOLD (resumes at t=\(max(11, ticks - 10)))")
+                engine.pause()
+                pauseHoldPlayhead = engine.currentTime
+            }
+            if tick > 10, tick < max(11, ticks - 10) {
+                let range = engine.clock.seekableLiveRange
+                print(String(format:
+                    "    PAUSEHOLD t=%02d playhead=%.2f (moved %+.2f) edge=%.2f window=%@ resident=%.1fs",
+                    tick, engine.currentTime, engine.currentTime - (pauseHoldPlayhead ?? 0),
+                    engine.clock.liveEdgeTime,
+                    range.map { String(format: "%.1f...%.1f", $0.lowerBound, $0.upperBound) } ?? "none",
+                    range.map { $0.upperBound - $0.lowerBound } ?? 0))
+            }
+            if tick == max(11, ticks - 10) {
+                let held = engine.currentTime
+                print(String(format: "  HOSTCALL play() after the hold (playhead %.2f, moved %+.2f while paused)",
+                             held, held - (pauseHoldPlayhead ?? 0)))
+                engine.play()
+            }
+        }
         if hostCalls.contains("pauseseek") {
             if tick == 12 {
                 print("  HOSTCALL pause()")

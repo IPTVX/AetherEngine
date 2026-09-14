@@ -67,11 +67,11 @@ func printUsage() {
 
     Usage:
       aetherctl probe <url>
-      aetherctl serve [--no-dv] [--force-dv] [--start-position S] <url>
-      aetherctl validate [--no-dv] [--force-dv] <url>
+      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] <url>
+      aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
-                 [--assert-dv]
+                 [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]... [--paused]
@@ -97,13 +97,13 @@ func printUsage() {
                       --reload-applying corrects a LoadOption on the playing
                       session through #460's session-preserving reload, repeatable;
                       keys header.<Name>, audio-bridge, preferred-audio,
-                      decode-path, is-live
+                      decode-path, dolby-vision, is-live
                       (is-live is there to show the refusal: a field that names the
                       session is refused, not silently ignored), default +20 s;
                       --sequential-origin declares a fake-range origin (one unranged
                       GET, no ranged probes) and needs --declared-duration on VOD
                       since the tail estimate is skipped)
-      aetherctl segverify [--from N] [--count K] [--no-dv] [--force-dv] [--dump <dir>] <url>
+      aetherctl segverify [--from N] [--count K] [--no-dv] [--force-dv] [--dv-base-layer] [--dump <dir>] <url>
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
       aetherctl dovitest <file>
@@ -113,7 +113,7 @@ func printUsage() {
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats;
                           --software runs a real session through the SW sink, exit 3 if it yields no audible PCM)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] [--reload-decode-path automatic|software] <file>
-      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] <file.ts>
+      aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] [--reader-axis absolute|join|mismatched] [--join-offset-mb N] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--realtime-rate X] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
@@ -149,6 +149,16 @@ func printUsage() {
                      AVPlayer composes the RPU itself. Only has an
                      effect together with --no-dv; a display that does
                      Dolby Vision keeps the P8.1 route.
+      --dv-base-layer
+                     LoadOptions.dolbyVisionHandling = .baseLayerOnly:
+                     present the HDR10 / HLG base layer of a Dolby
+                     Vision source and leave the DV out of the container
+                     (plain hvc1 / av01, dvcC stripped, no
+                     SUPPLEMENTAL-CODECS), on any display. Covers HEVC
+                     P7 / P8.1 / P8.4, AV1 P10.1 / P10.4, and a P5
+                     record over a BT.2020 YCbCr VUI (a relabelled P7 /
+                     P8 remux); a genuine P5 has no base layer and keeps
+                     its route. Also accepted by `play`.
 
     Flags (play only):
       --assert-dv    AE#493: set LoadOptions.panelPresentsDolbyVision,
@@ -318,6 +328,7 @@ if first == "segverify" {
     let count   = takeIntFlag("--count", from: &rest) ?? 12
     let noDV    = takeFlag("--no-dv", from: &rest)
     let forceDV = takeFlag("--force-dv", from: &rest)
+    let dvBaseLayer = takeFlag("--dv-base-layer", from: &rest)
     let dumpDir = takeStringFlag("--dump", from: &rest)
     guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
         print("ERROR: segverify requires a <url> argument")
@@ -326,7 +337,9 @@ if first == "segverify" {
     rest.removeAll { $0 == urlArg }
     rejectStrayFlags(rest, subcommand: "segverify")
     exit(runSegVerify(url: parseSourceURL(urlArg), from: fromIdx, count: count, dvModeAvailable: !noDV,
-                      forceDVWithoutDisplay: forceDV, dumpDir: dumpDir))
+                      forceDVWithoutDisplay: forceDV,
+                      dolbyVisionHandling: dvBaseLayer ? .baseLayerOnly : .automatic,
+                      dumpDir: dumpDir))
 }
 
 // Rapid-seek burst repro (issue #35).
@@ -609,6 +622,9 @@ if first == "play" {
     // capability API, so DV is unclaimable from inside the engine and a Mac run routes every DV source
     // as its HDR10 base layer until the host says otherwise.
     let playAssertDV = takeFlag("--assert-dv", from: &rest)
+    // `LoadOptions.dolbyVisionHandling = .baseLayerOnly`: the base layer of a Dolby Vision source, the
+    // Dolby Vision left out of the container. The harness for a record the bitstream contradicts.
+    let playDVHandling: DolbyVisionHandling = takeFlag("--dv-base-layer", from: &rest) ? .baseLayerOnly : .automatic
     // AE#492: `LoadOptions.deinterlaceFieldRate`. `send_field` (the default) emits one frame per
     // FIELD, so a 29.97i source hands the layer 59.94 frames per second against 23.976 for a
     // progressive one. That is the confound in every per-seek drop count taken across the two, and
@@ -749,14 +765,26 @@ if first == "play" {
                 exit(64)
             }
             optionChanges.append(.decodePath(path))
+        } else if key == "dolby-vision" {
+            guard let handling = DolbyVisionHandling(rawValue: value) else {
+                print("ERROR: --reload-applying dolby-vision takes \(DolbyVisionHandling.allCases.map(\.rawValue).joined(separator: "|")), got '\(value)'")
+                exit(64)
+            }
+            optionChanges.append(.dolbyVisionHandling(handling))
         } else if key == "is-live" {
             guard let flag = Bool(value) else {
                 print("ERROR: --reload-applying is-live takes true|false, got '\(value)'")
                 exit(64)
             }
             optionChanges.append(.isLive(flag))
+        } else if key == "autoplay" {
+            guard let flag = Bool(value) else {
+                print("ERROR: --reload-applying autoplay takes true|false, got '\(value)'")
+                exit(64)
+            }
+            optionChanges.append(.autoplay(flag))
         } else {
-            print("ERROR: --reload-applying key '\(key)' is not one of header.<Name>, audio-bridge, preferred-audio, decode-path, is-live")
+            print("ERROR: --reload-applying key '\(key)' is not one of header.<Name>, audio-bridge, preferred-audio, decode-path, dolby-vision, is-live, autoplay")
             exit(64)
         }
     }
@@ -804,7 +832,8 @@ if first == "play" {
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
-                 assertDolbyVision: playAssertDV))
+                 assertDolbyVision: playAssertDV,
+                 dolbyVisionHandling: playDVHandling))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
@@ -812,6 +841,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let noDV = takeFlag("--no-dv", from: &rest)
     // AE#455: opt-in P8.1-as-P5 routing, which only has an effect alongside --no-dv.
     let forceDV = takeFlag("--force-dv", from: &rest)
+    // The base layer of a Dolby Vision source, the Dolby Vision left out of the container.
+    let dvHandling: DolbyVisionHandling = takeFlag("--dv-base-layer", from: &rest) ? .baseLayerOnly : .automatic
     let framesOverride = takeIntFlag("--frames", from: &rest)
     let atSeconds = takeDoubleFlag("--at", from: &rest) ?? 60.0
     let extractLoops = takeIntFlag("--loops", from: &rest) ?? 1
@@ -844,6 +875,18 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // reader's in-flight-request cancel becomes. Contract says unblock only; this measures the cost
     // of the other reading rather than leaving it to be discovered on a host.
     let customCancelLatches = takeFlag("--cancel-latches", from: &rest)
+    // AE#460 round 3: which byte axis the harness reader speaks. `join` is the reporter's shape (a
+    // spool that counts from where its stream joined), `mismatched` the non-conforming control that
+    // reports one axis and takes the other. `--join-offset-mb` is where in the file the join sits,
+    // so the two axes are far enough apart for a disagreement to show as bytes rather than as noise.
+    let customReaderAxis: ReaderAxis = takeStringFlag("--reader-axis", from: &rest).map { value in
+        guard let axis = ReaderAxis(rawValue: value) else {
+            print("ERROR: --reader-axis takes absolute|join|mismatched, got '\(value)'")
+            exit(64)
+        }
+        return axis
+    } ?? .absolute
+    let customJoinOffsetMB = takeIntFlag("--join-offset-mb", from: &rest) ?? 4
     // AE#461 follow-up: drive the decode-path correction on a CUSTOM source. `--reload-at`'s own
     // correction (an httpHeaders probe) is inert on this shape by design, so it measures the rebuild
     // and cannot measure this field; this one is the field.
@@ -893,10 +936,12 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
         exit(runProbe(url: url))
     case "serve":
         runServe(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
+                 dolbyVisionHandling: dvHandling,
                  nativeSubsIndex: nativeSubsIndex, startPosition: startPosition,
                  audioDelayMs: serveAudioDelayMs)
     case "validate":
-        exit(runValidate(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV))
+        exit(runValidate(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
+                         dolbyVisionHandling: dvHandling))
     case "swdecode":
         exit(runSWDecode(url: url, maxPackets: framesOverride ?? 100))
     case "extract":
@@ -917,7 +962,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
                                     foundationReader: customFoundationReader,
                                     carryTrim: customCarryTrim, reloadAt: customReloadAt,
                                     cancelLatches: customCancelLatches,
-                                    reloadDecodePath: customReloadDecodePath))
+                                    reloadDecodePath: customReloadDecodePath,
+                                    axis: customReaderAxis, joinOffsetMB: customJoinOffsetMB))
         }
         exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex, reloadDecodePath: customReloadDecodePath))
     default:
