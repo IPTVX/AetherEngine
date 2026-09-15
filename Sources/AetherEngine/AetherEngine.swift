@@ -1485,6 +1485,13 @@ public final class AetherEngine: ObservableObject {
     /// the $renderedTime sink. Read off-main by the producer when it re-anchors on a backpressure wedge.
     let renderedPositionMirror = AtomicDouble(0)
 
+    /// AE#520 round 2: thread-safe mirror of how long the consumer can keep playing out of what it
+    /// already holds (the loaded range the playhead is inside), written by `LiveTelemetrySampler` at
+    /// 1 Hz off the main actor. Read on the playlist-build thread by the outage close, which spends a
+    /// depth and until this existed could only see the half of it the consumer had not fetched yet.
+    /// nil while there is no native item to read one off (software path, between item swaps).
+    let consumerContiguousBufferMirror = AtomicOptionalDouble(nil)
+
     /// #65: thread-safe mirror of AVPlayer's play intent (`timeControlStatus != .paused`), updated on the main
     /// actor by the $timeControlStatus sink. Read off-main by the producer to suspend its backpressure wedge
     /// detector while the consumer is paused (a paused player issues no forward fetch, so its frozen fetch
@@ -4865,7 +4872,21 @@ public final class AetherEngine: ObservableObject {
         // -11.000 all survive one). The target above is deliberately computed on the axis AVPlayer
         // still had when the seek was issued; from the landing forward the clock describes the axis
         // it will have instead.
-        nativeVideoSession?.snapAxisAfterSeek(landingItemSeconds: clockTarget)
+        // AE#534: whether AVPlayer already HOLDS the landing, which is what decides if this seek
+        // rebuilds its timeline and therefore whether it throws the axis away at all. Measured at
+        // exactly this point before it went in: 0.10 ms median and 0.70 ms worst of 215 seeks, on an
+        // idle and on a loaded box, including seeks issued on top of unsettled ones. That is the size
+        // of `prepareSeekLanding` below, an off-main hop this path already takes unconditionally, so
+        // this adds a second hop of a size already accepted here rather than a first one.
+        //
+        // An item that answers nothing reads as not placed, which is the behaviour this rule had
+        // before, so a failed read costs the axis and never the session.
+        let landingIsPlaced = nativeVideoSession != nil && nativeHost != nil
+            ? await avPlayerLoadedRanges().contains { clockTarget >= $0.0 && clockTarget <= $0.1 }
+            : false
+        guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
+        nativeVideoSession?.snapAxisAfterSeek(
+            landingItemSeconds: clockTarget, landingIsPlaced: landingIsPlaced)
         // AE#481: and what the landing's run carries is a READING, not the composition it inherits. A
         // seek that opens a new run at a segment written on its planned position lands on a source-true
         // stretch, which nothing else in the session ever looks at: measured on the #418 chain with the

@@ -12,6 +12,76 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.88.0] - 2026-09-15
+
+### Fixed
+
+- **A live outage close spends what the consumer can still play, not only what it has yet to fetch
+  (AE#520 round 2).** The runway it measured is the content the window LISTS above the consumer's
+  fetch point, which leaves out everything the consumer has already fetched and still holds. For a
+  viewer at the live edge that half is most of what they have: measured on the harness at
+  TARGETDURATION 6, the window closed on 4.0 s listed while AVPlayer held another 4.9 s, and the
+  source delivered again 1.84 s later. Deferring costs nothing in the seam it was avoiding, because
+  the swap lands when the consumer reaches the end of the closed window and not when the ENDLIST is
+  served (closed at +70.51, swapped at +89.5 with 0.79 s of buffer left). The depth is read off a
+  mirror the telemetry sampler writes at 1 Hz rather than off an AVFoundation call on a
+  playlist-build thread, and a session with nothing to report one, the software path or the gap
+  between two items, reads exactly as it did before. The gate that decides whether there is anything
+  to serve as a finished asset asks the same depth now: it used to ask whether SEGMENTS were listed,
+  so a consumer playing out of its own buffer could not be closed on at all, walked down to 0.1 s
+  with the window open, and rejoined forward with 4 segments skipped. Harness, same command line per
+  pair: an edge viewer's 12 s gap goes from an item swap to `gap absorbed`, its 30 s outage still
+  holds its position (closing at 16.07 s of silence on 6.0 s of depth, none of it listed), and
+  AE#520's own control, AE#523 round 2's arm and a 30 s outage at depth are all unchanged.
+
+### Added
+
+- `aetherctl live` prints `item=` (the item's own playhead) and `buf=` (how long the consumer can
+  keep playing out of what it holds) per tick. The freeze leg could only report the published
+  session clock, which is item time plus a shift, so the depth an outage decision spends was not
+  observable at all.
+
+## [6.87.0] - 2026-09-15
+
+### Fixed
+
+- **A live outage closes the window when the CONTENT runs out, not when a clock that shares its
+  axis does (AE#523 round 2).** The close was bounded twice, by a deadline on the silence and by
+  the runway ahead of the consumer, and the two were never on different axes: while the source is
+  quiet the consumer keeps walking the window, so `runway + silence` is fixed and
+  `runway <= deadline - silence` is decided the first time it is asked and never changes its answer
+  afterwards. A consumer holding more than a deadline's worth of content was therefore never closed
+  on by the runway at all, and the clock took the irreversible decision with every second of that
+  content still in hand. Measured on the harness at TARGETDURATION 6, a viewer 30 s inside the
+  window against a 22 s freeze: late at 10.07 s of silence with 24.0 s of runway, closed at 20.10 s
+  with the same 24.0 s, item swapped, source delivering again 2 s later. Reported from the field on
+  6.84.0 as 5 closes in 40 delivery gaps of a 45 minute session, each with 5.8 to 8.5 s of runway
+  in hand. The wait now ends one poll before the content does (one TARGETDURATION, against a
+  measured poll interval of `0.81 x TD` with the blocking-reload advert withdrawn), which is the
+  last moment an ENDLIST still reaches a consumer with something to play out; the clock keeps only
+  the bound it owns alone, the 35 s at which the producer gives up a source that cuts nothing, less
+  a patience so the close is served before that exit fires. Harness, same command line per pair:
+  the reported shape goes from an item swap to `gap absorbed`, AE#520's control and an edge viewer
+  are unchanged, and a genuine 30 s outage holds its position at three rewind depths.
+
+- **A seek keeps the axis AVPlayer never rebuilt (AE#534, first half).** The sub-second axis snap
+  asked how BIG the standing axis was. What AVPlayer discards an offset at is a seek that makes it
+  rebuild its timeline, and a seek landing in what it already holds rebuilds nothing, so it keeps
+  the displacement and the rule has to keep it too. The size test fitted the earlier arms only
+  because all of them left the buffer. The placement is now read off `AVPlayerItem.loadedTimeRanges`
+  and off nothing else: the producer's own buffered frontier disagrees with it in both directions on
+  these very arms (95.62 against a placed 84.337, and 75.62 against a placed 80.343), because a
+  fetch is not a placement. Measured on `tc-cues-lie.mkv` over a 600 kbps / 300 ms origin, 3 runs
+  per arm: a held landing goes from `capErr -0.400` to `-0.025`, the unheld control is untouched,
+  and the 600 s offset twin is unchanged. The read costs 0.10 ms median and 0.70 ms worst over 215
+  seeks, and an item that answers nothing reads as not placed, so a failed read costs the axis and
+  never the session. Expressing the test on the displacement rather than on the axis is the second
+  half and is not in this release.
+
+- **The all-clear line says how close the episode came.** A gap that was absorbed now reports the
+  widest silence and the lowest runway it reached against the reserve a close would have needed, so
+  a comfortable session can be told apart from a near miss without another round of captures.
+
 ## [6.86.0] - 2026-09-14
 
 ### Fixed
