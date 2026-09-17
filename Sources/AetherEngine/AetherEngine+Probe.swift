@@ -626,15 +626,19 @@ extension AetherEngine {
     /// The HDR10+ carry-over exists because the two can arrive in either order. `handleHDR10PlusDetected`
     /// upgrades a `videoFormat` that already reads `.hdr10`, and on a panel whose answer is still pending
     /// the label reads `.sdr` when the T.35 payload lands, so the upgrade is skipped and the evidence
-    /// survives in `sourceVideoFormat` alone. Republishing the bare effective format would then relabel a
+    /// survives in the session's latch alone. Republishing the bare effective format would then relabel a
     /// proven HDR10+ session "HDR10+ -> HDR10", trading one wrong arrow for a quieter one.
+    ///
+    /// The latch rather than `sourceVideoFormat == .hdr10Plus`: a Dolby Vision source can carry an HDR10+
+    /// layer too (Blu-ray Profile 7, and Profile 8.1 remuxed from one), `sourceVideoFormat` keeps saying
+    /// Dolby Vision for it, and a display without Dolby Vision presents that HDR10+ base (AE#459).
     nonisolated static func presentedVideoFormat(
         effectiveFormat: VideoFormat,
         panelPresentsHDR: Bool,
-        sourceVideoFormat: VideoFormat
+        sourceCarriesHDR10Plus: Bool
     ) -> VideoFormat {
         guard effectiveFormat != .sdr, panelPresentsHDR else { return .sdr }
-        if effectiveFormat == .hdr10, sourceVideoFormat == .hdr10Plus { return .hdr10Plus }
+        if effectiveFormat == .hdr10, sourceCarriesHDR10Plus { return .hdr10Plus }
         return effectiveFormat
     }
 
@@ -733,6 +737,28 @@ extension AetherEngine {
     ) -> Bool {
         if panelPresentsHDR { return true }
         return attemptWhenUnproven && displayEligibleForHDR && !panelRefusedHDRMaster
+    }
+
+    /// AE#541: the HDR route of an in-place rebuild, composed from the same two decisions the load makes.
+    ///
+    /// The readout and the display's eligibility are the load's, because the rebuild runs no handshake to
+    /// take them again. The host's assertion and the attempt lever are the session's current options, so a
+    /// `reloadAtCurrentPosition(applying:)` correction still moves the route. The refusal latch is read
+    /// now rather than carried: a master the panel refused after the load must not be served again.
+    nonisolated static func reloadRoutesAsHDRPanel(
+        hostAsserts: Bool,
+        criteriaReadoutAtLoad: Bool?,
+        attemptWhenUnproven: Bool,
+        isLive: Bool,
+        displayEligibleForHDR: Bool,
+        panelRefusedHDRMaster: Bool
+    ) -> Bool {
+        sessionRoutesAsHDRPanel(
+            panelPresentsHDR: sessionPanelPresentsHDR(
+                hostAsserts: hostAsserts, criteriaReadout: criteriaReadoutAtLoad),
+            attemptWhenUnproven: attemptWhenUnproven && !isLive,
+            displayEligibleForHDR: displayEligibleForHDR,
+            panelRefusedHDRMaster: panelRefusedHDRMaster)
     }
 
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {

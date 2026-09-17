@@ -10,7 +10,7 @@ If the problem is in a host app's UI rather than the engine, report it on that a
 
 ## Building and testing
 
-AetherEngine is a Swift package. It builds for iOS 16+, tvOS 17+, macOS 14+, and visionOS 1+.
+AetherEngine is a Swift package. This IPTVX fork keeps iOS 16+, tvOS 16+, macOS 14+, and visionOS 1+ while integrating complete upstream releases.
 
 ```bash
 swift build
@@ -20,6 +20,8 @@ swift test
 For iterative work, open `Package.swift` in Xcode 26+ and pick the `AetherEngine` scheme. `FFmpegBuild` is a transitive dependency that supplies the bundled FFmpeg / dav1d binaries; you do not build it yourself.
 
 The `aetherctl` command-line target is macOS-only (it uses `Foundation.Process`) and is excluded from the iOS / tvOS library build.
+
+When integrating a new upstream tag, merge the complete release. Keep the legacy display-layer queue and availability guards for older systems, and keep the modern video-renderer path for iOS/tvOS 18+, macOS 15+, and visionOS. Before publishing an IPTVX fork tag, run the package tests, compile with iOS/tvOS 16 deployment targets, and check playback on both older and current OS versions. Do not update IPTVX's package pin until that validation passes.
 
 ## Where playback bugs get fixed
 

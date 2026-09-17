@@ -151,9 +151,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         formatDescription = formatDesc
 
-        // 2. Require hardware on tvOS 17+ so VT fails outright rather than silently falling back to SW
-        //    (which would show only as pathological CPU + frame drops at 4K). Deployment target is tvOS 26
-        //    so the if-available branch is always taken in production.
+        // 2. Require hardware when supported; older systems cannot use this specification key.
         var decoderSpec: NSDictionary?
         if #available(tvOS 17.0, iOS 17.0, *) {
             decoderSpec = [

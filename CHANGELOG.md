@@ -10,7 +10,152 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### IPTVX fork
+
+- Integrated the complete upstream 7.1.3 release while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards and the seek hold-frame behavior remain covered by tests. The fork continues to use LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+
+## [7.1.3] - 2026-09-17
+
+### Changed
+
+- **A reader walking forward logs one `conn start` per ten seconds instead of one per range.** On a LAN a
+  bounded reader starts a 32 MiB range every 0.29 s at gigabit, and the #151 subtitle prefetcher walks up to
+  270 s of lead that way when an OCR worker is armed (69 to 138 ranges for a UHD remux, per track pick and per
+  seek). A host log buffer of 300 lines held about 275 of them from one 40 s playback. A start that continues
+  exactly where the previous range ended now logs at most once per ten seconds, and the next line that logs
+  carries `(+N contiguous ranges since the last line)`. Every other start (first connection, seek, reconnect
+  mid-range, refill after backpressure, held connections) logs as before (Sodalite#117).
+
+## [7.1.2] - 2026-09-17
+
+### Fixed
+
+- **An audio pick keeps an HDR title on the master playlist.** `reloadWithAudioOverride` handed `loadNative` the
+  raw `panelIsInHDRMode` option, while a fresh load hands it the route composed from the criteria readout, the
+  display's HDR eligibility, `attemptsHDRMasterOnUnprovenPanel` and the refusal latch. The rebuild runs no
+  handshake, so a panel proven through the readout alone (and, since 6.82.0, an unproven but eligible VOD panel)
+  dropped to the media playlist on the pick and lost its AUDIO rendition, the only place AVFoundation reads an
+  HLS language from. The load now keeps the readout and the eligibility, and the reload composes its route from
+  those plus the session's current options and the latch read at reload time (AE#541).
+- **A live rejoin after an item swap reaches its stall-policy decision again.** An in-place swap reuses a player
+  that is still `.playing`, and that status arrived on the fresh item 1 ms after the load, before it was ready.
+  The live-join lever read it as the rate rolling on its own and silently spent its one-shot, so the
+  `ToMinimizeStalls` hold that followed on a #446 rejoin decided nothing and logged nothing. The spend now
+  requires readiness (AE#440).
+
+## [7.1.1] - 2026-09-17
+
+### Fixed
+
+- **A decode-path correction onto software no longer ends an HEVC session the probe cannot classify.**
+  `SoftwarePlaybackHost` asked the routing gate's `canHardwareDecode`, which answers "keep native" for in-band
+  parameter sets, Annex-B extradata and a missing config record, and read that as "open `HardwareVideoDecoder`".
+  That decoder builds from the hvcC alone and has no software fallback, so `preferredDecodePath = .software`
+  (at load or through `reloadAtCurrentPosition(applying:)`) tore the session down and threw
+  `sessionCreationFailed(status: -4)`. The probe now returns a three-valued verdict: the routing gate still
+  keeps native on an unclassifiable format, the software host opens the hardware decoder only on a proven
+  session and hands everything else to libavcodec. The verdict names its reason in the log (AE#461).
+- **A software session paused before its first frame shows that frame instead of black.** The demux and feeder
+  loops park on a paused transport, so a `pause()` that arrived before anything was decoded (a host holding a
+  fresh load paused, as Sodalite's foreground retune did) left the layer empty under a stopped clock for as long
+  as the session stayed paused, and `startup 8/8 presenting` never came. Until the first frame is in, a pause now
+  stops the clock and not the loops: the clock arms at rate 0, the frame is handed straight to the layer and the
+  stopped clock moves onto it. The same change closes a race where a transport call between a clock arming and
+  being marked armed was lost, which left a VOD clock running under `state=paused` (Sodalite#104).
+
+## [7.1.0] - 2026-09-16
+
+### Added
+
+- **`AetherEngine.dolbyVisionConversion`** publishes the Dolby Vision profile rewrite applied to the served
+  stream, a `DolbyVisionConversion?`. `.profile7ToProfile81` is a Profile 7 source on a display presenting
+  Dolby Vision, which the engine has always served as Profile 8.1 without saying so anywhere but the
+  manifest, so an info panel reading `sourceDVProfile` next to `videoFormat` could only print "Dolby Vision
+  P7" (AE#459).
+
+### Fixed
+
+- **A Dolby Vision source carrying an HDR10+ layer is labelled HDR10+ where its HDR10 base is presented.**
+  The T.35 detection upgraded `sourceVideoFormat` only for an HDR10 source, and the late panel proof
+  (6.82.0) rebuilt the label from that field, so on a display without Dolby Vision whose panel was proven by
+  master acceptance, a Blu-ray Profile 7 or a Profile 8.1 remuxed from one read "Dolby Vision -> HDR10"
+  while the stream carried HDR10+ to the TV. The evidence is now latched per session whatever the source
+  format (AE#459).
+
+## [7.0.0] - 2026-09-16
+
+### Changed
+
+- **BREAKING: the platform floor is iOS 18, tvOS 18 and macOS 15, up from iOS 16, tvOS 17 and macOS
+  14.** visionOS stays at 1.0. The raise is what lets the software renderer stop touching
+  `AVSampleBufferDisplayLayer` off the main actor (see Fixed): below the new floor the queue target
+  was the layer itself, and its `status`, `error` and `flushAndRemoveImage()` exist only on the layer,
+  with no counterpart on `AVQueuedSampleBufferRendering` that a decode thread could reach instead.
+  Availability checks the new floor makes always true are gone with it: the VideoToolbox
+  require-hardware decoder specification and the per-frame HDR metadata propagation are now
+  unconditional, and the tvOS 17 display-criteria guard is removed. No public symbol was added,
+  removed or renamed. A consumer that has to stay below the floor pins `.upToNextMajor(from: "6.89.1")`.
+
+### Fixed
+
+- **The engine builds without main-actor isolation diagnostics against the 27 SDKs (#351).** The 27
+  SDKs annotate `AVSampleBufferDisplayLayer` as `@MainActor`, and the software path reached it from
+  the decode thread at twelve sites, among them `displayLayer.sampleBufferRenderer` on every
+  back-pressure check. `SampleBufferRenderer` now takes the layer's `sampleBufferRenderer` once, on the
+  main actor at construction, and the decode thread enqueues, flushes and reads status only through
+  that renderer; the synchronizer is handed the same renderer. The layer and the renderer are both
+  fixed for the renderer's lifetime (HDR output switches `preferredDynamicRange` on the same layer),
+  so the stored reference cannot drift. Measured on Xcode 27.0 (27A266a): `swift build --build-tests`
+  went from 12 warnings to none. The calls on 18 and later are the same calls on the same objects.
+
+## [6.89.1] - 2026-09-15
+
+### Fixed
+
+- **A surface remounted by identity keeps the engine's picture (AE#536).** The engine held one weak
+  reference to its bound view. A host that keys `AetherPlayerSurface` with `.id(...)` and keeps the
+  engine across the swap (a next-episode flow) gets the incoming view made and bound first, and SwiftUI
+  then still updates the outgoing view on its way out, which rebinds to it through #188's rebind, before
+  dismantling it. The engine was left bound to nothing, and the next `load()` built a layer that
+  reported `isReadyForDisplay` with no superlayer and a zero frame: audio over a black picture,
+  measured on an iPhone 16e, iOS 26.7. The engine now keeps every bound surface weakly in bind order
+  and presents on the most recently bound one still alive, so when the presenting view is unbound or
+  released the layer moves to the next one. `AetherPlayerSurface` unbinds synchronously on dismantle
+  instead of detaching in a `Task`, and a view taken over by another engine drops out of the previous
+  engine's fallbacks. An `AetherPlayerView` now removes a previously hosted layer only while that
+  layer still sits in it, so a layer an engine has moved to another surface is not pulled back out.
+  No public API changed.
+- **The renderer paths activate the audio session off the main actor (AE#538).**
+  `activateRendererAudioSession()`, which the software and audio-only loads call because AVKit is not
+  there to do it, ran `setActive(true)` and the channel preference synchronously on the main actor, and
+  iOS/tvOS 27 flag that as a hang risk ("This method can lead to UI unresponsiveness if called on the
+  main thread"). Both now run in a detached `userInitiated` task, the pattern #114 and #215 already use
+  for the category declaration and the teardown release, and the load awaits it, so the session is still
+  active before the host is built. A load superseded during that wait unwinds before it builds anything.
+  The activation and the #215 teardown release now share one queue: while the activation ran on the
+  main actor a `stop()` could not land inside it, and as two independent detached tasks a stop during
+  a renderer load's activation could release the session first and leave it active after a final
+  teardown.
+
+## [6.89.0] - 2026-09-15
+
+### Fixed
+
+- **Return to Live on the software path no longer freezes the picture for two seconds (Sodalite#104
+  round 3).** A live seek there landed exactly at the reader's frontier, where the ring holds nothing
+  ahead of the playhead, so the pump parked the clock on the spot and resumed once
+  `rebufferResumeLeadSeconds` (2.0 s) of audio stood ahead of it. On a real-time source that lead
+  takes as long to arrive as it is deep: measured from a tuner, `lead=0.13s` to `lead=2.05s` in
+  1.92 s on every return, against 223 to 258 ms for a rewind into content the ring already held. A
+  landing nearer the frontier than that lead is now held back by it, which reaches the same distance
+  behind live with the same cushion and without the wait. Measured on the harness across three arm
+  pairs at two origin leads: 3 of 3 underrun-and-rebuffer cycles before, 0 of 3 after, the distance
+  held after the return unchanged (1.35 to 2.54 s before, 1.24 to 2.65 s after), and the edge verdict
+  AT EDGE from the first publish in every arm. A held-back landing says so in the log.
+- **`seekToLiveEdge()` says when it ignores a press (Sodalite#104 round 3).** Both early exits, no
+  live session and a live-only session with no native item to snap, returned without a word while
+  every refusal in `seek(to:)` logs one, so a device capture could not tell them from a press that
+  never reached the engine.
 
 ## [6.88.0] - 2026-09-15
 

@@ -1134,6 +1134,7 @@ extension AetherEngine {
         // pins to 0 and `declaredDurationSeconds` measures.
         displayAxisIsItemAxis = session.sequentialOriginPinsProducerToZero
         nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
+        dolbyVisionConversion = session.servedDolbyVisionConversion
         extractorYieldState.activate(session: session)
 
         // #15: the stores were created before start() (above) so the VideoSegmentProvider got the references at
@@ -1609,14 +1610,13 @@ extension AetherEngine {
     }
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
-    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) {
+    ///
+    /// The session calls run off the main actor and the load awaits them, so the session is active before the
+    /// host that plays into it is built, as before. `setActive(true)` is an XPC round trip to mediaserverd, and
+    /// iOS/tvOS 27 flag it as a hang risk on the main thread (AE#538): the same reasoning that moved `setCategory` off-main
+    /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
+    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
         #if os(iOS) || os(tvOS)
-        let session = AVAudioSession.sharedInstance()
-        do { try session.setActive(true) }
-        catch {
-            EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
-        }
-        
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.
         // Accept an explicit stream index parameter because during a reload (track change)
@@ -1628,13 +1628,27 @@ extension AetherEngine {
         } else {
             nil
         }
-        
-        let maxCh = session.maximumOutputNumberOfChannels
-        let prefCh = min(sourceChannels ?? maxCh, maxCh)
-        try? session.setPreferredOutputNumberOfChannels(prefCh) 
-        EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+        await enqueueAudioSessionTransition {
+            AetherEngine.applyRendererAudioSession(sourceChannels: sourceChannels)
+        }.value
         #endif
     }
+
+    #if os(iOS) || os(tvOS)
+    /// The blocking half of `activateRendererAudioSession`: activation, then the channel preference, which
+    /// only takes effect on an active session. Captures no engine state.
+    nonisolated static func applyRendererAudioSession(sourceChannels: Int?) {
+        let session = AVAudioSession.sharedInstance()
+        do { try session.setActive(true) }
+        catch {
+            EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
+        }
+        let maxCh = session.maximumOutputNumberOfChannels
+        let prefCh = min(sourceChannels ?? maxCh, maxCh)
+        try? session.setPreferredOutputNumberOfChannels(prefCh)
+        EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+    }
+    #endif
 
     func loadSoftware(
         url: URL,
@@ -1665,7 +1679,8 @@ extension AetherEngine {
             }
         }
 
-        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        try checkLoadCurrent(generation)
         // Drop the previous session's sinks BEFORE anything wires this one's. Standing further down,
         // between two groups of `.store(in:)` calls, this cancelled everything wired above it: the
         // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
@@ -1822,7 +1837,8 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
-        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
         self.audioHost = host
         applyDesiredVolume(to: host)
@@ -1894,7 +1910,8 @@ extension AetherEngine {
         generation: UInt64
     ) async throws {
         // Reuse the persistent host (MPNowPlayingSession survives across tracks). host.load() swaps the item via replaceCurrentItem.
-        activateRendererAudioSession()
+        await activateRendererAudioSession()
+        try checkLoadCurrent(generation)
         let host = audioAVPlayerHost ?? AudioAVPlayerHost()
         self.audioAVPlayerHost = host
         applyDesiredVolume(to: host)
@@ -2200,6 +2217,21 @@ extension AetherEngine {
                 // swapped item, which happens inside loadNative. Arm before it, or the gate below is again
                 // reading a flag for a switch whose notifications it was not registered for.
                 if loadedOptions.suppressDisplayCriteria { displayCriteria.armSwitchObservation() }
+                let reloadRoutingPanelHDR = Self.reloadRoutesAsHDRPanel(
+                    hostAsserts: loadedOptions.panelIsInHDRMode,
+                    criteriaReadoutAtLoad: sessionPanelHDRReadout,
+                    attemptWhenUnproven: loadedOptions.attemptsHDRMasterOnUnprovenPanel,
+                    isLive: loadedOptions.isLive,
+                    displayEligibleForHDR: sessionDisplayEligibleForHDR,
+                    panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
+                if reloadRoutingPanelHDR != loadedOptions.panelIsInHDRMode {
+                    EngineLog.emit(
+                        "[DisplayCriteria] AE#541 reload routes on the load's panel answer: panelIsHDR="
+                        + "\(reloadRoutingPanelHDR) (hostAsserts=\(loadedOptions.panelIsInHDRMode) readoutAtLoad="
+                        + (sessionPanelHDRReadout.map { "\($0)" } ?? "suppressed")
+                        + " eligible=\(sessionDisplayEligibleForHDR) refusedLatch=\(Self.panelRefusedHDRMaster))",
+                        category: .session)
+                }
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
@@ -2214,7 +2246,7 @@ extension AetherEngine {
                     // changed and the probe that could answer it is gone.
                     dolbyVisionRPUProfile: sourceDolbyVisionRPUProfile,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
-                    panelIsInHDRMode: loadedOptions.panelIsInHDRMode,
+                    panelIsInHDRMode: reloadRoutingPanelHDR,
                     audioBridgeMode: loadedOptions.audioBridgeMode,
                     // isLive required: without it the reload rebuilds as VOD and HLSVideoEngine fails "cannot build segment plan" (device repro: KiKA).
                     isLive: loadedOptions.isLive,
@@ -2390,9 +2422,10 @@ extension AetherEngine {
         }
     }
 
-    /// Called once per session on T.35 detection. Only upgrades .hdr10 states: a DV / HLG / SDR-clamped session that carries HDR10+ metadata stays on its current format (no evidence the panel is rendering an HDR10 base layer).
+    /// Called once per session on T.35 detection. Only upgrades .hdr10 states: a DV / HLG / SDR-clamped session that carries HDR10+ metadata stays on its current format (no evidence the panel is rendering an HDR10 base layer). A Dolby Vision source clamped to its HDR10 base does read `.hdr10`, so it is upgraded too: that base is where the payload rides.
     @MainActor
-    private func handleHDR10PlusDetected() {
+    func handleHDR10PlusDetected() {
+        sourceCarriesHDR10PlusMetadata = true
         // sourceVideoFormat upgrade is unconditional: a T.35 payload is a source property even when the panel clamps the output to SDR.
         if sourceVideoFormat == .hdr10 {
             sourceVideoFormat = .hdr10Plus

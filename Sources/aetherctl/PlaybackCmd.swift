@@ -599,7 +599,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
           + "fps=\(engine.sourceVideoFrameRate.map { String(format: "%.3f", $0) } ?? "nil") "
           + "bitrate=\(engine.sourceVideoBitrate) "
           + "fmt=\(engine.sourceVideoFormat)"
-          + (engine.sourceDVProfile.map { " dvProfile=\($0)" } ?? ""))
+          + (engine.sourceDVProfile.map { " dvProfile=\($0)" } ?? "")
+          + (engine.dolbyVisionConversion.map { " dvConversion=\($0)" } ?? ""))
 
     // Mimic host-app post-load calls (AetherPlayer openInternal order) to reproduce
     // host-triggered transport races the bare harness would miss.
@@ -621,12 +622,17 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // off the transport itself, not off anything the engine remembers.
             print("  HOSTCALL setRate(\(Issue436RateHold.rate)) (held across a pause/resume)")
             engine.setRate(Issue436RateHold.rate)
+        case "pausestart":
+            // Sodalite#104 round 4: a host that pauses the instant load returns, before any frame
+            // exists (the foreground retune's hold-paused policy). Resumed at tick 8.
+            print("  HOSTCALL pause() right after load")
+            engine.pause()
         case "reloadlive", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case let call where call.hasPrefix("seekfar"):
             break  // #433, in the telemetry loop; `seekfar@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,seekback,seekfar,overlapseek,pauseseek,pausehold)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -944,6 +950,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                              held, held - (pauseHoldPlayhead ?? 0)))
                 engine.play()
             }
+        }
+        if hostCalls.contains("pausestart"), tick == 8 {
+            print(String(format: "  HOSTCALL play() after the start pause (playhead %.2f)", engine.currentTime))
+            engine.play()
         }
         if hostCalls.contains("pauseseek") {
             if tick == 12 {

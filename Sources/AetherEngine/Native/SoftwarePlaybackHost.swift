@@ -143,6 +143,23 @@ final class SoftwarePlaybackHost {
     nonisolated(unsafe) private var _isPlaying: Bool = false
     nonisolated(unsafe) private var _stopRequested: Bool = false
 
+    /// Sodalite#104 round 4: a pause arrived before the first frame, so the loops keep reading until one
+    /// is in (`PausedFirstFrame`). Set by `pause()`, cleared by `play()`, `stop()` and that frame.
+    nonisolated private var pausedBeforeFirstFrame: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _pausedBeforeFirstFrame }
+        set { flagsLock.lock(); _pausedBeforeFirstFrame = newValue; flagsLock.unlock() }
+    }
+    nonisolated(unsafe) private var _pausedBeforeFirstFrame = false
+
+    /// Clears the flag and says whether it was set, in one step, so the first frame and a `play()` cannot
+    /// both act on it.
+    nonisolated private func takePausedBeforeFirstFrame() -> Bool {
+        flagsLock.lock(); defer { flagsLock.unlock() }
+        let was = _pausedBeforeFirstFrame
+        _pausedBeforeFirstFrame = false
+        return was
+    }
+
     /// Condition the demux thread waits on while paused so it doesn't
     /// busy-loop reading packets that would just stack up.
     private let demuxCondition = NSCondition()
@@ -448,9 +465,10 @@ final class SoftwarePlaybackHost {
 
     /// #315: publish the renderer layer's own `readyForDisplay` as `isVideoReadyForDisplay`.
     /// AVFoundation posts a notification for it rather than supporting KVO, and it arrived in
-    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1, below the engine's own floor. Where it is missing
-    /// the fallback is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which
-    /// is one hop earlier than presentation and is documented as such on the public property.
+    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1. Only visionOS still has a floor below that (1.0).
+    /// Where it is missing the fallback is the first frame handed to the renderer
+    /// (`disarmedFallbackFirstFrame`), which is one hop earlier than presentation and is documented as
+    /// such on the public property.
     ///
     /// #344: visionOS has to be named. Falling through to `*` resolves it to the package's declared
     /// visionOS floor, which is 1.0, and that is a compile error rather than a runtime fallback.
@@ -483,10 +501,10 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// #315 fallback below tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1: no `readyForDisplay` on the
-    /// layer, so the first frame the decoder hands the renderer is the closest observable. Called
-    /// off-main. Mirrors the observer's list exactly: a platform named there and not here would get
-    /// neither the notification nor the fallback, so it would never publish readiness at all.
+    /// #315 fallback below visionOS 1.1, the one floor that predates `readyForDisplay` on the layer,
+    /// so the first frame the decoder hands the renderer is the closest observable. Called off-main.
+    /// Mirrors the observer's list exactly: a platform named there and not here would get neither the
+    /// notification nor the fallback, so it would never publish readiness at all.
     nonisolated private func noteFirstFrameEnqueuedForDisplayFallback() {
         guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1) else { return }
         Task { @MainActor [weak self] in self?.isVideoReadyForDisplay = true }
@@ -702,15 +720,15 @@ final class SoftwarePlaybackHost {
             category: .swPlayback
         )
 
-        // HEVC -> VTDecompressionSession (HW) when VideoToolbox can HW-decode this exact format; everything
-        // else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder requires a
-        // HW decoder and has no software fallback, so an HEVC Rext (4:2:2/4:4:4/12-bit) stream routed here on
-        // hardware without a HW decoder (Intel Macs / older Apple TV) would fail VT session creation and show a
-        // black screen. Route those to libavcodec instead, which decodes them. Apple Silicon HW-decodes them,
-        // so the probe keeps HardwareVideoDecoder there.
+        // HEVC -> VTDecompressionSession (HW) when VideoToolbox PROVABLY HW-decodes this exact format;
+        // everything else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder
+        // requires a HW decoder and has no software fallback, so an HEVC Rext stream on hardware without a
+        // HW decoder must go to libavcodec. AE#461: so must every format the probe cannot classify (in-band
+        // parameter sets, Annex-B extradata), which the routing gate reads as "keep native" but which
+        // HardwareVideoDecoder, building from the hvcC alone, can never open.
         if let codecpar = vStream.pointee.codecpar,
            codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
-           VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) {
+           VTCapabilityProbe.hardwareDecodeVerdict(codecpar: codecpar).opensHardwareDecoder {
             videoDecoder.close()
             videoDecoder = HardwareVideoDecoder()
             EngineLog.emit(
@@ -752,6 +770,12 @@ final class SoftwarePlaybackHost {
             // First-frame milestone: demux reached a video packet + decoder produced a pixel buffer.
             if self.bumpFramesEnqueued() == 0 {
                 self.noteFirstFrameEnqueuedForDisplayFallback()
+                if self.takePausedBeforeFirstFrame() {
+                    // The reorder buffer holds four frames before it hands one to the layer, and the
+                    // loops park again from here: without the drain the frame never leaves it.
+                    self.renderer.drainReorderBuffer()
+                    self.presentFirstFrameUnderPause(pts: pts.seconds, generation: self.decodeGeneration)
+                }
                 let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                 EngineLog.emit(
                     "[SWHost] first video frame enqueued: "
@@ -913,12 +937,13 @@ final class SoftwarePlaybackHost {
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
         if pausedByHost {
             pausedByHost = false
+            _ = takePausedBeforeFirstFrame()
             if clockArmed {
                 audioOutput?.setRate(lastRate)
             }
         }
         if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoLayer(renderer.displayLayer)
+            aOut.attachVideoRenderer(renderer.queueTarget)
         }
         if !demuxLoopStarted {
             demuxLoopStarted = true
@@ -979,8 +1004,38 @@ final class SoftwarePlaybackHost {
         }
         pausedByHost = true
         rate = 0
+        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
+           !stopRequested {
+            pausedBeforeFirstFrame = true
+            EngineLog.emit(
+                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents",
+                category: .swPlayback
+            )
+        }
         isPlaying = false
         inFlightSeekResumeIntent = false
+    }
+
+    /// Sodalite#104 round 4: the first frame of a session paused before it is in. Moves the stopped clock
+    /// onto it where it stands before the frame (`PausedFirstFrame.presentationAnchor`). On the main actor,
+    /// so a `play()` either runs first and finds the flag gone, or runs after and restarts this clock.
+    nonisolated private func presentFirstFrameUnderPause(pts: Double, generation: UInt64) {
+        Task { @MainActor [weak self] in
+            guard let self, !self.stopRequested, !self.isPlaying, self.pausedByHost,
+                  generation == self.seekGeneration, let aOut = self.audioOutput else { return }
+            let clock = aOut.currentTimeSeconds
+            let anchor = PausedFirstFrame.presentationAnchor(
+                framePTS: pts, clockArmed: self.clockArmed, clockSeconds: clock)
+            if let anchor {
+                aOut.seekClock(to: CMTime(seconds: anchor, preferredTimescale: 90000), rate: 0)
+            }
+            EngineLog.emit(
+                "[SWHost] #104 first frame in under the pause: pts=\(String(format: "%.3f", pts))s "
+                + "clock=\(String(format: "%.3f", clock))s"
+                + (anchor != nil ? ", stopped clock moved onto the frame" : ", presented where the clock stands"),
+                category: .swPlayback
+            )
+        }
     }
 
     /// AE#374: stop the master clock on the last sample instead of letting it free-run past the end.
@@ -1305,6 +1360,7 @@ final class SoftwarePlaybackHost {
 
     func stop() {
         stopRequested = true
+        pausedBeforeFirstFrame = false
         isPlaying = false
         seekInFlight = false
         // A teardown inside a seek's window would otherwise leave it open on this instance.
@@ -1324,7 +1380,7 @@ final class SoftwarePlaybackHost {
 
         if let aOut = audioOutput {
             aOut.stop()
-            aOut.detachVideoLayer(renderer.displayLayer)
+            aOut.detachVideoRenderer(renderer.queueTarget)
         }
         audioOutput = nil
         audioDecoder?.close()
@@ -1360,7 +1416,11 @@ final class SoftwarePlaybackHost {
         let initialClock = initialClockTime
         // Read at arm time, not captured: a host setRate between load and arming must reach
         // the anchor (the eager synchronizer call it replaced is gated on clockArmed, #107).
-        let currentRate: @Sendable () -> Float = { [weak self] in self?.lastRate ?? 1.0 }
+        let currentRate: @Sendable () -> Float = { [weak self] in
+            guard let self else { return 1.0 }
+            return PausedFirstFrame.armingRate(lastRate: self.lastRate,
+                                               pausedBeforeFirstFrame: self.pausedBeforeFirstFrame)
+        }
         let ring = dvrRing
         let vTbSec = videoTimeBaseSeconds
         let aTbSec = audioTimeBaseSeconds
@@ -1374,7 +1434,13 @@ final class SoftwarePlaybackHost {
             }
             self.liveEdgeLock.unlock()
         }
-        let getIsPlaying: @Sendable () -> Bool = { [weak self] in self?.isPlaying ?? false }
+        // Sodalite#104 round 4: the LOOPS' flag, which also runs them under a pause that arrived before
+        // the first frame. The transport's own flag stays `isPlaying`.
+        let getIsPlaying: @Sendable () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return PausedFirstFrame.loopsMayRun(isPlaying: self.isPlaying,
+                                                pausedBeforeFirstFrame: self.pausedBeforeFirstFrame)
+        }
         let getStopRequested: @Sendable () -> Bool = { [weak self] in self?.stopRequested ?? true }
         // #95: resolved per packet so a tap installed mid-session is picked up by running loops.
         let getAudioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?) = { [weak self] in
@@ -1418,7 +1484,14 @@ final class SoftwarePlaybackHost {
             self?.clockArmed ?? true
         }
         let setClockArmed: @Sendable () -> Void = { [weak self] in
-            self?.clockArmed = true
+            guard let self else { return }
+            self.clockArmed = true
+            // Sodalite#104 round 4: a pause() or play() between this arm reading its rate and the line
+            // above found no clock to act on.
+            guard let aOut, let rate = PausedFirstFrame.rateCorrectionAtArm(
+                transportPlaying: self.isPlaying, pausedBeforeFirstFrame: self.pausedBeforeFirstFrame,
+                synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) else { return }
+            if rate == 0 { aOut.pause() } else { aOut.setRate(rate) }
         }
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0

@@ -493,7 +493,8 @@ public final class AetherEngine: ObservableObject {
     /// The release runs just after the teardown rather than inside it. `setActive(false)` is an XPC round
     /// trip that takes roughly half a second on an Atmos MAT passthrough route, which inline would be half
     /// a second of frozen UI before the host's dismiss can start. A `load()` that follows cancels a release
-    /// that has not run yet, so a stop/load pair never loses its session.
+    /// that has not run yet, so a stop/load pair never loses its session, and a stop that lands while a
+    /// software or audio-only load is still activating releases the session after that activation (AE#538).
     public var deactivatesAudioSessionOnStop: Bool = false
 
     @Published public internal(set) var duration: Double = 0
@@ -523,6 +524,16 @@ public final class AetherEngine: ObservableObject {
     /// `sourceVideoFormat` for Stats-for-Nerds labels ("Dolby Vision P5"); read from the dvcC record.
     @Published public internal(set) var sourceDVProfile: Int? = nil
 
+    /// The Dolby Vision profile rewrite applied to the served stream, nil when the session serves the source's
+    /// own profile (or no Dolby Vision). `.profile7ToProfile81` on a Profile 7 source played on a display
+    /// presenting Dolby Vision, where `videoFormat` reads `.dolbyVision` and `sourceDVProfile` keeps 7.
+    @Published public internal(set) var dolbyVisionConversion: DolbyVisionConversion? = nil
+
+    /// A HDR10+ (ST 2094-40) T.35 payload was seen in this session's video, whatever the source's format.
+    /// `sourceVideoFormat` records it only for an HDR10 source, so a Dolby Vision source carrying both kinds
+    /// of dynamic metadata would otherwise lose it the moment a late panel proof republishes the label.
+    var sourceCarriesHDR10PlusMetadata = false
+
     /// AE#461: base-layer signal compatibility ID from the same dvcC/dvvC record as `sourceDVProfile`
     /// (0 = IPT-only, no compatible base layer). Kept because a decode-path correction has to decide
     /// whether the software path can represent this source BEFORE it tears the session down, and by
@@ -535,6 +546,14 @@ public final class AetherEngine: ObservableObject {
     /// RPU could not be read. Held for the same reason as `sourceDVBLCompatID`: a reload has to judge the
     /// source after the probe that measured it is gone.
     var sourceDolbyVisionRPUProfile: Int? = nil
+
+    /// AE#541: the two load-time terms of the HDR route that a reload cannot take again. The criteria
+    /// readout is only an answer around the handshake, and an in-place rebuild runs none, so an audio
+    /// pick that routed from the raw `panelIsInHDRMode` alone dropped an HDR title from the master to
+    /// the media playlist on the panel the load had just proven. nil readout means suppressed, as at
+    /// the load.
+    var sessionPanelHDRReadout: Bool? = nil
+    var sessionDisplayEligibleForHDR = false
 
     /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
@@ -697,9 +716,9 @@ public final class AetherEngine: ObservableObject {
     /// `phase == .playing/.paused && isSessionReady` therefore lift the cover onto black.
     ///
     /// What backs it: `AVPlayerLayer.isReadyForDisplay` on the native path,
-    /// `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (below tvOS/iOS 17.4 and
-    /// macOS 14.4, where that property does not exist, the software path falls back to the first
-    /// frame handed to the renderer, one hop earlier than presentation). Audio-only sessions have
+    /// `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (on visionOS 1.0, where that
+    /// property does not exist, the software path falls back to the first frame handed to the
+    /// renderer, one hop earlier than presentation). Audio-only sessions have
     /// nothing to display and leave it false.
     ///
     /// Two things it does NOT claim:
@@ -1386,24 +1405,67 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - View binding
 
-    /// Weak: dropping the view reference must not leak the surface through the engine singleton.
-    private weak var boundView: AetherPlayerView?
+    /// Every surface bound and not yet unbound, in bind order. Weak: dropping the view reference must
+    /// not leak the surface through the engine singleton, and a released view drops out on its own.
+    ///
+    /// One reference was not enough (AE#536). A host that remounts its surface by identity while
+    /// keeping the engine gets the incoming view made and bound first, and SwiftUI then still updates
+    /// the OUTGOING view on its way out, which rebinds to it (the #188 rebind), before dismantling it.
+    /// With a single weak reference the engine ended up bound to a view that was about to go, then to
+    /// nothing, and the next session's fresh layer attached nowhere: audio over a black picture. The
+    /// list keeps the incoming view as the fallback that takes over when the outgoing one leaves.
+    private var boundSurfaces: [BoundSurface] = []
+
+    private struct BoundSurface {
+        weak var view: AetherPlayerView?
+    }
+
+    /// The surface the layer is presented on: the most recently bound one that is still alive.
+    private var boundView: AetherPlayerView? {
+        boundSurfaces.last { $0.view != nil }?.view
+    }
 
     /// Bind a render surface. Attaches the active layer immediately; re-attaches on session swaps.
-    /// Binding a different view detaches the old one.
+    /// Binding a different view detaches the old one, which stays the fallback until it is unbound or
+    /// released. A view another engine held is taken over from that engine.
     public func bind(view: AetherPlayerView) {
+        if let previousEngine = view.bindingEngine, previousEngine !== self {
+            previousEngine.surfaceWasTakenOver(view)
+        }
+        view.bindingEngine = self
         if let existing = boundView, existing !== view {
             existing.detach()
         }
-        boundView = view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        boundSurfaces.append(BoundSurface(view: view))
         presentCurrentLayer()
     }
 
-    /// Unbind a view. Idempotent.
+    /// Unbind a view. Idempotent. Unbinding the surface the layer is on detaches it and presents the
+    /// layer on the most recently bound surface that is still alive, if any.
     public func unbind(view: AetherPlayerView) {
-        guard boundView === view else { return }
+        guard boundSurfaces.contains(where: { $0.view === view }) else { return }
+        let wasPresenting = boundView === view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        if view.bindingEngine === self {
+            view.bindingEngine = nil
+        }
+        guard wasPresenting else { return }
         view.detach()
-        boundView = nil
+        presentCurrentLayer()
+    }
+
+    /// Another engine bound `view` (#188's engine swap on a reused view). It is no longer ours to
+    /// present on or to fall back to. Detached before our layer moves to a remaining surface: the view
+    /// would otherwise still record the layer as its own, and the new engine's attach would pull it
+    /// back out of the surface it just moved to. Both happen inside the new engine's bind, in one
+    /// run-loop turn, so the view shows no gap.
+    private func surfaceWasTakenOver(_ view: AetherPlayerView) {
+        let wasPresenting = boundView === view
+        boundSurfaces.removeAll { $0.view == nil || $0.view === view }
+        guard wasPresenting else { return }
+        view.detach()
+        presentCurrentLayer()
     }
 
     /// Attaches nativeHost.playerLayer or softwareHost.displayLayer to the bound view. No-op when no host.
@@ -3160,6 +3222,27 @@ public final class AetherEngine: ObservableObject {
     private var audioSessionDeactivationTask: Task<Void, Never>?
     #endif
 
+    /// The most recent off-main activation or release of the shared session. See `enqueueAudioSessionTransition`.
+    private var audioSessionTransition: Task<Void, Never>?
+
+    /// Run a session activation or release off the main actor, after every one asked for before it.
+    ///
+    /// Since AE#538 both halves are detached tasks, and two detached tasks carry no order between them.
+    /// While the renderer activation still ran synchronously on the main actor a `stop()` could not land
+    /// inside it, so the #215 release always followed it; without the queue a stop during a software or
+    /// audio-only load's activation can send `setActive(false)` first and leave the session active after a
+    /// final teardown. Each transition awaits its predecessor, including a cancelled one, which then drops
+    /// on its own guard. Not platform-gated, so the order is testable where the session does not exist.
+    func enqueueAudioSessionTransition(_ body: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let previous = audioSessionTransition
+        let transition = Task.detached(priority: .userInitiated) {
+            await previous?.value
+            await body()
+        }
+        audioSessionTransition = transition
+        return transition
+    }
+
     #if os(iOS) || os(tvOS)
     /// Route-sharing policy the engine declares with the session category. Platform-split (#116):
     /// tvOS keeps `.longFormAudio` for HDMI route negotiation (#24); on iOS that policy marks the
@@ -3502,9 +3585,13 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        dolbyVisionConversion = nil
+        sourceCarriesHDR10PlusMetadata = false
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
+        sessionPanelHDRReadout = nil
+        sessionDisplayEligibleForHDR = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -4050,6 +4137,8 @@ public final class AetherEngine: ObservableObject {
             attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel && !options.isLive,
             displayEligibleForHDR: observedDisplayCaps.supportsHDR,
             panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
+        sessionPanelHDRReadout = criteriaPanelReadout
+        sessionDisplayEligibleForHDR = observedDisplayCaps.supportsHDR
         if routingPanelHDR != panelHDRAfterHandshake {
             EngineLog.emit(
                 "[DisplayCriteria] panel unproven but HDR-eligible: serving the master and letting "
@@ -4085,7 +4174,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = Self.presentedVideoFormat(
             effectiveFormat: effectiveFormat,
             panelPresentsHDR: panelHDRAfterHandshake,
-            sourceVideoFormat: sourceVideoFormat)
+            sourceCarriesHDR10Plus: sourceCarriesHDR10PlusMetadata)
         #endif
         // #361: the handshake above is the second stretch a host cannot see, and on a real SDR->HDR
         // switch it is seconds long. Recorded on every branch, including the ones with nothing to
@@ -4764,9 +4853,22 @@ public final class AetherEngine: ObservableObject {
                                      itemAxisOffset: liveItemAxisOffsetSeconds)
               }
             : nil
-        let target: Double = isLive
+        var target: Double = isLive
             ? (liveLanding?.sessionTarget ?? seconds)
             : max(0, min(seconds, duration))
+        if isLive, softwareHost != nil, nativeHost == nil, let window = liveWindow {
+            let landing = Self.softwareLiveLanding(requested: target, window: window)
+            if landing < target {
+                EngineLog.emit(
+                    "[AetherEngine] #104 SW live landing held \(String(format: "%.2f", target - landing))s "
+                    + "back: requested=\(String(format: "%.2f", target))s "
+                    + "landing=\(String(format: "%.2f", landing))s "
+                    + "edge=\(String(format: "%.2f", window.edgeTime))s, "
+                    + "so the ring holds the rebuffer lead instead of the clock waiting for it",
+                    category: .engine)
+            }
+            target = landing
+        }
         // AE#446 round 4: a rejoin on a session that advertises no rewind is the one landing measured
         // against something other than what `seekableLiveRange` states, so it says so. Whether the
         // place survived is the whole question the reader of this line has, so the line answers it.
@@ -5474,9 +5576,13 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
+        dolbyVisionConversion = nil
+        sourceCarriesHDR10PlusMetadata = false
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
+        sessionPanelHDRReadout = nil
+        sessionDisplayEligibleForHDR = false
         sourceVideoFrameRate = nil
         sourceVideoBitrate = 0
         sourceVideoCodecName = nil
@@ -5712,11 +5818,11 @@ public final class AetherEngine: ObservableObject {
     /// the same question, and three call sites composing `presentedVideoFormat` themselves is how the
     /// published format and the served stream drift apart.
     @MainActor
-    private func republishPanelPresentsHDR(effectiveFormat: VideoFormat, because reason: String) {
+    func republishPanelPresentsHDR(effectiveFormat: VideoFormat, because reason: String) {
         let corrected = Self.presentedVideoFormat(
             effectiveFormat: effectiveFormat,
             panelPresentsHDR: true,
-            sourceVideoFormat: sourceVideoFormat)
+            sourceCarriesHDR10Plus: sourceCarriesHDR10PlusMetadata)
         guard corrected != videoFormat else { return }
         EngineLog.emit(
             "[AetherEngine] republishing videoFormat \(videoFormat) -> \(corrected): \(reason) (#459)",
@@ -6286,9 +6392,10 @@ public final class AetherEngine: ObservableObject {
     /// `loadGeneration` was bumped by the `stopInternal` that scheduled this, so any `load()` starting in
     /// the meantime bumps it again and the pending deactivation drops rather than releasing the session
     /// out from under the new item. `stopInternal` also cancels a pending task before scheduling a new one.
+    /// The release queues behind a renderer activation still in flight (AE#538), see `enqueueAudioSessionTransition`.
     private func scheduleAudioSessionDeactivation() {
         let generation = loadGeneration
-        audioSessionDeactivationTask = Task.detached(priority: .userInitiated) { [weak self] in
+        audioSessionDeactivationTask = enqueueAudioSessionTransition { [weak self] in
             guard let self else { return }
             guard !Task.isCancelled, await self.loadGeneration == generation else { return }
             AetherEngine.deactivateSharedAudioSession()
@@ -6377,6 +6484,7 @@ public final class AetherEngine: ObservableObject {
         nativeSourceTeardownTask = nativeVideoSession?.stop()
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
+        dolbyVisionConversion = nil
         airPlayProgressWatchdog?.cancel()
         airPlayProgressWatchdog = nil
         displayModeDiagnostic?.cancel()
