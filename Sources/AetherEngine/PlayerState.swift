@@ -103,8 +103,9 @@ public enum VideoRoute: String, Sendable, Equatable {
 public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// No session: pre-load, or torn down.
     case none
-    /// The source carries no audio stream (or none was selected). Silence is the source's, not the
-    /// engine's, and no ladder rung can change it.
+    /// The source carries no audio stream. Silence is the source's, not the engine's, and no ladder
+    /// rung can change it. A source whose audio stream the pick passed over (its parameters left
+    /// empty by the probe) is `.droppedNoPipeline`, not this (AE#641).
     case noAudioInSource
     /// The source's audio bitstream is muxed into fMP4 unchanged: Atmos, DTS-HD and every other
     /// bitstream reach the renderer exactly as authored.
@@ -116,9 +117,11 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// libavcodec decodes the audio and the engine renders it itself (the software path and the
     /// software audio-only host).
     case decoded
-    /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, or the
-    /// bridge could not be built or could not write its header. The session plays video-only and
-    /// silently. This is the one value a fallback ladder acts on.
+    /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
+    /// bridge could not be built or could not write its header, no stream could be picked because the
+    /// probe left its parameters empty, or a live bridge was built and its decoder produced nothing,
+    /// after which the engine rebuilt the session without the track (AE#641). The session plays
+    /// video-only and silently. This is the one value a fallback ladder acts on.
     case droppedNoPipeline
     /// AVFoundation owns the audio: the remote-HLS bypass and the native audio-only host both hand
     /// the source to AVPlayer, which does its own media selection. The engine has no pipeline of its
@@ -605,7 +608,17 @@ public struct LoadOptions: Sendable, Equatable {
     /// from wherever the source can still serve, so a host that turns this off owns the eviction case too.
     public var clampsLiveResumeToWindow: Bool = true
 
-    /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
+    /// AVPlayer item from the remote URL directly: no demuxer probe, no loopback. AVPlayer manages live
+    /// edge / reconnect. Built for live (`isLive: true`, Jellyfin live `master.m3u8`); a remote HLS VOD
+    /// URL lands here too, whatever this says, because the loopback path reroutes it (AE#154). Default
+    /// `false`.
+    ///
+    /// On this route the clock is AVPlayer's item time, and that is not always the media time of the
+    /// frame on screen (AE#616). An origin whose playlist places a segment at its slot while the segment
+    /// starts at the keyframe before it (a Jellyfin transcode restarted by a seek) makes item time lead
+    /// the picture by that gap. `clock.sourceTime` subtracts the gap while one of the renditions the
+    /// engine injects for `LoadOptions.externalSubtitles` (#316) is selected and presenting; without one
+    /// it is item time. `clock.currentTime` and `seek(to:)` stay on item time either way.
     public var nativeRemoteHLS: Bool
 
     /// Reroute a live `nativeRemoteHLS` session onto the loopback live-ingest path when AVPlayer reaches
@@ -623,7 +636,7 @@ public struct LoadOptions: Sendable, Equatable {
     /// it along with the watchdog.
     public var nativeRemoteHLSIngestFallback: Bool
 
-    /// Emit raw ASS event lines (`ReadOrder,Layer,Style,...,Text` including override tags) instead of plain-text extraction. Opt-in for hosts that render ASS styling themselves; pair with `TrackInfo.assHeader`. Only affects ASS / SSA codecs. Default `false` (AetherEngine#30).
+    /// Emit raw ASS event lines (`ReadOrder,Layer,Style,...,Text` including override tags) instead of plain-text extraction. Opt-in for hosts that render ASS styling themselves; pair with `TrackInfo.assHeader`. Only affects ASS / SSA codecs, on embedded and sidecar tracks alike: libavcodec normalises SubRip, WebVTT and mov_text through `ff_ass_add_rect` as well, so those carry an ASS payload the engine could emit but never does, and a session that mixes an ASS track with a SubRip one needs no reload to cross between them (AE#587). Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
     /// Declare a mov_text track in the init moov so text subtitles survive PiP / AirPlay / external display via AVMediaSelection. Bitmap codecs (PGS / DVB / DVD) excluded automatically. Default `false` (#55).
@@ -831,6 +844,19 @@ public struct LoadOptions: Sendable, Equatable {
     /// is demuxed), so this has nothing to act on there and the engine says so in the log.
     public var preferredDecodePath: DecodePath = .automatic
 
+    /// Whether a native session AVPlayer refuses on its merits may be rebuilt on the software path
+    /// (AE#561). Default `true`.
+    ///
+    /// When AVPlayer fails the item with a verdict on the MEDIA (`CoreMediaErrorDomain`), every native
+    /// recovery answers the same bytes again, so the engine spends one rebuild per session on
+    /// `SoftwarePlaybackHost`, whose libavcodec skips the frame Apple's parser refused. `false`
+    /// declines that rung: the failure surfaces as `.error` with `PlaybackErrorKind.nativeItemFailed`,
+    /// the way it did before 7.9.0, for a host that re-plans a failing title with a ladder of its own
+    /// (AE#629). Either way `softwarePathEscalations` says when the rung is taken.
+    ///
+    /// A tuning field: correctable on a playing session through `reloadAtCurrentPosition(applying:)`.
+    public var escalatesToSoftwarePath: Bool = true
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -882,7 +908,8 @@ public struct LoadOptions: Sendable, Equatable {
         audioDelaySeconds: Double = 0,
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
-        preferredDecodePath: DecodePath = .automatic
+        preferredDecodePath: DecodePath = .automatic,
+        escalatesToSoftwarePath: Bool = true
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -925,6 +952,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath
+        self.escalatesToSoftwarePath = escalatesToSoftwarePath
     }
 }
 
@@ -950,7 +978,10 @@ public struct SourceProbe: Sendable {
     /// 0 for live streams / pipes.
     public let durationSeconds: Double
     /// `.sdr` when no HDR signaling or no video track.
-    public let videoFormat: VideoFormat
+    ///
+    /// Settable inside the module so the `.hdr10Plus` upgrade from `probe(url:detecting: .hdr10Plus)` lands
+    /// here rather than rebuilding the struct field by field.
+    public internal(set) var videoFormat: VideoFormat
     /// FFmpeg AVCodecID raw value; 0 (AV_CODEC_ID_NONE) when no video track.
     public let videoCodecID: Int32
     /// Codec name from libavcodec (e.g. "hevc", "h264", "av1"). nil when unavailable.
@@ -964,6 +995,18 @@ public struct SourceProbe: Sendable {
     public let isDolbyVision: Bool
     /// Dolby Vision profile number (5, 7, 8, 10) read from the dvcC/dvvC configuration record; nil when not DV.
     public let dvProfile: Int?
+    /// AE#658: pixel format, bit depth, colour description and profile of the video stream; nil when
+    /// the source has no video.
+    public let videoStreamFormat: VideoStreamFormat?
+    /// HDR10+ (ST 2094-40) dynamic metadata was SEEN in this source's video.
+    ///
+    /// Always `false` unless the probe was asked for `.hdr10Plus` (the container carries no such declaration,
+    /// so there is nothing to read without looking at packets). `false` therefore means "not asked, or not
+    /// seen inside the scan budget", never "proven absent": a positive is evidence, a negative is not.
+    ///
+    /// Separate from `videoFormat == .hdr10Plus` because a Dolby Vision source can carry an HDR10+ layer too
+    /// (Blu-ray Profile 7 and the 8.1 remuxes of it), and that source keeps reading `.dolbyVision`.
+    public internal(set) var carriesHDR10PlusMetadata: Bool
     /// Settable inside the module so `probeDetectingAtmos` can enrich one track without rebuilding the struct field by field.
     public internal(set) var audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
@@ -983,11 +1026,14 @@ public struct SourceProbe: Sendable {
         videoFrameRate: Double?,
         isDolbyVision: Bool,
         dvProfile: Int? = nil,
+        carriesHDR10PlusMetadata: Bool = false,
         audioTracks: [TrackInfo],
         subtitleTracks: [TrackInfo],
         metadata: MediaMetadata = MediaMetadata(title: nil, artist: nil, album: nil, artworkData: nil),
-        isLive: Bool = false
+        isLive: Bool = false,
+        videoStreamFormat: VideoStreamFormat? = nil
     ) {
+        self.videoStreamFormat = videoStreamFormat
         self.url = url
         self.durationSeconds = durationSeconds
         self.videoFormat = videoFormat
@@ -998,6 +1044,7 @@ public struct SourceProbe: Sendable {
         self.videoFrameRate = videoFrameRate
         self.isDolbyVision = isDolbyVision
         self.dvProfile = dvProfile
+        self.carriesHDR10PlusMetadata = carriesHDR10PlusMetadata
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
         self.metadata = metadata
@@ -1025,6 +1072,10 @@ public struct SoftwareDecodeProbeResult: Sendable {
     /// container that withheld its PTS and had one invented from decode order produces a sawtooth,
     /// which is the one shape no packet-level or renderer-level counter can see.
     public let frameTimesSeconds: [Double]
+    /// AE#654: the colour tags the first picture reached the display layer with, as
+    /// `primaries / transfer / matrix` in CoreVideo's names, `-` for a missing one. An untagged source
+    /// reads `ITU_R_709_2` in all three here, the same as VideoToolbox's own output for it.
+    public let firstFrameColor: String?
 
     public init(
         codecName: String,
@@ -1040,9 +1091,11 @@ public struct SoftwareDecodeProbeResult: Sendable {
         firstFrameWidth: Int,
         firstFrameHeight: Int,
         firstError: String?,
-        frameTimesSeconds: [Double] = []
+        frameTimesSeconds: [Double] = [],
+        firstFrameColor: String? = nil
     ) {
         self.frameTimesSeconds = frameTimesSeconds
+        self.firstFrameColor = firstFrameColor
         self.codecName = codecName
         self.codecID = codecID
         self.width = width
@@ -1094,7 +1147,26 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// track. Hosts can avoid presenting overlay controls that cannot affect it.
     public let isNativelyRenderedSubtitle: Bool
 
-    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false) {
+    /// AE#658, audio only: sample rate in Hz, 0 when undeclared.
+    public let sampleRate: Int
+    /// AE#658, audio only: bits per sample the stream carries (`bits_per_raw_sample`), 0 where the codec
+    /// has no fixed depth (AAC, AC-3, E-AC-3, Opus decode to float and have none to report).
+    public let bitsPerSample: Int
+    /// AE#658, audio only: the decoder's output sample format in libav's names ("fltp", "s32p", "s16"),
+    /// nil when the probe had no decoder for the stream.
+    public let sampleFormat: String?
+    /// AE#658, audio only: the channel layout as libav describes it ("stereo", "5.1(side)", "7.1").
+    public let channelLayout: String?
+    /// AE#658: codec profile as libavcodec names it ("LC", "DTS-HD MA + DTS:X", "Dolby TrueHD + Dolby Atmos"),
+    /// nil when undeclared. This is where DTS:X and TrueHD Atmos show up; `isAtmos` covers E-AC-3 JOC only.
+    public let profile: String?
+
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil) {
+        self.sampleRate = sampleRate
+        self.bitsPerSample = bitsPerSample
+        self.sampleFormat = sampleFormat
+        self.channelLayout = channelLayout
+        self.profile = profile
         self.id = id
         self.name = name
         self.codec = codec

@@ -3,13 +3,19 @@ import AetherEngine
 
 // MARK: - probe
 
-func runProbe(url: URL) -> Int32 {
+func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
     EngineLog.handler = { print($0) }
     print("aetherctl probe: \(url.absoluteString)")
+    if !detecting.isEmpty {
+        var passes: [String] = []
+        if detecting.contains(.hdr10Plus) { passes.append("hdr10plus (packet scan)") }
+        if detecting.contains(.atmos) { passes.append("atmos (bounded decode)") }
+        print("detail passes: \(passes.joined(separator: ", "))")
+    }
     print("")
     let probe: SourceProbe
     do {
-        probe = try AetherEngine.probe(url: url)
+        probe = try AetherEngine.probe(url: url, detecting: detecting)
     } catch {
         print("ERROR: \(error)")
         return 1
@@ -23,8 +29,17 @@ func runProbe(url: URL) -> Int32 {
     print("Duration:    \(duration)s")
     print("Video:       codec=\(codec) resolution=\(res) fps=\(rate)")
     print("  format:    \(probe.videoFormat)")
+    if let f = probe.videoStreamFormat {
+        print("  pixels:    \(f.pixelFormat ?? "-") depth=\(f.bitDepth.map { "\($0)-bit" } ?? "-") profile=\(f.profile ?? "-")")
+        print("  colour:    primaries=\(f.colorPrimariesLabel ?? "-") transfer=\(f.transferLabel ?? "-") "
+              + "matrix=\(f.matrixLabel ?? "-") range=\(f.rangeLabel ?? "-")")
+    }
     if probe.isDolbyVision {
         print("  HDR/DV:    Dolby Vision signaled")
+    }
+    if detecting.contains(.hdr10Plus) {
+        // A negative here means "not seen inside the scan budget", never "proven absent".
+        print("  HDR10+:    \(probe.carriesHDR10PlusMetadata ? "ST 2094-40 metadata seen" : "not seen")")
     }
     print("")
 
@@ -37,6 +52,8 @@ func runProbe(url: URL) -> Int32 {
             let atmos = track.isAtmos ? " [Atmos]" : ""
             let def = track.isDefault ? " (default)" : ""
             print("  [\(track.id)] codec=\(track.codec) channels=\(track.channels) lang=\(lang)\(atmos)\(def)")
+            print("       rate=\(track.sampleRate) Hz bits=\(track.bitsPerSample) fmt=\(track.sampleFormat ?? "-") "
+                  + "layout=\(track.channelLayout ?? "-") profile=\(track.profile ?? "-")")
             print("       title=\(track.name)")
         }
     }

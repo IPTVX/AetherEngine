@@ -16,7 +16,7 @@ extension HLSVideoEngine {
         case profile7          // HEVC P7 dual-layer (BL = HDR10)   → hvc1 + PQ (BL only)
         case profile82         // HEVC P8.2 with SDR-compat base    → play Rec.709 base as plain hvc1
         case av1Profile10      // AV1 P10.0 (no base)               → dav1 + PQ
-        case av1Profile101     // AV1 P10.1 with HDR10-compat base  → dav1 + PQ
+        case av1Profile101     // AV1 P10.1 with HDR10-compat base  → av01 + PQ + SUPPLEMENTAL dav1
         case av1Profile104     // AV1 P10.4 with HLG-compat base    → av01 + HLG + SUPPLEMENTAL dav1
         case av1Profile102     // AV1 P10.2 with SDR-compat base    → play Rec.709 base as plain av01
         case unknown           // anything else                     → reject
@@ -181,6 +181,22 @@ extension HLSVideoEngine {
         return s
     }
 
+    /// Same string read off the first SPS of Annex-B extradata (MPEG-TS, Annex-B Matroska), which
+    /// carries no hvcC. The SPS's profile_tier_level general part is byte for byte the hvcC header
+    /// bytes 1..12, and it is what the mp4 muxer builds the init's hvcC from, so the two agree.
+    /// Audit HLS-3: without this an 8-bit Main TS source fell back to the Main10 declaration.
+    static func hevcCodecsString(
+        fromAnnexBExtradata extradata: [UInt8],
+        sampleEntry: String = "hvc1"
+    ) -> String? {
+        guard let sps = VideoConfigRecord.splitAnnexBNALs(extradata)
+            .first(where: { $0.count > 2 && (($0[0] >> 1) & 0x3F) == 33 }) else { return nil }
+        // Past the 2-byte NAL header: one byte of vps_id / max_sub_layers / nesting, then the PTL.
+        let rbsp = H264SPS.unescape(Array(sps.dropFirst(2)))
+        guard rbsp.count >= 13 else { return nil }
+        return hevcCodecsString(fromConfigRecord: [1] + Array(rbsp[1...12]), sampleEntry: sampleEntry)
+    }
+
     /// RFC 6381 `avc1.PPCCLL` read straight off the avcC configuration record, which states all three
     /// bytes outright: AVCProfileIndication, profile_compatibility (the constraint_set flags) and
     /// AVCLevelIndication are bytes 1..3. Same reasoning as `hevcCodecsString`: the record is what the
@@ -239,8 +255,8 @@ extension HLSVideoEngine {
             profile: codecpar.pointee.profile, level: codecpar.pointee.level)
     }
 
-    /// Derive the plain-HEVC CODECS string from the source hvcC when parseable, else fall back to the
-    /// legacy Main10 form. Used only by the non-DV `.none` / `.profile82` branch; DV variants keep their
+    /// Derive the plain-HEVC CODECS string from the source hvcC (or the SPS of Annex-B extradata) when
+    /// parseable, else fall back to the legacy Main10 form. Used only by the non-DV `.none` / `.profile82` branch; DV variants keep their
     /// deliberate `hvc1.2.4` (Main10 PQ base) declaration.
     private func plainHEVCCodecs(
         codecpar: UnsafePointer<AVCodecParameters>,
@@ -249,7 +265,8 @@ extension HLSVideoEngine {
         if let ed = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
             let bytes = Array(UnsafeBufferPointer(
                 start: ed, count: Int(codecpar.pointee.extradata_size)))
-            if let derived = Self.hevcCodecsString(fromConfigRecord: bytes) {
+            if let derived = Self.hevcCodecsString(fromConfigRecord: bytes)
+                ?? Self.hevcCodecsString(fromAnnexBExtradata: bytes) {
                 return derived
             }
         }
@@ -331,12 +348,22 @@ extension HLSVideoEngine {
                     dvVariant: dvVariant
                 )
             case .av1Profile101:
-                // P10.1: HDR10-compat base; analogous to HEVC P8.1.
+                // P10.1: HDR10-compat base; av01 + SUPPLEMENTAL dav1/db1p. Analogous to HEVC P8.1, and
+                // the same shape as P10.4 one branch below with PQ and db1p in place of HLG and db4h.
+                // The bare dav1 that stood here is the packaging of a source WITHOUT a base layer
+                // (P10.0, the analogue of HEVC P5); a cross-compatible profile carries its base layer's
+                // own sample entry so a client that does not know Dolby Vision still plays it, and the
+                // brand in SUPPLEMENTAL-CODECS is what makes AVPlayer engage the RPU (AE#547).
+                let bd = bitDepthRaw > 0 ? bitDepthRaw : 10
+                let primary = String(
+                    format: "av01.%d.%02dM.%02d.0.111.09.16.09.0",
+                    av1Profile, av1Level, bd
+                )
                 return CodecRoute(
-                    codecTagOverride: "dav1",
+                    codecTagOverride: "av01",
                     videoRange: .pq,
-                    primaryCodecs: "dav1.10.\(dvLevelStr)",
-                    supplementalCodecs: nil,
+                    primaryCodecs: primary,
+                    supplementalCodecs: "dav1.10.\(dvLevelStr)/db1p",
                     doviConfig: .keep,
                     convertP7ToProfile81: false,
                     dvVariant: dvVariant

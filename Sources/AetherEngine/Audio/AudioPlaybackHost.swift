@@ -145,6 +145,7 @@ final class AudioPlaybackHost {
         self.audioDecoder = aDec
         self.audioStreamIndex = resolvedAudioIdx
         self.audioOutput = AudioOutput()
+        self.audioOutput?.volume = volume
 
         if let start = startPosition, start > 0 {
             // #254: same off-main, deadline-bounded reposition the transport seek uses. Also load()'s
@@ -168,11 +169,33 @@ final class AudioPlaybackHost {
         // Resume the synchronizer a pause() froze (rate 0). Guarded on demuxLoopStarted so a pause() before
         // first play() doesn't eager-start the un-anchored synchronizer (would tick the clock through spin-up
         // and drop the first samples; clock is armed off the first decoded sample).
-        if pausedByHost {
+        switch RendererClockResume.onPlay(
+            hostPaused: pausedByHost,
+            clockArmed: clockArmed && demuxLoopStarted,
+            synchronizerRate: audioOutput?.rate ?? 0,
+            // This host has neither a rebuffer that stops the clock nor an end-of-media park.
+            rebuffering: false,
+            parkedAtEndOfMedia: false
+        ) {
+        case .resumeHostPause:
             pausedByHost = false
             if demuxLoopStarted {
                 audioOutput?.setRate(lastRate)
             }
+        case .restartStalledClock:
+            // AE#549, same wedge as the software host: a system interruption stops this clock without
+            // going through pause(), and until now no door here could start it again.
+            if let aOut = audioOutput {
+                EngineLog.emit(
+                    "[AudioHost] AE#549: the clock stopped without a pause of ours; restarting at "
+                    + "\(String(format: "%.3f", aOut.currentTimeSeconds))s rate=\(lastRate) "
+                    + "(was \(aOut.rate), renderer self-flushes=\(aOut.automaticFlushCount))",
+                    category: .swPlayback
+                )
+                aOut.seekClock(to: aOut.currentTime, rate: lastRate)
+            }
+        case .none:
+            break
         }
         if !demuxLoopStarted {
             demuxLoopStarted = true
@@ -184,6 +207,18 @@ final class AudioPlaybackHost {
         isPlaying = true
         inFlightSeekResumeIntent = true
     }
+
+    #if DEBUG
+    /// AE#549 drill, same shape as the software host: stop the master clock behind the host's back.
+    func stallClockForTesting() -> Bool {
+        guard let aOut = audioOutput, clockArmed, demuxLoopStarted else { return false }
+        aOut.pause()
+        return true
+    }
+
+    var clockRateForTesting: Float? { audioOutput?.rate }
+    var outputVolumeForTesting: Float? { audioOutput?.volume }
+    #endif
 
     func pause() {
         audioOutput?.pause()
@@ -287,9 +322,9 @@ final class AudioPlaybackHost {
         isReady = false
     }
 
-    var volume: Float {
-        get { audioOutput?.volume ?? 1.0 }
-        set { audioOutput?.volume = newValue }
+    /// #660: held here, not only on the output, because the engine sets it before `load()` builds one.
+    var volume: Float = 1.0 {
+        didSet { audioOutput?.volume = volume }
     }
 
     // MARK: - Demux loop
@@ -418,7 +453,9 @@ final class AudioPlaybackHost {
                 // tail. flush() alone dropped the final ~21ms+ of every audio-only title.
                 if let aDec = audioDecoder, let aOut = audioOutput,
                    seekGeneration() == seenSeekGeneration {
-                    let tail = aDec.drain()
+                    // Audit DEC-2: a seek's flush can land inside the drain, as in `decode` below.
+                    let drained = aDec.drain()
+                    let tail = seekGeneration() == seenSeekGeneration ? drained : []
                     for buf in tail { aOut.enqueue(sampleBuffer: buf) }
                     if let last = tail.last {
                         let end = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(last))
@@ -460,6 +497,13 @@ final class AudioPlaybackHost {
             if packet.pointee.stream_index == audioStreamIndex,
                let aDec = audioDecoder, let aOut = audioOutput {
                 let buffers = aDec.decode(packet: packet)
+                // Audit DEC-2 (the AE#491 rule on the audio-only host): the seek's flush can land
+                // inside `decode`, so the buffers are checked out again.
+                if seekGeneration() != seenSeekGeneration {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
                 for buf in buffers {
                     aOut.enqueue(sampleBuffer: buf)
                 }

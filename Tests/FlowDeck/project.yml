@@ -1,0 +1,80 @@
+name: AetherEngineValidation
+options:
+  deploymentTarget:
+    iOS: "16.0"
+    tvOS: "16.0"
+    macOS: "14.0"
+packages:
+  AetherEngine:
+    path: ../..
+targets:
+  AetherEngineiOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../AetherEngineTests
+      - path: ../AetherEngineSMBTests
+    dependencies:
+      - package: AetherEngine
+        product: AetherEngine
+      - package: AetherEngine
+        product: AetherEngineSMB
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.ios
+        SWIFT_VERSION: 6.0
+  AetherEngineTVOSTests:
+    type: bundle.unit-test
+    platform: tvOS
+    sources:
+      - path: ../AetherEngineTests
+      - path: ../AetherEngineSMBTests
+    dependencies:
+      - package: AetherEngine
+        product: AetherEngine
+      - package: AetherEngine
+        product: AetherEngineSMB
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.tvos
+        SWIFT_VERSION: 6.0
+  AetherEngineMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: ../AetherEngineTests
+      - path: ../AetherEngineSMBTests
+    dependencies:
+      - package: AetherEngine
+        product: AetherEngine
+      - package: AetherEngine
+        product: AetherEngineSMB
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.mac
+        SWIFT_VERSION: 6.0
+schemes:
+  AetherEngineiOSTests:
+    build:
+      targets:
+        AetherEngineiOSTests: test
+    test:
+      targets:
+        - AetherEngineiOSTests
+  AetherEngineTVOSTests:
+    build:
+      targets:
+        AetherEngineTVOSTests: test
+    test:
+      targets:
+        - AetherEngineTVOSTests
+  AetherEngineMacTests:
+    build:
+      targets:
+        AetherEngineMacTests: test
+    test:
+      targets:
+        - AetherEngineMacTests

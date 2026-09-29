@@ -22,6 +22,20 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
     var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
 
+    /// AE#658: fires (decode thread) on the first displayed frame and whenever the decoded format or the
+    /// display buffer's format changes. Guarded by `lock`, like everything `emit` reads.
+    var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
+    private var decodedFormatKey: DecodedFormatKey?
+    private var reportedFormatKey: DecodedFormatKey?
+
+    /// The decoder's own output, taken before a deinterlace graph can rewrite the frame (the hardware
+    /// graph hands `emit` a VideoToolbox surface whose pixel format says nothing about the decode).
+    struct DecodedFormatKey: Equatable {
+        var pixelFormat: Int32
+        var color: ColorDescription
+        var pixelBufferType: OSType = 0
+    }
+
     /// True when the source is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false
 
@@ -77,6 +91,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Deinterlacer selection + cadence from LoadOptions. Set by the host BEFORE `open`;
     /// applied to the filter there (mutating it mid-stream would need a graph rebuild).
     var deinterlaceConfig = DeinterlaceConfig()
+
+    /// #544: decode on the calling thread with no frame-level threading. Set before `open`; the
+    /// still extractor is the only caller, everything on a playback path wants the parallel default.
+    var decodesSingleThreaded = false
 
     /// AE#499: what the container declared about colour, captured at `open` before a single frame
     /// exists. A decoded frame carries the VUI alone, and a remux whose VUI is empty would otherwise
@@ -153,8 +171,15 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             return AV_PIX_FMT_YUV420P
         }
 
-        ctx.pointee.thread_count = Int32(ProcessInfo.processInfo.activeProcessorCount)
-        ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+        if decodesSingleThreaded {
+            // #544: a still run is one short GOP decoded once. Frame-level threading buys throughput
+            // nobody is waiting for and costs output delay plus a second worker pool.
+            ctx.pointee.thread_count = 1
+            ctx.pointee.thread_type = 0
+        } else {
+            ctx.pointee.thread_count = Int32(ProcessInfo.processInfo.activeProcessorCount)
+            ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+        }
 
         // Belt-and-suspenders hwaccel=none: some decoders ignore get_format.
         var opts: OpaquePointer?
@@ -225,6 +250,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if Self.disposition(forSendResult: sendRet) == .drainAndRetry {
             drainDecodedFrames()
             lock.lock()
+            // Audit DEC-1: the drain drops the lock between frames, so a flush can land in it.
+            if let epoch, epoch != _feedEpoch { lock.unlock(); return }
             sendRet = codecContext == nil ? FFmpegErr.einval : avcodec_send_packet(ctx, packet)
             lock.unlock()
         }
@@ -258,6 +285,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // AE#499: fill the fields the VUI left open from the container's declaration BEFORE any
             // consumer reads the frame, for the same reason the timestamp repair below runs here.
             ColorDescription.backfill(frame: f, container: containerColor)
+            decodedFormatKey = DecodedFormatKey(pixelFormat: f.pointee.format, color: ColorDescription(frame: f))
 
             // #407: repair the frame's own timestamp BEFORE anything reads it. A frame that reaches
             // the renderer with no PTS is unschedulable and gets dropped there, so every consumer
@@ -398,6 +426,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             pixelBuffer = converted
         }
 
+        reportDecodedFormat(pixelBuffer: pixelBuffer)
+
         let pts = f.pointee.pts
         let cmPTS: CMTime
         if pts != Int64.min {
@@ -420,14 +450,24 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
     }
 
+    /// #544: `resetFilterGraph: false` keeps the deinterlace graph across the flush. The still
+    /// extractor flushes before every run, and rebuilding the graph means a fresh Metal pipeline, a
+    /// fresh full-resolution hwframes pool AND an unconditional `[Deinterlace] engaged` line, about
+    /// sixteen times a second while a viewer holds the scrub. That line alone overwrites a host's
+    /// whole diagnostic ring in half a minute. A still run decodes a full GOP and returns the frame
+    /// at its target, so the filter has context from this position by the time that frame is made.
     func flush() {
+        flush(resetFilterGraph: true)
+    }
+
+    func flush(resetFilterGraph: Bool) {
         lock.lock()
         defer { lock.unlock() }
         // AE#492: retires every packet a caller had already decided to send. Bumped under the lock,
         // so a feed that has not reached `avcodec_send_packet` yet is refused from here on.
         _feedEpoch &+= 1
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
-        deinterlacer.teardown()
+        if resetFilterGraph { deinterlacer.teardown() }
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
     }
@@ -537,6 +577,21 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         return out
     }
 
+    private func reportDecodedFormat(pixelBuffer: CVPixelBuffer) {
+        guard let onDecodedFormat, var key = decodedFormatKey else { return }
+        key.pixelBufferType = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        guard key != reportedFormatKey else { return }
+        reportedFormatKey = key
+        onDecodedFormat(DecodedVideoFormat(
+            frame: VideoStreamFormat(
+                pixelFormat: AVPixelFormat(rawValue: key.pixelFormat),
+                declaredBitDepth: 0,
+                color: key.color,
+                codecID: codecContext?.pointee.codec_id ?? AV_CODEC_ID_NONE,
+                profile: codecContext?.pointee.profile ?? AV_PROFILE_UNKNOWN),
+            pixelBufferFormat: DecodedVideoFormat.fourCC(key.pixelBufferType)))
+    }
+
     // MARK: - AVFrame → CVPixelBuffer (sws_scale)
 
     private func convertFrameToPixelBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CVPixelBuffer? {
@@ -615,20 +670,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     // MARK: - Color Space Metadata
 
     /// Map FFmpeg color metadata to CVPixelBuffer attachments for correct HDR10 rendering (BT.2020 + PQ).
+    /// Every field is written, a gap included (AE#654): VideoToolbox never hands the display layer an
+    /// untagged buffer, and neither may this decoder.
     private func attachColorSpace(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
-        let primaries = ColorAttachments.primaries(frame.pointee.color_primaries)
-        let transfer = ColorAttachments.transfer(frame.pointee.color_trc)
-        let matrix = ColorAttachments.matrix(frame.pointee.colorspace)
-
-        if let primaries {
-            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, primaries, .shouldPropagate)
-        }
-        if let transfer {
-            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, transfer, .shouldPropagate)
-        }
-        if let matrix {
-            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
-        }
+        let tags = ColorAttachments.presented(ColorDescription(frame: frame))
+        CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, tags.primaries, .shouldPropagate)
+        CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tags.transfer, .shouldPropagate)
+        CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, tags.matrix, .shouldPropagate)
     }
 
     // MARK: - Pixel Aspect Ratio (anamorphic SD)

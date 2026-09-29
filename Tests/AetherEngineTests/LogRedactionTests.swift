@@ -170,6 +170,94 @@ struct LogRedactionTests {
         #expect(LogRedaction.redact(line) == line)
     }
 
+    @Test("an Xtream Codes path loses its password and keeps the account name", arguments: [
+        ("http://h:8080/live/john/S3cretPass/12345.m3u8", "http://h:8080/live/john/<redacted>/12345.m3u8"),
+        ("http://h:8080/movie/john/S3cretPass/678.mkv", "http://h:8080/movie/john/<redacted>/678.mkv"),
+        ("http://h:8080/series/john/S3cretPass/901.mkv", "http://h:8080/series/john/<redacted>/901.mkv"),
+        ("http://h:8080/timeshift/john/S3cretPass/60/2026-09-24:20-00/12345.ts",
+         "http://h:8080/timeshift/john/<redacted>/60/2026-09-24:20-00/12345.ts"),
+        ("http://h:8080/hls/a1b2c3d4e5/12345_3.ts", "http://h:8080/hls/<redacted>/12345_3.ts"),
+        ("http://h:8080/hlsr/a1b2c3d4e5/john/S3cretPass/12345/1/7.ts", "http://h:8080/hlsr/<redacted>/12345/1/7.ts"),
+    ])
+    func xtreamPath(url: String, expected: String) {
+        let line = LogRedaction.redact("[AetherEngine] load url=\(url) source-format=hls")
+        #expect(line == "[AetherEngine] load url=\(expected) source-format=hls")
+    }
+
+    @Test("an ordinary path under the same prefixes is left alone", arguments: [
+        "https://origin.example/live/master.m3u8",
+        "https://origin.example/live/channel1/index.m3u8",
+        "https://origin.example/movie/trailer.mp4",
+        "https://origin.example/live/ch1/index.m3u8?x=1",
+        "https://jellyfin.example/LiveTv/LiveStreamFiles/abc/stream.ts",
+    ])
+    func ordinaryPrefixedPathsSurvive(url: String) {
+        #expect(LogRedaction.redact("[x] url=\(url) ok") == "[x] url=\(url) ok")
+    }
+
+    @Test("a URL logged percent-encoded inside another URL's query loses its token (audit NET-1)")
+    func percentEncodedNestedURL() {
+        // The exact shape the pre-NET-1 origin relay logged on every request.
+        let origin = "https://jf.example.com/Videos/abc/master.m3u8?MediaSourceId=x&api_key=\(token)&Tag=7"
+        let encoded = origin.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let lines = [
+            "[HLSLocalServer] GET /deadbeef/aether-origin-relay?origin=\(encoded) HTTP/1.1 fd=12",
+            "[NativeAVPlayerHost] #3 load url=http://127.0.0.1:50123/deadbeef/aether-origin-relay?origin=\(encoded)",
+        ]
+        for line in lines {
+            let out = LogRedaction.redact(line)
+            #expect(!out.contains(token), "leaked: \(out)")
+            #expect(out.contains("api%5Fkey%3D<redacted>%26Tag%3D7"), "\(out)")
+            #expect(out.contains("MediaSourceId%3Dx"), "diagnostic context went with it: \(out)")
+        }
+        let tail = LogRedaction.redact("GET /x?origin=\(encoded) HTTP/1.1 fd=12")
+        #expect(tail.hasSuffix(" HTTP/1.1 fd=12"))
+    }
+
+    @Test("a doubly encoded token is stripped too")
+    func doublyEncodedNestedURL() {
+        let once = "https://s/a?b=1&X-Emby-Token=\(token)&keep=1"
+            .addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let twice = once.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        let out = LogRedaction.redact("[x] outer?u=\(twice)&z=2")
+        #expect(!out.contains(token), "leaked: \(out)")
+        #expect(out.contains("<redacted>%2526keep%253D1&z=2"), "\(out)")
+    }
+
+    @Test("an encoded separator inside a plain query value stays part of the value")
+    func encodedAmpersandInPlainValue() {
+        // At depth 0 a `%26` is data in the value, not the `&` that ends it, so the whole value goes.
+        let out = LogRedaction.redact("[x] https://s/a?api_key=abc%26def&keep=1")
+        #expect(out == "[x] https://s/a?api_key=<redacted>&keep=1")
+    }
+
+    @Test("an escape that decodes to a letter is no boundary, and prose with percent signs is left alone")
+    func encodedBoundaryRules() {
+        // `%73` is `s`, so this reads `hasToken=` and must stay, like its plain form.
+        let letter = "[x] ha%73Token=visible"
+        #expect(LogRedaction.redact(letter) == letter)
+        let prose = "[x] buffer 100% full, 5%token budget, 12%3 left"
+        #expect(LogRedaction.redact(prose) == prose)
+        #expect(LogRedaction.redact("[x] a%2Ftoken%3Asecretvalue done") == "[x] a%2Ftoken%3A<redacted> done")
+    }
+
+    @Test("a registered secret goes wherever it sits, raw or percent-encoded, until unregistered")
+    func registeredSecret() {
+        defer { LogRedaction.unregisterAll() }
+        #expect(EngineLog.registerSecret("p@ss w0rd"))
+        let raw = LogRedaction.redact("[x] http://h:8080/john/p%40ss%20w0rd/123 alt=p@ss w0rd.")
+        #expect(raw == "[x] http://h:8080/john/<redacted>/123 alt=<redacted>.")
+        EngineLog.unregisterSecret("p@ss w0rd")
+        #expect(LogRedaction.redact("[x] alt=p@ss w0rd") == "[x] alt=p@ss w0rd")
+    }
+
+    @Test("a value too short to match literally is refused")
+    func shortSecretRefused() {
+        defer { LogRedaction.unregisterAll() }
+        #expect(!EngineLog.registerSecret("abc"))
+        #expect(LogRedaction.redact("[x] abc") == "[x] abc")
+    }
+
     /// The point of putting this in EngineLog rather than in each host: the handler a host installs
     /// must never see the raw token, whether or not that host scrubs its own log.
     @Test("the host handler receives the redacted line")

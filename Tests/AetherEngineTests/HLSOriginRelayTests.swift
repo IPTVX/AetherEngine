@@ -6,29 +6,76 @@ import Testing
 
 @testable import AetherEngine
 
-@Suite("HLS origin relay addressing and rewriting")
+@Suite("HLS origin relay addressing and rewriting", .timeLimit(.minutes(3)))
 struct HLSOriginRelayAddressingTests {
 
     private let token = String(repeating: "ab", count: 16)
 
     @Test("An origin survives the round trip through a relay URL")
     func roundTrip() throws {
+        let relay = HLSOriginRelay()
         let origin = URL(
             string: "https://media.example.com:8920/videos/1/master.m3u8"
                 + "?ApiKey=abc123&PlaySessionId=x%20y&tag=a+b")!
-        let local = try #require(HLSOriginRelay.localURL(for: origin, port: 51234, token: token))
+        let local = try #require(relay.localURL(for: origin, port: 51234, token: token))
 
         #expect(local.host == "127.0.0.1")
         #expect(local.port == 51234)
         #expect(local.path == "/\(token)\(HLSOriginRelay.route)")
-        let recovered = try #require(HLSOriginRelay.originURL(fromQuery: local.query ?? ""))
+        let recovered = try #require(relay.originURL(fromQuery: local.query ?? ""))
         #expect(recovered == origin, "recovered \(recovered) from \(origin)")
+    }
+
+    @Test("A relay URL names the origin by reference, never by its host, path or token (audit NET-1)")
+    func localURLCarriesNoOriginText() throws {
+        // The local URL is logged on every request, handed to AirPlay receivers and written into
+        // every rewritten playlist, so nothing of the origin may be readable in it, in any encoding.
+        let relay = HLSOriginRelay()
+        let secret = "0123456789abcdef0123456789abcdef"
+        let origin = URL(
+            string: "https://jf.example.com/Videos/abc/master.m3u8?MediaSourceId=x&api_key=\(secret)")!
+        let local = try #require(relay.localURL(for: origin, port: 51234, token: token))
+        let text = local.absoluteString
+        for fragment in [secret, "jf", "example", "Videos", "master", "api", "MediaSourceId"] {
+            #expect(!text.contains(fragment), "\(fragment) is readable in \(text)")
+        }
+        #expect(!text.contains("%"), "the reference should need no escaping: \(text)")
+    }
+
+    @Test("One origin always seals to the same local URL, so a refreshed playlist names a segment the same way")
+    func sealingIsStable() throws {
+        let relay = HLSOriginRelay()
+        let segment = URL(string: "https://media.example.com/hls/seg42.ts?api_key=k")!
+        let first = try #require(relay.localURL(for: segment, port: 51234, token: token))
+        let again = try #require(relay.localURL(for: segment, port: 51234, token: token))
+        let other = try #require(relay.localURL(
+            for: URL(string: "https://media.example.com/hls/seg43.ts?api_key=k")!, port: 51234, token: token))
+        #expect(first == again)
+        #expect(first != other)
+    }
+
+    @Test("A reference from another session, or one that was altered, opens to nothing")
+    func foreignOrTamperedReferenceIsRefused() throws {
+        let origin = URL(string: "https://media.example.com/hls/media.m3u8?ApiKey=k")!
+        let previousSession = HLSOriginRelay()
+        let stale = try #require(previousSession.localURL(for: origin, port: 51234, token: token))
+        let relay = HLSOriginRelay()
+        #expect(relay.originURL(fromQuery: stale.query ?? "") == nil)
+
+        let own = try #require(relay.localURL(for: origin, port: 51234, token: token))
+        var query = Array(own.query ?? "")
+        let flipAt = query.count - 3
+        query[flipAt] = query[flipAt] == "A" ? "B" : "A"
+        #expect(relay.originURL(fromQuery: String(query)) == nil)
     }
 
     @Test("A query that names no origin yields none")
     func rejectsForeignQuery() {
-        #expect(HLSOriginRelay.originURL(fromQuery: "") == nil)
-        #expect(HLSOriginRelay.originURL(fromQuery: "other=https%3A%2F%2Fa.b") == nil)
+        let relay = HLSOriginRelay()
+        #expect(relay.originURL(fromQuery: "") == nil)
+        #expect(relay.originURL(fromQuery: "other=https%3A%2F%2Fa.b") == nil)
+        #expect(relay.originURL(fromQuery: "origin=https%3A%2F%2Fa.b") == nil,
+                "the pre-NET-1 plain origin form must not be honoured")
     }
 
     @Test("The origin key keeps scheme, host and port apart")
@@ -89,8 +136,10 @@ struct HLSOriginRelayAddressingTests {
         // A relative segment resolves against the playlist it came from.
         let segLine = try #require(lines.first { !$0.hasPrefix("#") && !$0.isEmpty })
         let query = try #require(URL(string: segLine)?.query)
-        let recovered = try #require(HLSOriginRelay.originURL(fromQuery: query))
+        let recovered = try #require(relay.originURL(fromQuery: query))
         #expect(recovered.absoluteString == "https://media.example.com/hls/seg0.ts")
+        #expect(!rewritten.contains("ApiKey"), "the origin's query leaked into the rewritten playlist")
+        #expect(!rewritten.contains("example.com"), "an origin host leaked into the rewritten playlist")
     }
 
     @Test("An injected rendition stays with the server that owns it")
@@ -136,7 +185,7 @@ struct HLSOriginRelayAddressingTests {
             port: server.port, token: server.pathToken)
 
         let named = try #require(server.relayURL(for: URL(string: "https://127.0.0.1:10/seg1.ts")!))
-        let stranger = try #require(HLSOriginRelay.localURL(
+        let stranger = try #require(relay.localURL(
             for: URL(string: "https://127.0.0.1:11/x.ts")!, port: server.port,
             token: server.pathToken))
 
@@ -153,7 +202,7 @@ struct HLSOriginRelayAddressingTests {
         let origin = URL(string: "https://127.0.0.1:9/hls/media.m3u8")!
         relay.admit(origin)
 
-        let stranger = try #require(HLSOriginRelay.localURL(
+        let stranger = try #require(relay.localURL(
             for: origin, port: server.port, token: String(repeating: "cd", count: 16)))
         #expect(try await status(of: stranger) == 404, "a stale or scanned token was answered")
     }
@@ -161,13 +210,14 @@ struct HLSOriginRelayAddressingTests {
     @Test("A blocking-reload request keeps the parameters that make it block")
     func blockingReloadParametersReachTheOrigin() throws {
         // AVPlayer appends _HLS_msn / _HLS_part to a playlist URL that advertises CAN-BLOCK-RELOAD
-        // (#441). The relay URL already carries a query, so they arrive alongside `origin`; dropped,
-        // the reload answers at once and the player asks again immediately.
+        // (#441). The relay URL already carries a query, so they arrive alongside the reference;
+        // dropped, the reload answers at once and the player asks again immediately.
+        let relay = HLSOriginRelay()
         let origin = URL(string: "https://media.example.com/hls/media.m3u8?ApiKey=k")!
-        let local = try #require(HLSOriginRelay.localURL(for: origin, port: 51234, token: token))
+        let local = try #require(relay.localURL(for: origin, port: 51234, token: token))
         let asAVPlayerAsks = "\(local.query ?? "")&_HLS_msn=42&_HLS_part=3"
 
-        let upstream = try #require(HLSOriginRelay.originURL(fromQuery: asAVPlayerAsks))
+        let upstream = try #require(relay.originURL(fromQuery: asAVPlayerAsks))
         #expect(upstream.path == "/hls/media.m3u8")
         let query = try #require(upstream.query)
         #expect(query.contains("ApiKey=k"), "the origin's own query was dropped: \(query)")
@@ -181,9 +231,44 @@ struct HLSOriginRelayAddressingTests {
     // which a macOS `swift build` never shows.
     #if os(macOS)
 
+    @Test("A held body that outgrows its cap is refused instead of buffered whole (audit NET-10)")
+    func heldBodyIsBounded() async throws {
+        // No length stated, so the relay has to hold it; eight 64 KB slices against a 256 KB cap.
+        let upstream = try #require(await TricklingOrigin(slices: 8, pauseSeconds: 0, declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay(maximumHeldBodyBytes: 256 * 1024)
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let entry = try #require(server.relayURL(for: URL(string: "http://127.0.0.1:\(upstream.port)/seg.ts")!))
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        let http = try #require(response as? HTTPURLResponse)
+        #expect(http.statusCode == 502, "an over-cap held body was relayed (\(body.count) bytes)")
+    }
+
+    @Test("A held body under its cap still arrives whole")
+    func heldBodyUnderCapArrives() async throws {
+        let upstream = try #require(await TricklingOrigin(slices: 2, pauseSeconds: 0, declaresLength: false))
+        defer { upstream.stop() }
+        let relay = HLSOriginRelay(maximumHeldBodyBytes: 256 * 1024)
+        let server = HLSLocalServer(relay: relay)
+        try server.start()
+        defer { server.stop(); relay.stop() }
+
+        let entry = try #require(server.relayURL(for: URL(string: "http://127.0.0.1:\(upstream.port)/seg.ts")!))
+        var request = URLRequest(url: entry)
+        request.timeoutInterval = 30
+        let (body, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(body.count == TricklingOrigin.totalBytes(slices: 2))
+    }
+
     @Test("A range is forwarded verbatim and its framing comes back")
     func rangesPassThroughUntouched() async throws {
-        let upstream = try #require(RangeEchoOrigin())
+        let upstream = try #require(await RangeEchoOrigin())
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -207,7 +292,7 @@ struct HLSOriginRelayAddressingTests {
 
     @Test("A metered origin is charged to the budget the reader already reads")
     func refusalReachesTheSharedBudget() async throws {
-        let upstream = try #require(RangeEchoOrigin(status: 429))
+        let upstream = try #require(await RangeEchoOrigin(status: 429))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -236,7 +321,7 @@ struct HLSOriginRelayAddressingTests {
         // The path looks like a playlist and the body is whatever the origin serves with its 404.
         // Rewritten and framed as 200, that reaches AVPlayer as a parse error instead of as the
         // one word it can act on.
-        let upstream = try #require(RangeEchoOrigin(status: 404))
+        let upstream = try #require(await RangeEchoOrigin(status: 404))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -249,7 +334,7 @@ struct HLSOriginRelayAddressingTests {
     }
 
     @Test("A segment reaches the player while the origin is still sending it")
-    func mediaIsRelayedAsItArrives() throws {
+    func mediaIsRelayedAsItArrives() async throws {
         // Held to the last byte, a segment puts its whole download in front of the player's first
         // byte: AVPlayer abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
         // and it sizes the next rendition off what it measured, which behind a buffer is a loopback
@@ -263,7 +348,7 @@ struct HLSOriginRelayAddressingTests {
         // put an answer on the wire, and a client stack that batches its own delivery would be timed
         // instead. Measured that way this failed on CI while passing here, which is exactly the
         // reading a client in the middle can produce.
-        let upstream = try #require(TricklingOrigin(slices: 2, pauseSeconds: 20))
+        let upstream = try #require(await TricklingOrigin(slices: 2, pauseSeconds: 20))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -321,7 +406,7 @@ struct HLSOriginRelayAddressingTests {
         // A body with no Content-Length cannot be framed for the player without measuring it, so it
         // is read whole. What must not follow is that a held body is treated as a playlist: the
         // rewriter would walk MPEG-TS as lines of text.
-        let upstream = try #require(TricklingOrigin(declaresLength: false))
+        let upstream = try #require(await TricklingOrigin(declaresLength: false))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -343,7 +428,7 @@ struct HLSOriginRelayAddressingTests {
     func trustProbeAnswersForTheOriginInHand() async throws {
         // An origin the system reaches is one AVPlayer reaches, so relaying it would move a whole
         // session's bytes through the process for nothing.
-        let reachable = try #require(RangeEchoOrigin())
+        let reachable = try #require(await RangeEchoOrigin())
         defer { reachable.stop() }
         let reached = await HLSOriginRelay.systemTrustRefuses(
             URL(string: "http://127.0.0.1:\(reachable.port)/movie.ts")!)
@@ -388,8 +473,8 @@ struct HLSOriginRelayAddressingTests {
         private let process: Process
         private let workDir: URL
 
-        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) {
-            guard let launched = PythonOrigin.launch(
+        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-trickle-origin",
                 script: Self.serverPy(slices: slices, pauseSeconds: pauseSeconds,
                                       declaresLength: declaresLength))
@@ -447,55 +532,6 @@ struct HLSOriginRelayAddressingTests {
         }
     }
 
-    /// Writes `files` and `script` into a scratch directory, runs the script with the system
-    /// Python, and waits for its "READY <port>" line. The two origins below differ only in what
-    /// they serve, so the launch is written once.
-    enum PythonOrigin {
-        static func launch(prefix: String, script: String, files: [String: String] = [:])
-            -> (process: Process, port: UInt16, workDir: URL)?
-        {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
-            guard (try? FileManager.default.createDirectory(
-                at: dir, withIntermediateDirectories: true)) != nil else { return nil }
-            do {
-                for (name, body) in files {
-                    try body.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
-                }
-                try script.write(
-                    to: dir.appendingPathComponent("origin.py"), atomically: true, encoding: .utf8)
-            } catch { return nil }
-
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            proc.arguments = [dir.appendingPathComponent("origin.py").path]
-            proc.currentDirectoryURL = dir
-            let stdout = Pipe()
-            proc.standardOutput = stdout
-            proc.standardError = FileHandle.nullDevice
-            do { try proc.run() } catch { return nil }
-
-            var readyLine = ""
-            var pending = Data()
-            let deadline = Date().addingTimeInterval(10)
-            while Date() < deadline, !readyLine.contains("READY") {
-                let chunk = stdout.fileHandleForReading.availableData
-                if chunk.isEmpty {
-                    Thread.sleep(forTimeInterval: 0.05)
-                    continue
-                }
-                pending.append(chunk)
-                readyLine = String(decoding: pending, as: UTF8.self)
-            }
-            guard let match = readyLine.split(separator: " ").last,
-                let bound = UInt16(match.trimmingCharacters(in: .whitespacesAndNewlines))
-            else {
-                proc.terminate()
-                return nil
-            }
-            return (proc, bound, dir)
-        }
-    }
 
     /// Loopback HTTP origin that answers Range requests exactly as asked and records the last
     /// one it saw, which is what makes "forwarded verbatim" observable rather than asserted.
@@ -510,8 +546,8 @@ struct HLSOriginRelayAddressingTests {
             return text.split(separator: "\n").last.map(String.init)
         }
 
-        init?(status: Int = 206) {
-            guard let launched = PythonOrigin.launch(
+        init?(status: Int = 206) async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-range-origin", script: Self.serverPy(status: status))
             else { return nil }
             process = launched.process
@@ -573,8 +609,8 @@ struct HLSOriginRelayAddressingTests {
         private let process: Process
         private let workDir: URL
 
-        init?() {
-            guard let launched = PythonOrigin.launch(
+        init?() async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-hls-origin", script: Self.serverPy,
                 files: ["cert.pem": SelfSignedTLSOrigin.certPEM, "key.pem": SelfSignedTLSOrigin.keyPEM])
             else { return nil }

@@ -98,6 +98,12 @@ enum LiveEdgePolicy {
     /// Never serve an empty or single-segment live playlist (a 1-segment window is an instant -12888).
     static let minStartupSegments = 2
 
+    /// AE#594 arm B, env-gated (`AETHER_BOUNDED_START_FLOOR=1`) because it is a measurement arm and
+    /// not a policy: it floors `fastZap`'s bounded start at the holdback, leaving the outer
+    /// wall-clock deadline as the only shortcut. Read once, so a run cannot change arms midway.
+    static let boundedStartFloorArmed =
+        ProcessInfo.processInfo.environment["AETHER_BOUNDED_START_FLOOR"] == "1"
+
     /// AVPlayer's unchanged-playlist patience: it tolerates a playlist that has not changed for this
     /// multiple of the served TARGETDURATION before drawing `-12888`. The one number the cadence floor
     /// is answerable to.
@@ -280,9 +286,19 @@ enum LiveEdgePolicy {
     }
 
     /// Whole seconds of promise covering a measured duration, taken at the served resolution.
+    ///
+    /// Total: a duration from a hostile or broken source (infinite, NaN, beyond `Int`) must not trap the
+    /// playlist writer. An unbounded one saturates at `maxCoveredWholeSeconds`, which keeps `3 x TD`
+    /// arithmetic far from overflow; NaN and anything at or below zero cover nothing.
     static func wholeSecondsCovering(_ seconds: Double) -> Int {
-        Int(servedSeconds(seconds).rounded(.up))
+        guard !seconds.isNaN else { return 0 }
+        let covered = servedSeconds(seconds).rounded(.up)
+        guard covered < Double(maxCoveredWholeSeconds) else { return maxCoveredWholeSeconds }
+        return covered > 0 ? Int(covered) : 0
     }
+
+    /// One day. Far above any real segment or cadence, far below where `Int` arithmetic on it overflows.
+    static let maxCoveredWholeSeconds = 86_400
 
     /// AE#454: the served `EXT-X-START:TIME-OFFSET` for a rejoin, or nil when this playlist cannot
     /// carry the placement.
@@ -550,6 +566,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let liveWindowSizing: LiveWindowSizing
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
     private let allowsBoundedDegradedStart: Bool
+    /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
+    /// outer wall-clock deadline. Measurement arm, off unless the environment asks for it.
+    private let boundedStartFloorsAtHoldback: Bool
     /// AE#374: whether the first-serve gate has already reported the interval it held. Read and written
     /// only under `firstSegmentCondition`, inside `waitForFirstLiveSegment` and its two account helpers.
     private var didAccountForFirstServe = false
@@ -656,6 +675,17 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let stateLock = NSLock()
     /// Separate from stateLock so the manifest handler can block without holding the segment-list lock.
     private let firstSegmentCondition = NSCondition()
+    /// How many callers are parked in the three gates that share the condition above. Guarded by
+    /// it, which is what makes it worth having: a reader from another thread only gets the lock
+    /// while a waiter is inside `wait()`, so a non-zero read PROVES the waiter parked. Tests used
+    /// to sleep a tenth of a second and call that parked, which is a margin against scheduling and
+    /// the first thing an oversubscribed machine takes away.
+    private var parkedWaiters = 0
+    var parkedWaiterCount: Int {
+        firstSegmentCondition.lock()
+        defer { firstSegmentCondition.unlock() }
+        return parkedWaiters
+    }
     /// Set by cancelWaiters() on stop(). Without it, parked LL-HLS blocking-reload threads sleep
     /// their full timeout (18-30 s) and can write stale playlists into a recycled fd of the next session.
     private var waitersCancelled = false
@@ -760,6 +790,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         allowsBoundedDegradedStart: Bool = false,
+        boundedStartFloorsAtHoldback: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
@@ -789,6 +820,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.sequentialAppendPlaylist = sequentialAppendPlaylist
         self.liveWindowSizing = liveWindowSizing
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
+        self.boundedStartFloorsAtHoldback = boundedStartFloorsAtHoldback
         self.blockingReloadOverride = blockingReloadOverride
         self.liveCadencePolicy = liveCadencePolicy
         self.codecsString = codecsString
@@ -904,6 +936,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let deadline = Date(timeIntervalSinceNow: timeout)
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             stateLock.lock()
             let ready = _seqAdvertisableCount >= Self.sequentialStartupSegments || _seqEnded
@@ -1325,6 +1359,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             // Cache gate: backwardWindow=20 covers Continuous-Audio handover refetches (~7-10 segments
             // backward); unconditional proactive restart re-armed the FLAC bridge and caused audible glitches.
             if cache.peekURL(index: index) != nil {
+                // A sequential origin has no restart to offer (its pump can only read from byte 0)
+                // and keeps every segment it cut, so a resident target is served from the cache.
+                // The contiguity scan below would read the plan indices its cutter left as holes
+                // (no URI, never listed) as a gap and hand the refusal a source failure to publish,
+                // which is what an AirPlay hop back to the loopback item did at 22 s in.
+                if sequentialAppendPlaylist {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] declareTarget backward jump \(previousTarget) -> \(index): "
+                        + "resident on a sequential origin, served from the cache",
+                        category: .session
+                    )
+                    return
+                }
                 let frontier = cache.contiguousForwardFrontier(from: index)
                 let front = activeMarchFront
                 if Self.residentBackwardTargetKeepsProducer(
@@ -1546,6 +1593,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 if let bytes = cache.fetch(index: index, timeout: repositionWaitSlice) {
                     return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: true)
                 }
+                // Audit SEG-3: a closed cache answers fetch at once, so riding a restart that
+                // outlives stop() would spin this thread until the ride cap.
+                if cache.isClosed { break }
             }
             return logServed(index: index, bytes: nil, totalStart: totalStart, restarted: true)
         }
@@ -2318,6 +2368,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         var degradedGrace: TimeInterval?
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             if waitersCancelled { return false }
             let snap = liveCushionSnapshot()
@@ -2331,6 +2383,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 return true
             }
             if allowsBoundedDegradedStart,
+               !boundedStartFloorsAtHoldback,
                snap.count >= LiveEdgePolicy.minStartupSegments,
                degradedDeadline == nil {
                 let grace = LiveEdgePolicy.fastZapDegradedGraceSeconds(
@@ -2454,6 +2507,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let deadline = Date().addingTimeInterval(timeout)
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
+        parkedWaiters += 1
+        defer { parkedWaiters -= 1 }
         while true {
             if waitersCancelled { return false }
             stateLock.lock()

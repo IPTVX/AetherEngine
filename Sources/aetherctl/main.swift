@@ -66,11 +66,11 @@ func printUsage() {
     aetherctl: standalone AetherEngine repro harness
 
     Usage:
-      aetherctl probe <url>
+      aetherctl probe [--detect-hdr10plus] [--detect-atmos] <url>
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--seconds N] [--live] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -79,7 +79,7 @@ func printUsage() {
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
              [--max-concurrent-requests N]
-                     [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek] <url>
+                     [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
                      (full load+play session smoke test; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
                       --audio-stats taps decoded PCM and prints per-second audio lead
@@ -178,6 +178,15 @@ func printUsage() {
                      in-place media-playlist fallback (-11868 / -11848),
                      not the item.
 
+    Flags (play only, AE#551):
+      --prewarm      Warm the source before loading it, the way a host
+                     warms the next episode. Takes the engine's default
+                     budget (8 MB).
+      --prewarm-bytes N
+                     Warm N bytes instead. Measure this against a REAL
+                     origin: on loopback the round trip it removes costs
+                     nothing, which is the trap #281 was built out of.
+
     Flags (serve / seektest):
       --throttle-kbps N
                      TEST-ONLY slow-CDN simulation: cap source-IO
@@ -225,7 +234,8 @@ func printUsage() {
                 packet's Dolby Vision RPU from Profile 7 to Profile
                 8.1 (and drop the enhancement layer) via
                 DoviRpuConverter, and write the result to
-                /tmp/aetherctl-dovitest.hevc in Annex-B form. Feed
+                aetherctl-dovitest.hevc (Annex-B) in a private
+                per-run temporary directory, printed. Feed
                 that to `dovi_tool extract-rpu` + `info` to validate
                 the rewritten RPU against ground truth.
 
@@ -248,7 +258,8 @@ func printUsage() {
                 to --width. Snapshot mode (--snapshot) decodes
                 frame-accurately at full resolution. Use --loops N
                 with `leaks --atExit` to detect memory leaks.
-                Writes the first frame to /tmp/aetherctl-extract-<mode>.png.
+                Writes the first frame to aetherctl-extract-<mode>.png
+                in a private per-run temporary directory, printed.
 
       audio     Load a source through the engine's audio-only path
                 (LoadOptions.audioOnly=true), play for ~10 seconds,
@@ -462,7 +473,7 @@ if first == "pktdump" {
 if first == "audiotap" {
     var rest = Array(args.dropFirst(2))
     let duration = takeDoubleFlag("--duration", from: &rest) ?? 30
-    let outPath = takeStringFlag("--out", from: &rest) ?? "/tmp/audiotap.wav"
+    let outPath = takeStringFlag("--out", from: &rest) ?? debugOutputPath("audiotap.wav")
     let remote = rest.contains("--remote")
     rest.removeAll { $0 == "--remote" }
     let software = rest.contains("--software")
@@ -624,6 +635,7 @@ if first == "play" {
     let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
+    let playSoftwareEscalation = !takeFlag("--no-sw-escalation", from: &rest)
     // AE#493: `LoadOptions.panelPresentsDolbyVision`, the host assertion. macOS has no per-mode display
     // capability API, so DV is unclaimable from inside the engine and a Mac run routes every DV source
     // as its HDR10 base layer until the host says otherwise.
@@ -631,6 +643,8 @@ if first == "play" {
     // `LoadOptions.dolbyVisionHandling = .baseLayerOnly`: the base layer of a Dolby Vision source, the
     // Dolby Vision left out of the container. The harness for a record the bitstream contradicts.
     let playDVHandling: DolbyVisionHandling = takeFlag("--dv-base-layer", from: &rest) ? .baseLayerOnly : .automatic
+    // AE#560: record the live source to a file from the session's existing connection.
+    let playRecord = takeStringFlag("--record", from: &rest).map { URL(fileURLWithPath: $0) }
     // AE#492: `LoadOptions.deinterlaceFieldRate`. `send_field` (the default) emits one frame per
     // FIELD, so a 29.97i source hands the layer 59.94 frames per second against 23.976 for a
     // progressive one. That is the confound in every per-seek drop count taken across the two, and
@@ -680,6 +694,9 @@ if first == "play" {
     let frameTimes = takeFlag("--frame-times", from: &rest)
     let presentTimes = takeFlag("--present-times", from: &rest)
     let pictureProbe = takeFlag("--picture-probe", from: &rest)
+    // AE#534: the source axis's origin, for a container whose timeline does not start at zero.
+    // The picture states a frame index, which an -output_ts_offset remux does not move.
+    let pictureOrigin = takeDoubleFlag("--picture-origin", from: &rest) ?? 0
     // #316: declare sidecar subtitles at load, the LoadOptions.externalSubtitles a host passes.
     // Comma-separated `lang=path-or-url` entries, e.g. --sidecar en=/tmp/en.srt,de=/tmp/de.srt.
     // On the nativeRemoteHLS bypass this is what makes the engine stand up its rewritten master.
@@ -742,6 +759,9 @@ if first == "play" {
     }
     // AE#464 round 2: mount with `autoplay = false`, the shape of a host that owns transport.
     let pausedMount = takeFlag("--paused", from: &rest)
+    // AE#587: LoadOptions.preserveASSMarkup, documented as ASS/SSA only. The report that it leaks
+    // into SubRip could only be argued from the source because no harness set the flag at all.
+    let preserveASSMarkup = takeFlag("--preserve-ass-markup", from: &rest)
     // #460: `--reload-applying <key>=<value>`, repeatable, with one shared delay. The delay is a
     // separate flag rather than teletext's `@ms` suffix because a header value can carry an `@`.
     // Default +20 s for the same reason the teletext switch uses it: the correction has to land on
@@ -810,6 +830,12 @@ if first == "play" {
         playHeaders[String(spec[..<colon]).trimmingCharacters(in: .whitespaces)] =
             String(spec[spec.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
     }
+    // AE#551: warm the source before loading it, which is what a host does for the next episode.
+    // Bare `--prewarm` takes the engine's default budget, `--prewarm-bytes N` names one. Measuring
+    // this needs a real origin: against loopback the round trip it removes costs nothing to begin
+    // with, which is the trap #281 was built out of.
+    let prewarmRequested = takeFlag("--prewarm", from: &rest)
+    let prewarmBytes = takeIntFlag("--prewarm-bytes", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -826,8 +852,30 @@ if first == "play" {
         EngineTLS.serverTrustEvaluator = { _ in true }
         print("[aetherctl] AE#495: accepting any server certificate for this run")
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars,
+    if prewarmRequested || prewarmBytes != nil {
+        let target = parseSourceURL(urlArg)
+        let budget = prewarmBytes ?? AetherEngine.defaultPrewarmByteBudget
+        let started = Date()
+        let done = DispatchSemaphore(value: 0)
+        // Detached, not `Task {}`: top-level code is MainActor-isolated under the Swift 6 language
+        // mode, so an inheriting task enqueues on the main actor that `done.wait()` is blocking,
+        // and the warm never starts. That deadlock is why this flag measured nothing (#551).
+        Task.detached {
+            let report = await AetherEngine.prewarm(url: target, httpHeaders: playHeaders,
+                                                    byteBudget: budget)
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            if let declined = report.declined {
+                print("[aetherctl] prewarm declined after \(ms)ms: \(declined)")
+            } else {
+                print("[aetherctl] prewarm retained \(report.retainedBytes)B of "
+                      + "\(report.contentLength.map(String.init) ?? "?")B in \(ms)ms")
+            }
+            done.signal()
+        }
+        done.wait()
+    }
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW, softwareEscalation: playSoftwareEscalation,
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
                  audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
@@ -839,7 +887,9 @@ if first == "play" {
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
                  assertDolbyVision: playAssertDV,
-                 dolbyVisionHandling: playDVHandling))
+                 preserveASSMarkup: preserveASSMarkup,
+                 dolbyVisionHandling: playDVHandling,
+                 record: playRecord))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
@@ -854,6 +904,11 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let extractLoops = takeIntFlag("--loops", from: &rest) ?? 1
     let extractWidth = takeIntFlag("--width", from: &rest) ?? 320
     let snapshotMode = takeFlag("--snapshot", from: &rest)
+    // The opt-in detail passes of `AetherEngine.probe(url:detecting:)`, so both are observable from the CLI
+    // instead of only through a host. Each costs reads past find_stream_info; the bare `probe` does neither.
+    var probeDetail: ProbeDetail = []
+    if takeFlag("--detect-hdr10plus", from: &rest) { probeDetail.insert(.hdr10Plus) }
+    if takeFlag("--detect-atmos", from: &rest) { probeDetail.insert(.atmos) }
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)
     let customAudioIndex = takeIntFlag("--audio-index", from: &rest).map(Int32.init)
@@ -939,7 +994,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     }
     switch first {
     case "probe":
-        exit(runProbe(url: url))
+        exit(runProbe(url: url, detecting: probeDetail))
     case "serve":
         runServe(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
                  dolbyVisionHandling: dvHandling,

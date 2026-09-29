@@ -80,6 +80,42 @@ final class AudioBridge: @unchecked Sendable {
         encoder == AV_CODEC_ID_EAC3 ? Int64(channels) * 128_000 : 0
     }
 
+    /// The sample rates an encoder in THIS build accepts, as libavcodec itself reports them. Empty means
+    /// unconstrained (the codec advertises no list), which is the answer for FLAC.
+    ///
+    /// Asked of the codec rather than tabled here, because a table is a second source of truth that no
+    /// FFmpeg bump updates: E-AC-3 is 32 / 44.1 / 48 kHz today and the encoder is where that would change.
+    static func supportedSampleRates(for encoder: AVCodecID) -> [Int32] {
+        guard let codec = avcodec_find_encoder(encoder) else { return [] }
+        var configs: UnsafeRawPointer?
+        var count: Int32 = 0
+        let ret = avcodec_get_supported_config(nil, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, &configs, &count)
+        guard ret >= 0, let list = configs, count > 0 else { return [] }
+        let rates = list.assumingMemoryBound(to: Int32.self)
+        return (0..<Int(count)).map { rates[$0] }
+    }
+
+    /// #548: the rate the bridge encoder is OPENED at, which is not the source's. E-AC-3 exists at 32 /
+    /// 44.1 / 48 kHz only, so a 96 kHz TrueHD track made `avcodec_open2` refuse the context and the whole
+    /// session fell to silent video-only. The resampler sits between the decoder and the encoder on every
+    /// bridged path and is configured from the encoder's rate anyway, so converting costs nothing that was
+    /// not already being paid.
+    ///
+    /// Exact match first; above the list the HIGHEST supported rate (never invent bandwidth the source
+    /// does not have, and 48 kHz carries more of a 96 kHz master than 44.1 does); below it the lowest, so
+    /// an 8 kHz oddity still plays. An empty list is an unconstrained encoder (FLAC), which keeps the
+    /// source rate and stays bit-perfect.
+    static func encoderSampleRate(supported: [Int32], source: Int32) -> Int32 {
+        // A source whose rate nobody resolved (TrueHD reports 0 pre-frame) asks for the same 48 kHz
+        // default the bridge has always fallen back to, then goes through the rules like any other.
+        let wanted: Int32 = source > 0 ? source : 48_000
+        let usable = supported.filter { $0 > 0 }.sorted()
+        guard !usable.isEmpty else { return wanted }
+        if usable.contains(wanted) { return wanted }
+        if let below = usable.last(where: { $0 < wanted }) { return below }
+        return usable[0]
+    }
+
     // MARK: - Errors
 
     enum AudioBridgeError: Error, CustomStringConvertible, LocalizedError {
@@ -133,6 +169,7 @@ final class AudioBridge: @unchecked Sendable {
     /// before overwrite and in cleanup.
     private var swrInFmt: AVSampleFormat = AV_SAMPLE_FMT_NONE
     private var swrInRate: Int32 = 0
+    private var swrReconfigureFailures = 0
     private var swrInLayout = AVChannelLayout()
     /// FIFO buffering resampled PCM until >= encoderCtx.frame_size samples. FLAC's wrapper has
     /// AV_CODEC_CAP_SMALL_LAST_FRAME but not VARIABLE_FRAME_SIZE, so non-final frames must hit frame_size exactly
@@ -205,6 +242,10 @@ final class AudioBridge: @unchecked Sendable {
     /// the resolved one is absent from the build. Incomplete source codecpar (TrueHD sometimes reports
     /// sample_rate=0 pre-frame) falls back to 48 kHz stereo, which the resampler reconfigures on the first
     /// decoded frame if it differs.
+    ///
+    /// The encoder opens at `encoderSampleRate(supported:source:)`, not at the source's rate: E-AC-3 has no
+    /// rate above 48 kHz, so a 96 kHz source used to fail `avcodec_open2` and take the session to silent
+    /// video-only (#548). swr converts into it either way.
     init(
         srcCodecpar: UnsafeMutablePointer<AVCodecParameters>,
         srcTimeBase: AVRational,
@@ -263,7 +304,7 @@ final class AudioBridge: @unchecked Sendable {
 
         // 2. Source shape. The encoder cannot be chosen before this: `.surroundCompat` resolves to EAC3 only
         // for a source that HAS surround to carry, and the channel count is not final until the decoder is open.
-        let sampleRate: Int32 = srcCodecpar.pointee.sample_rate > 0
+        let sourceSampleRate: Int32 = srcCodecpar.pointee.sample_rate > 0
             ? srcCodecpar.pointee.sample_rate
             : 48000
 
@@ -323,6 +364,14 @@ final class AudioBridge: @unchecked Sendable {
         }
         encoderCtx = enc
 
+        // The rate the ENCODER accepts, which is not necessarily the source's (#548). swr already converts
+        // into the encoder's format on every bridged packet, so a rate change is free here and refusing the
+        // session was not: E-AC-3 stops at 48 kHz and a 96 kHz TrueHD track used to fall to video-only.
+        let sampleRate = Self.encoderSampleRate(
+            supported: Self.supportedSampleRates(for: encoderCodecID),
+            source: sourceSampleRate
+        )
+
         // Cap to encoder max (EAC3 5.1, FLAC 7.1). Above-cap downmix happens automatically inside swr_convert
         // when source layout exceeds the encoder's; the resampler picks Apple-compatible ordering.
         let nChannels: Int32 = min(resolvedChannels, Self.maxEncodedChannels(for: encoderCodecID))
@@ -333,7 +382,9 @@ final class AudioBridge: @unchecked Sendable {
         EngineLog.emit(
             "[AudioBridge] init: mode=\(mode.rawValue) encoder=\(encoderName)"
             + (forcedEncoder != nil ? " (forced)" : "")
-            + " srcCodec=\(srcCodecID.rawValue) sampleRate=\(sampleRate) "
+            + " srcCodec=\(srcCodecID.rawValue) sampleRate=\(sampleRate)"
+            + (sampleRate != sourceSampleRate ? " (resampled from \(sourceSampleRate), encoder has no such rate)" : "")
+            + " "
             + "sourceChannels=\(resolvedChannels) "
             + "encoderChannels=\(nChannels) bitRate=\(logBitRate) "
             + "(source=\(resolvedSource), container=\(containerChannels), decoder=\(decoderChannels))",
@@ -380,7 +431,7 @@ final class AudioBridge: @unchecked Sendable {
         //    decoded frame, so a wrong seed self-corrects on the first frame.
         let inFmtRaw = dec.pointee.sample_fmt.rawValue
         let inFmt = inFmtRaw >= 0 ? dec.pointee.sample_fmt : AV_SAMPLE_FMT_FLTP
-        let inRate = dec.pointee.sample_rate > 0 ? dec.pointee.sample_rate : sampleRate
+        let inRate = dec.pointee.sample_rate > 0 ? dec.pointee.sample_rate : sourceSampleRate
         var inLayout = AVChannelLayout()
         if dec.pointee.ch_layout.nb_channels > 0 {
             av_channel_layout_copy(&inLayout, &dec.pointee.ch_layout)
@@ -525,6 +576,13 @@ final class AudioBridge: @unchecked Sendable {
 
     /// One-shot: a bridge that stays silent for an hour costs one line, not one per packet.
     private(set) var silentFeedReported = false
+
+    /// AE#641: called once, on the pump thread, when the silence is structural AND the decoder is the
+    /// arm that failed (`decodedNothing`). A live session has no muxer death to learn it from: a FLAC
+    /// sample entry is built from the encoder's extradata, so segments keep being cut with an audio
+    /// track that never carries a sample, and AVPlayer shows the first picture and waits on the audio
+    /// forever. Set before the producer starts feeding.
+    var onDecoderProducedNothing: (@Sendable (FeedStats) -> Void)?
 
     /// AE#474: the DECODER arm's unit, and only its unit. Source went in and the FIFO got nothing
     /// back, so there is no sample count to bound anything with and packets are all there is.
@@ -811,7 +869,22 @@ final class AudioBridge: @unchecked Sendable {
                 }
                 stats.framesDecoded += 1
                 if rebaseFromNextSourcePTS, packetPts != Self.avNoPTS {
+                    // AE#561 follow-up: this counter stamps the FRAME handed to the encoder, and an
+                    // encoder that declares `initial_padding` stamps its first PACKET a padding BELOW
+                    // that frame (256 samples on the AC-3 family, 0 on FLAC), so that a consumer which
+                    // discards the priming lands back on the source position. Nothing discards it
+                    // here: the muxer writes no edit list on purpose, since the init segment has to
+                    // stay restart-invariant, so the priming plays as the silence it is. Without the
+                    // offset the published timeline therefore STARTS a padding below the source, and
+                    // at source 0 that is a negative `baseMediaDecodeTime`, a field that is
+                    // `unsigned int(64)`: -256 went out as 2^64 - 256 and AVPlayer placed the whole
+                    // first audio fragment 584 thousand years out, losing its ~190 ms of audio. The
+                    // offset costs the content the padding's 5.3 ms instead, which is what an
+                    // unsignalled priming is worth and two orders below the lip-sync threshold. It is
+                    // applied on every rebase, not only near zero, so a restart mid-file inherits the
+                    // same relationship instead of stepping by a padding.
                     nextEncoderPTS = av_rescale_q(packetPts, srcTimeBase, encoderTimeBase)
+                        &+ Int64(enc.pointee.initial_padding)
                     rebaseFromNextSourcePTS = false
                 }
                 try resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)
@@ -900,6 +973,7 @@ final class AudioBridge: @unchecked Sendable {
             + "written, so this session will fail its first segment cut unless output starts.",
             category: .session
         )
+        if stats.decodedNothing { onDecoderProducedNothing?(stats) }
     }
 
     /// Align swr's INPUT side to the frame the decoder actually produced. libswresample reads `extended_data`
@@ -909,24 +983,30 @@ final class AudioBridge: @unchecked Sendable {
     /// probe), and reading S32 integers as FLTP floats is noise. Re-derive the input from the frame, keeping
     /// the output side pinned to the encoder, exactly as AudioDecoder configures its resampler from the frame.
     /// No-op in the common case where find_stream_info already resolved the format (frame == seed), so working
-    /// paths are untouched; only a wrong seed or a genuine mid-stream format change rebuilds. swr_alloc_set_opts2
-    /// reuses the context pointer on success and frees it on failure (the caller re-binds swrCtx); swr_init drops
+    /// paths are untouched; only a wrong seed or a genuine mid-stream format change rebuilds. A rebuild drops
     /// the sub-frame resampler delay, as startSegment already does. Runs under feed()'s opLock (never re-lock).
+    ///
+    /// Audit DEC-6: built on a scratch context and swapped in only once it initialised. Rebuilding the
+    /// live one lost it for good on a rejected format (set-opts frees it), after which every feed
+    /// returned early, the bridge stayed mute, and not even the AE#396 detector could see it. A frame
+    /// the resampler cannot take is now dropped and counted, and the old context keeps serving the
+    /// format it was built for. Returns false when this frame must not reach `swr_convert`.
     private func reconfigureSwrInputIfNeeded(
         forFrame sf: UnsafeMutablePointer<AVFrame>,
         enc: UnsafeMutablePointer<AVCodecContext>
-    ) {
+    ) -> Bool {
         let frameFmtRaw = sf.pointee.format
         let frameRate = sf.pointee.sample_rate
-        guard frameFmtRaw >= 0, frameRate > 0, sf.pointee.ch_layout.nb_channels > 0 else { return }
+        guard frameFmtRaw >= 0, frameRate > 0, sf.pointee.ch_layout.nb_channels > 0 else { return true }
         let matchesCurrent = frameFmtRaw == swrInFmt.rawValue
             && frameRate == swrInRate
             && av_channel_layout_compare(&swrInLayout, &sf.pointee.ch_layout) == 0
-        guard !matchesCurrent else { return }
+        guard !matchesCurrent else { return true }
 
         let frameFmt = AVSampleFormat(rawValue: frameFmtRaw)
+        var scratch: OpaquePointer?
         let setRet = swr_alloc_set_opts2(
-            &swrCtx,
+            &scratch,
             &enc.pointee.ch_layout,
             pcmSampleFmt,
             enc.pointee.sample_rate,
@@ -936,7 +1016,22 @@ final class AudioBridge: @unchecked Sendable {
             0,
             nil
         )
-        guard setRet >= 0, swrCtx != nil, swr_init(swrCtx) >= 0 else { return }
+        let initRet = setRet >= 0 && scratch != nil ? swr_init(scratch) : setRet
+        guard initRet >= 0 else {
+            swr_free(&scratch)
+            swrReconfigureFailures += 1
+            if swrReconfigureFailures == 1 || swrReconfigureFailures % 500 == 0 {
+                EngineLog.emit(
+                    "[AudioBridge] ERROR: resampler rejected decoded \(frameRate)Hz/"
+                    + "\(sf.pointee.ch_layout.nb_channels)ch fmt=\(frameFmtRaw) (ret=\(initRet)); "
+                    + "\(swrReconfigureFailures) frame(s) dropped",
+                    category: .session
+                )
+            }
+            return false
+        }
+        swr_free(&swrCtx)
+        swrCtx = scratch
 
         av_channel_layout_uninit(&swrInLayout)
         av_channel_layout_copy(&swrInLayout, &sf.pointee.ch_layout)
@@ -958,6 +1053,7 @@ final class AudioBridge: @unchecked Sendable {
                 category: .session
             )
         }
+        return true
     }
 
     /// Resample sf (decoded source frame) to encoder format and push into the FIFO (swr_convert may produce
@@ -982,10 +1078,8 @@ final class AudioBridge: @unchecked Sendable {
 
         // Align swr's INPUT to the frame the decoder actually produced before converting. No-op once the seed
         // matched (the usual case); only a wrong init seed or a genuine mid-stream format change rebuilds swr.
-        reconfigureSwrInputIfNeeded(forFrame: sf, enc: enc)
-        // The rebuild reuses the context pointer on success, but swr_alloc_set_opts2 frees it on a set-opts
-        // failure (swr_free(ps) -> swrCtx == nil), which would dangle the caller's `swr`. Re-bind to the live one.
-        guard let swr = swrCtx else {
+        // A successful rebuild replaces the context, which would dangle the caller's `swr`. Re-bind to the live one.
+        guard reconfigureSwrInputIfNeeded(forFrame: sf, enc: enc), let swr = swrCtx else {
             stats.framesDroppedBeforeFIFO += 1
             return
         }
