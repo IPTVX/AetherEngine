@@ -12,7 +12,36 @@ the public-API contract.
 
 ### IPTVX fork
 
-- Integrated the complete upstream 7.22.0 release while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. The fork uses FFmpegBuild 3.6.0 and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+- Integrated the complete upstream 7.22.2 release while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. The fork uses FFmpegBuild 3.6.0 and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+
+## [7.22.2] - 2026-09-29
+
+### Fixed
+
+- **An unproven HDR master is served after the display mode switch, not during it** (#667). The
+  pre-flight releases the load at its 2 s cap while an HDR switch is still running, which is what keeps
+  the load overlapping the switch (#348). On a panel whose EDR headroom never proves HDR (#459) the
+  engine then offers the master and lets AVPlayer's acceptance answer, and mid-switch AVPlayer answers
+  for the mode the panel is leaving: measured on tvOS 27, `-11868` 80 ms after the serve and 660 ms
+  before the switch ended. The refusal latched (#588), so every HDR title went media-direct and lost its
+  subtitle and audio renditions. That route now waits for a switch it saw start to end, re-reads the
+  panel, and routes then; the play gate held the first frame until that end anyway. A refusal raised
+  while a switch is in progress still earns the item its media fallback but no longer sets the latch.
+
+## [7.22.1] - 2026-09-29
+
+### Fixed
+
+- **`LiveTelemetry`'s two bitrate fields measure the media played, not the bytes transferred** (#514).
+  Both were metered from the reader's transfer counter, which parts from playback on every route that
+  reads ahead: a 20 Mbps VOD stream read about 35 Mbps (prefetch and seek re-fetches counted as they
+  arrived), and a paused live session kept draining its origin into the DVR window while the divisor
+  stood still, so its average climbed for as long as the pause ran. The pumps now record the played
+  video and audio packets by presentation time, and the sampler charges what the playhead crossed:
+  `instantBitrateMbps` over about the last 10 s of playback, `averageBitrateMbps` over the session.
+  Both stand still through a pause on every route, live included, and a seek charges nothing for the
+  span it jumps. The transfer remains `networkThroughputMbps`. The remote-HLS bypass is unchanged (it
+  reports the variant's declared rates).
 
 ## [7.22.0] - 2026-09-28
 
