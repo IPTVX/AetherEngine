@@ -12,7 +12,7 @@ the public-API contract.
 
 ### IPTVX fork
 
-- Integrated the complete upstream 7.22.2 release while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. The fork uses FFmpegBuild 3.6.0 and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+- Integrated the complete upstream 7.22.2 release while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. The fork uses the complete FFmpegBuild 3.6.0 binaries with IPTVX packaging metadata corrected to match their iOS/tvOS 16 Mach-O deployment target, and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
 
 ## [7.22.2] - 2026-09-29
 

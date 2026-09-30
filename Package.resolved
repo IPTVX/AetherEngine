@@ -4,10 +4,9 @@
     {
       "identity" : "ffmpegbuild",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/superuser404notfound/FFmpegBuild",
+      "location" : "https://github.com/IPTVX/FFmpegBuild",
       "state" : {
-        "revision" : "fda08325455bc12c112b5b82d014b98fa0fee0be",
-        "version" : "3.6.0"
+        "revision" : "b9e9a498c1ddc54aa8620f83a0cf63f49c100a64"
       }
     },
     {
