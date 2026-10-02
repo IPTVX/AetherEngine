@@ -84,14 +84,49 @@ struct HLSLocalServerSlowPeerTests {
 
     @Test("The stop line names the port that was released")
     func stopLineNamesThePort() throws {
-        let tap = LineTap()
-        defer { tap.restore() }
+        let tap = EngineLogCapture()
+        defer { tap.end() }
         let server = HLSLocalServer(provider: StubProvider())
         try server.start()
         let port = server.port
         server.stop()
         #expect(!tap.matching("[HLSLocalServer] stop: port \(port) released").isEmpty)
         #expect(tap.matching("[HLSLocalServer] stop: port 0 released").isEmpty)
+    }
+
+    /// Audit NET-111: every tokenless request cost the host's log two unthrottled lines, so a LAN
+    /// peer looping short connections could scroll a 300-line ring in a fraction of a second.
+    @Test("A flood of tokenless requests costs the log a handful of lines")
+    func tokenlessFloodIsThrottled() async throws {
+        let tap = EngineLogCapture()
+        defer { tap.end() }
+        let server = HLSLocalServer(provider: StubProvider())
+        try server.start()
+        defer { server.stop() }
+        let marker = "flood-\(UUID().uuidString)"
+        let port = server.port
+
+        let answered = await Self.onOwnThread { () -> Int in
+            var answered = 0
+            for _ in 0 ..< 1000 {
+                guard let fd = Self.connect(port: port, host: "127.0.0.1") else { continue }
+                if Self.requestStatus(fd: fd, path: "/\(marker)/media.m3u8") == 404 { answered += 1 }
+                close(fd)
+            }
+            return answered
+        }
+        #expect(answered == 1000)
+        #expect(tap.matching(marker).count <= 3, "\(tap.matching(marker).count) lines for 1000 requests")
+    }
+
+    @Test("Attacker text is logged with its control characters escaped")
+    func controlCharactersAreEscaped() {
+        #expect(HLSLocalServer.escapedForLog("GET /x\n[HLSLocalServer] GET /forged HTTP/1.1")
+                == "GET /x\\x0A[HLSLocalServer] GET /forged HTTP/1.1")
+        #expect(HLSLocalServer.escapedForLog("a\u{7F}b\tc\u{0}") == "a\\x7Fb\\x09c\\x00")
+        #expect(HLSLocalServer.escapedForLog("GET /seg_1.m4s HTTP/1.1") == "GET /seg_1.m4s HTTP/1.1")
+        #expect(HLSLocalServer.escapedForLog(String(repeating: "a", count: 300), limit: 256)
+                == String(repeating: "a", count: 256) + "...")
     }
 
     @Test("A repeating failure line goes out once per interval with a tally of the rest")
@@ -199,30 +234,6 @@ private final class Trickle: @unchecked Sendable {
 
     func stop() {
         lock.lock(); stopped = true; lock.unlock()
-    }
-}
-
-/// Captures `EngineLog` lines for one test; the handler is global, so it is restored on every path.
-private final class LineTap: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lines: [String] = []
-    private let previous: ((String) -> Void)?
-
-    init() {
-        previous = EngineLog.handler
-        EngineLog.handler = { [self] line in
-            lock.lock()
-            lines.append(line)
-            lock.unlock()
-        }
-    }
-
-    func restore() { EngineLog.handler = previous }
-
-    func matching(_ needle: String) -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return lines.filter { $0.contains(needle) }
     }
 }
 
