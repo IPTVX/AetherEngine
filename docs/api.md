@@ -409,6 +409,7 @@ Each `AetherEngine` has its own loopback server, caches and lifecycle, so two or
 - The audio session is released only by the last engine to stop, and only if some engine in that round had `deactivatesAudioSessionOnStop`.
 - The preferred output channel count is the widest source among the playing engines, so a muted stereo tile cannot downmix a 5.1 one.
 - A display-criteria reset waits until the last engine stops, the ones a load runs to clear stale criteria included; an engine that loads again as `.primary` in the meantime cancels its own pending reset, one that loads again as `.secondary` keeps it.
+- The disk allowance for seek and timeshift history (a quarter of the free space, at most 2 GiB per session) is taken from what the other running engines have not already claimed, so side-by-side engines cannot claim the same space twice. A claim ends with the session.
 - Stop every engine before you let go of it. An engine counts as playing from `load()` until `stop()`, whatever its state, `.error` and `.ended` included, so an engine kept for reuse must be stopped when its tile ends or fails, or the last real stop will not release the session. An engine released without `stop()` is noticed and dropped the next time another engine asks, but until then it counts as playing.
 
 Load one engine as `.primary` and the others with `LoadOptions(sharedOutputRole: .secondary)`, set `logTag` (set before `load()`) on each, and control what is audible with `volume`. Every engine keeps decoding its audio, so switching the audible one is a volume change and not a reload.
@@ -706,9 +707,13 @@ measured against, whether it waited or was satisfied immediately.
 cadence and the holdback follows it down, so the win belongs to the source GOP rather than to the flag:
 `TARGETDURATION` can never fall below `ceil(max EXTINF)`, and a long-GOP source therefore keeps most of
 its runway under either profile. Where the engine cuts the segments itself, each one is a whole GOP and
-the value is sealed from the first few, so it carries `ceil(1.5 x max EXTINF)` of headroom: a broadcast
-whose GOPs run 1.0 to 2.4 s sealed TARGETDURATION 1 on its first three and then broke `EXTINF <= TD`
-on every longer one (AE#670). 1 s GOPs therefore serve TARGETDURATION 2 and a 6 s holdback.
+the value is sealed from the first few, so it carries headroom for a GOP 1.5 x the longest seen: a
+broadcast whose GOPs run 1.0 to 2.4 s sealed TARGETDURATION 1 on its first three and then broke
+`EXTINF <= TD` on every longer one (AE#670). The headroom is the smallest value under which that longer
+GOP still lists (RFC 8216 rounds EXTINF to the nearest integer) and finishes inside AVPlayer's
+`1.5 x TARGETDURATION` patience with 0.5 s to spare, so 1 s GOPs serve TARGETDURATION 2 and a 6 s
+holdback, and so does a 59.94 fps stream whose scene-cut keyframes merge GOPs into 80 to 89-frame
+segments (up to 1.666 s seal 2).
 
 **An ingested HLS upstream seals over the segment it is delivered in, as far as its join pays for it,
 under either profile (AE#684).** The engine re-cuts an upstream segment (at its GOPs under `.fastZap`,
@@ -1061,8 +1066,8 @@ All flags default to safe values; the table is the full set. Depth for the media
 | --- | --- | --- |
 | `httpHeaders` | empty | Extra headers on every probe, range and segment fetch. On `nativeRemoteHLS` they ride into the `AVURLAsset`, so header-enforcing IPTV origins work. Forwarded to sidecar subtitle fetches unless overridden. **Scoping differs by route.** On the plain `nativeRemoteHLS` bypass AVFoundation itself sends them to every host the playlists name (cross-host variants, segments and `EXT-X-KEY` URIs) and carries them across 302 redirects, so credential headers there reach every such host and the engine cannot narrow that. The per-origin credential scoping described for `HLSLiveIngestReader` applies only on the routes the engine fetches itself: the ingest, the disc reader, the origin relay, the subtitle proxy, the audio tap and the live subtitle renditions. A credential that must not reach every host a playlist names should not ride in `httpHeaders` on the bypass. |
 | `isLive` | false | Treat the source as live. Set it explicitly; duration-based auto-detection is too noisy. |
-| `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. The window is a ceiling: the disk budget (a quarter of the free space, at most 2 GiB) bounds what is actually kept, so a long window on a high-bitrate channel or a small volume holds less than it asks for. |
-| `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to 1.5 x the source GOP (AE#670) so an IPTV join costs seconds instead of a full holdback. |
+| `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. The window is a ceiling: the disk budget (a quarter of the free space, at most 2 GiB) bounds what is actually kept, so a long window on a high-bitrate channel or a small volume holds less than it asks for. With several engines running, each one's quarter is taken from the free space the others have not already claimed, so a tile added on a tight volume holds less history than the first one (AE#687). |
+| `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to the source GOP plus headroom for one 1.5 x longer (AE#670) so an IPTV join costs seconds instead of a full holdback. |
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
 | `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is non-empty and at least 1.5 s deep, on an item that has reached `readyToPlay` (AE#684). The join tail no host can otherwise reach; default since 6.55.0 on a device A/B, see the live-join section. |
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto derives eligibility from observed upstream cadence, which is what keeps a bursty relay off a `-15410` loop. |
@@ -1076,6 +1081,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `externalSubtitles` | empty | Sidecar files registered at load, so they rank in the language preference and can join the native renditions. |
 | `prepareNativeSubtitles` | false | Declare WebVTT renditions so subtitles survive PiP / AirPlay / external display. |
 | `eagerNativeSubtitleReaders` | false | Populate those renditions at load instead of on first selection, for playlists AVKit auto-selects. Only meaningful with `prepareNativeSubtitles`. |
+| `serveIFramePlaylist` | false | Serve an I-frame rendition next to the master, so a stock `AVPlayerViewController` shows scrub thumbnails and scans on I-frames with no host code. One keyframe per segment at full resolution; opens a second reader on the source. Absent (one log line says why) for live, sources without a keyframe index, `sequentialOrigin`, `heldSourceConnection`, single-request origins, discs and media-playlist routing. Hosts with their own transport bar use `scrubThumbnail`. |
 | `nativeSubtitlePreferredLanguages` | empty | Which rendition is marked `DEFAULT=YES`. Resolved by the same BCP-47 matching as the overlay pick, so inline and PiP / AirPlay agree (#590). Read back as `nativeSubtitleDefaultOrdinal`. Does not activate the overlay path, so it cannot double up with the native render. |
 | `preserveASSMarkup` | false | Emit raw ASS event lines instead of extracted text; pair with `TrackInfo.assHeader`. ASS / SSA codecs only, embedded and sidecar alike, so a session mixing an ASS track with a SubRip one needs no reload to cross between them (AE#587). |
 | `teletextPage` | nil | Fix the DVB teletext caption page instead of letting libzvbi auto-detect. |

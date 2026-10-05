@@ -112,6 +112,12 @@ enum LiveEdgePolicy {
     static let boundedStartFloorArmed =
         ProcessInfo.processInfo.environment["AETHER_BOUNDED_START_FLOOR"] == "1"
 
+    /// AE#686, env-gated (`AETHER_FIRST_SERVE_LATCH_ALL=1`) for the same reason: it extends #684's
+    /// first-serve latch from ingest sessions to sources the engine cuts itself, so the second plain
+    /// manifest request no longer waits out a second grace. Read once.
+    static let firstServeLatchAllArmed =
+        ProcessInfo.processInfo.environment["AETHER_FIRST_SERVE_LATCH_ALL"] == "1"
+
     /// AVPlayer's unchanged-playlist patience: it tolerates a playlist that has not changed for this
     /// multiple of the served TARGETDURATION before drawing `-12888`. The one number the cadence floor
     /// is answerable to.
@@ -416,7 +422,7 @@ enum LiveEdgePolicy {
         var td = wholeSecondsCovering(max(1.0, maxSegmentDuration))
         if let cut = cutTargetSeconds { td = max(td, wholeSecondsCovering(cut * 1.5)) }
         if gopHeadroomApplies(cutTargetSeconds: cutTargetSeconds, segmentsAreCutHere: segmentsAreCutHere) {
-            td = max(td, wholeSecondsCovering(maxSegmentDuration * 1.5))
+            td = max(td, targetDurationForGOPHeadroom(maxSegmentDuration))
         }
         if let floor = cadenceFloorSeconds { td = max(td, targetDurationForCadence(floor)) }
         if let upstream = upstreamSegmentSeconds { td = max(td, targetDurationForUpstreamSegment(upstream)) }
@@ -437,6 +443,35 @@ enum LiveEdgePolicy {
         guard segmentsAreCutHere, let cut = cutTargetSeconds else { return false }
         return cut < 1.0
     }
+
+    /// AE#670: the smallest TARGETDURATION under which a GOP 1.5 x the longest seen would still be
+    /// served without fault: listed legally (RFC 8216 4.3.3.1 compares the EXTINF ROUNDED TO THE NEAREST
+    /// integer with TD) and finalized inside AVPlayer's `1.5 x TD` patience with
+    /// `gopHeadroomDeliveryMarginSeconds` to spare.
+    ///
+    /// Round 2: the first version took `ceil(1.5 x max EXTINF)`, which asks the virtual GOP for more than
+    /// any real segment is asked for and puts a cliff a millisecond wide into the seal. Reported on a
+    /// 59.94 fps source with 1.001 s GOPs: a 79-frame segment (1.318 s) sealed 2, an 80-frame one
+    /// (1.335 s, 2.002 x 1.5) sealed 3, a 9 s holdback a 6.6 s rebuild backlog could not hold, and the
+    /// first frame came 2.5 s later. Under TD 2 a GOP of 2.499 s still lists and leaves 0.5 s of patience,
+    /// so segments up to 1.666 s now seal 2, and the reporter's TD 2 sessions that later met 1.485 s ones
+    /// ran without a stall or -12888. Never above the first version: `round <= ceil`, and the patience
+    /// term only binds where the GOP is too short for the rounding to (TD 1 leaves a listed 1.5 x GOP no
+    /// patience at all, so 1.0 s GOPs keep their TD 2).
+    static func targetDurationForGOPHeadroom(_ maxSegmentSeconds: Double) -> Int {
+        guard maxSegmentSeconds.isFinite else { return wholeSecondsCovering(maxSegmentSeconds) }
+        let longerGOP = servedSeconds(maxSegmentSeconds * 1.5)
+        guard longerGOP > 0 else { return 0 }
+        let listed = wholeSecondsCovering(longerGOP.rounded(.toNearestOrAwayFromZero))
+        let patient = wholeSecondsCovering((longerGOP + gopHeadroomDeliveryMarginSeconds)
+                                           / unchangedPlaylistPatienceMultiplier)
+        return max(listed, patient)
+    }
+
+    /// AE#670 round 2: how long before AVPlayer's patience runs out a GOP 1.5 x the longest seen must
+    /// have been finalized. Half a second is what the first version already accepted for the 2.4 s GOP
+    /// it was reported for (TD 2, patience 3.0 s), so the relaxation gives up nothing that one kept.
+    static let gopHeadroomDeliveryMarginSeconds: Double = 0.5
 
     /// AVPlayer's default (and our explicitly advertised) live-edge holdback: `3 x TARGETDURATION`, the
     /// RFC 8216bis floor for `EXT-X-SERVER-CONTROL:HOLD-BACK`.
@@ -643,6 +678,7 @@ struct LiveTargetDurationDerivation {
         }
         if gopHeadroomApplies {
             terms.append("1.5 x max EXTINF \(LiveEdgePolicy.seconds(maxSegmentDuration * 1.5))s "
+                + "needs \(LiveEdgePolicy.targetDurationForGOPHeadroom(maxSegmentDuration))s "
                 + "(each segment is one whole GOP)")
         }
         terms.append(cadenceFloor.account)
@@ -683,6 +719,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let cache: SegmentCache
     /// Immutable for VOD; grows under stateLock for live (producer appends via appendLiveSegment).
     private var segments: [HLSVideoEngine.Segment]
+    private let iFrameSourceLock = NSLock()
+    private var _iFrameSource: IFrameSegmentSource?
     private let isLive: Bool
     /// Sequential-origin session: playlist grows with finalized real durations (see _seqDurations).
     private let sequentialAppendPlaylist: Bool
@@ -693,9 +731,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
     /// outer wall-clock deadline. Measurement arm, off unless the environment asks for it.
     private let boundedStartFloorsAtHoldback: Bool
+    /// AE#686 arm: the first-serve latch also covers a source the engine cuts itself. Measurement arm,
+    /// off unless the environment asks for it.
+    private let firstServeLatchCoversEngineCut: Bool
     /// AE#374: whether the first-serve gate has already reported the interval it held. Read and written
     /// only under `firstSegmentCondition`, inside `waitForFirstLiveSegment` and its two account helpers.
     private var didAccountForFirstServe = false
+    /// AE#686: whether the first repeat pass through the gate has been reported. Same lock.
+    private var didAccountForRepeatServe = false
     /// AE#684: on an ingest the gate is a FIRST-serve gate. Every `/media.m3u8` request without an
     /// `_HLS_msn` re-enters it, and AVPlayer opens a session with two of them back to back, so a
     /// bounded start (served under the holdback, after its grace) held the second request for a
@@ -921,6 +964,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         allowsBoundedDegradedStart: Bool = false,
         boundedStartFloorsAtHoldback: Bool = false,
+        firstServeLatchCoversEngineCut: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
@@ -951,6 +995,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.liveWindowSizing = liveWindowSizing
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
         self.boundedStartFloorsAtHoldback = boundedStartFloorsAtHoldback
+        self.firstServeLatchCoversEngineCut = firstServeLatchCoversEngineCut
         self.blockingReloadOverride = blockingReloadOverride
         self.liveCadencePolicy = liveCadencePolicy
         self.codecsString = codecsString
@@ -2568,8 +2613,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             if waitersCancelled { return false }
             // Ingest sessions only. A source the engine cuts itself keeps the gate it had: there the
             // second request's wait is part of where the session ends up behind the producing edge,
-            // which is AE#594's question and not this one's.
-            if firstManifestServed, liveCadencePolicy != nil { return true }
+            // which is AE#594's question and not this one's. AE#686 measures it behind an arm.
+            if firstManifestServed, liveCadencePolicy != nil || firstServeLatchCoversEngineCut {
+                accountForRepeatServe(since: enteredAt, note: "first-serve latch")
+                return true
+            }
             // Spent first, snapshot second (see `firstServeTargetDuration`).
             let spent = liveCadencePolicy?.joinIsSpent
             let snap = liveCushionSnapshot()
@@ -2664,7 +2712,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         note: String? = nil
     ) {
         firstManifestServed = true
-        guard !didAccountForFirstServe else { return }
+        guard !didAccountForFirstServe else {
+            accountForRepeatServe(since: entered, note: note)
+            return
+        }
         didAccountForFirstServe = true
         let account = LiveEdgePolicy.firstServeAccount(
             waitedSeconds: Self.secondsSince(entered),
@@ -2674,6 +2725,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         )
         EngineLog.emit(
             "[HLSVideoEngine] \(warning ? "WARNING: " : "")\(account)"
+            + (note.map { ", \($0)" } ?? ""),
+            category: .session
+        )
+    }
+
+    /// AE#686: AVPlayer opens with two plain manifest requests, and how long the second one waited is
+    /// the measurement the latch arm is about. Reported once, from whichever exit let it through.
+    private func accountForRepeatServe(since entered: DispatchTime, note: String?) {
+        guard !didAccountForRepeatServe else { return }
+        didAccountForRepeatServe = true
+        EngineLog.emit(
+            "[HLSVideoEngine] repeat live manifest request held "
+            + "\(LiveEdgePolicy.seconds(Self.secondsSince(entered)))s"
             + (note.map { ", \($0)" } ?? ""),
             category: .session
         )
@@ -2743,6 +2807,23 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// AE#446: how often a blocking-reload hold re-asks whether the source is still alive.
     static let liveHoldRecheckSeconds: TimeInterval = 1.0
+    /// AE#682. Set once by the session after the routing decision, before the playback URL leaves
+    /// `start()`; cleared when the session falls back to the media playlist or stops.
+    func setIFrameSource(_ source: IFrameSegmentSource?) {
+        iFrameSourceLock.lock()
+        _iFrameSource = source
+        iFrameSourceLock.unlock()
+    }
+
+    private var iFrameSource: IFrameSegmentSource? {
+        iFrameSourceLock.lock(); defer { iFrameSourceLock.unlock() }
+        return _iFrameSource
+    }
+
+    var iFrameRenditionServed: Bool { iFrameSource != nil }
+    func iFrameInitSegment() -> Data? { iFrameSource?.initSegment() }
+    func iFrameSegment(at index: Int) -> Data? { iFrameSource?.fragment(at: index) }
+
     var masterCodecs: String? { codecsString }
     var masterSupplementalCodecs: String? { supplementalCodecsString }
     var masterResolution: (width: Int, height: Int)? {
