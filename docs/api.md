@@ -77,7 +77,7 @@ It is assigned before `state`, so a `$state` sink reads this failure's own info 
 
 To replay, call `load(...)` again. The engine keeps `.ended` terminal deliberately: a play press racing a host's end card must not silently restart a finished session (#63/#164). A VOD **parked at its final frame** without having ended (scrubbed there, paused there) is the other case and does resume: `play()` rewinds to the start first.
 
-The clock stops with it, on both backends: `clock.currentTime` and `clock.sourceTime` settle on the last sample and stay there, so a progress bar bound to them holds at the end instead of walking past `duration`. Through 6.28.0 the software path was the exception: its master clock kept its rate past end of media, so a session left standing published a position that grew without bound (20.13 s on a 12.0 s source after 20 s, against 11.97 s from a native session on the same file). A host reading the clock after `.ended` on one of those builds is reading that, not a drifting session (AE#374).
+The clock stops with it, on both backends: `clock.currentTime` and `clock.sourceTime` settle on the last sample and stay there, so a progress bar bound to them holds at the end instead of walking past `duration`. Through 6.28.0 the software path was the exception: its master clock kept its rate past end of media, so a session left standing published a position that grew without bound (20.13 s on a 12.0 s source after 20 s, against 11.97 s from a native session on the same file). A host reading the clock after `.ended` on one of those builds is reading that, not a drifting session (AE#374). The audio-only path (a source without a video track decoded through FFmpeg) had the same defect through 7.27.0 and parks the same way since (AE#694).
 
 ### Live: the retune request
 
@@ -679,6 +679,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | Symbol | Notes |
 | --- | --- |
 | `$isLive` | Mirrors `LoadOptions.isLive` for the session. |
+| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared (`LoadOptions.sequentialOrigin`) or found by the reader (the origin ignores `Range`, or refused the ranged open twice and served a plain GET, AE#693). The session plays from the start, so a `startPosition` given to `load()` was not honoured, and a seek lands only inside what `$residentRanges` already holds. A host that needs the position reopens the source or tells the user. Set during `load()`, cleared on stop. |
 | `seekToLiveEdge()` | `async`. |
 | `liveSourceReset` | The retune contract above. |
 | `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see above. |

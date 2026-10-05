@@ -12,7 +12,23 @@ the public-API contract.
 
 ### IPTVX fork
 
-- Integrated the complete upstream 7.26.3 release, including shared retention claims, optional I-frame renditions, mount-clock rescue, fast-zap GOP headroom and the default-off first-serve measurement arm, while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. I-frame shutdown is included in the awaited source teardown before codec parameters are freed. Startup audio correction now carries the epoch accepted by its own flush without admitting buffers retired by a concurrent seek or stop. The fork retains the complete FFmpegBuild 3.6.0 binaries with IPTVX packaging metadata matching their iOS/tvOS 16 Mach-O deployment target, and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+- Integrated the complete upstream 7.27.1 release, including transient ranged-open refusal recovery and audio-only end-of-media clock parking, while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. I-frame shutdown is included in the awaited source teardown before codec parameters are freed. Audio-only Play and speed writes preserve the end-of-media park, including IPTVX's speed-before-Play transport sequence. Startup audio correction now carries the epoch accepted by its own flush without admitting buffers retired by a concurrent seek or stop. The fork retains the complete FFmpegBuild 3.6.0 binaries with IPTVX packaging metadata matching their iOS/tvOS 16 Mach-O deployment target, and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
+
+## [7.27.1] - 2026-10-04
+
+### Fixed
+
+- **The audio-only path's clock parks at end of media instead of free-running past it (#694).** `AudioPlaybackHost` reported `.ended` while its synchronizer kept rate 1, so `currentTime` grew past `duration` for as long as the session stood. It now gets the AE#374 park the software host has: the queued tail plays out, then the clock stops on the last sample, and `play()` no longer restarts a clock the source stopped. Reported by ijuniorfu.
+
+## [7.27.0] - 2026-10-04
+
+### Fixed
+
+- **One refusal at byte 0 no longer settles a range-capable VOD forward-only for the whole session (#693).** An Xtream origin answered the ranged open of an episode with a 403 and the unranged GET right after it with a 200. Since #378 every 401/403/404/410 at byte 0 was read as the answer to the resource, so the source was served as a sequential origin: `startPosition` dropped and every seek past the downloaded window snapped back. The open now asks the same range once more before it settles: served, the source stays seekable; refused again, the #378 path runs unchanged. A source that refuses everything costs one request more and still fails typed with its status.
+
+### Added
+
+- **`isSequentialOrigin` (#693).** Published, true while a VOD session is served as a sequential origin, declared or found by the reader. Such a session plays from the start (a `startPosition` was not honoured) and a seek lands only inside `$residentRanges`, so a host can reopen the source itself or tell the user instead of reading log lines.
 
 ## [7.26.3] - 2026-10-03
 
