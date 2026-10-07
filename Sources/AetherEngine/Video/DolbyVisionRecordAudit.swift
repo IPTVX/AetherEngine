@@ -31,7 +31,8 @@ public enum DolbyVisionRecordAudit {
         var result: Int?
         A53SEIParser.forEachNAL(data, size, framing) { nal, len in
             guard result == nil, (nal[0] >> 1) & 0x3F == nalTypeRPU else { return }
-            guard let rpu = dovi_parse_unspec62_nalu(nal, len) else { return }
+            // Behind the CRC and panic-path checks: libdovi aborts the process on some malformed RPUs.
+            guard let rpu = DoviRpuGuard.parse(nal, len) else { return }
             defer { dovi_rpu_free(rpu) }
             guard let hdr = dovi_rpu_get_header(rpu) else { return }
             defer { dovi_rpu_free_header(hdr) }
