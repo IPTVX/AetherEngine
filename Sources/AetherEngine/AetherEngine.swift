@@ -614,6 +614,9 @@ public final class AetherEngine: ObservableObject {
     /// Deriving it keeps the load's answer and the rebuild's the same value rather than two.
     var sessionDisplayEligibleForHDR: Bool { sessionObservedDisplayCaps?.supportsHDR ?? false }
 
+    /// Enhancement layer type for Profile 7 streams ("FEL" or "MEL") extracted from the first RPU.
+    var sourceElType: String? = nil
+
     /// Whether the loaded source's Dolby Vision has a base layer `LoadOptions.dolbyVisionHandling =
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
     /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
@@ -4271,6 +4274,7 @@ public final class AetherEngine: ObservableObject {
         sourceDVProfile = nil
         dolbyVisionConversion = nil
         sourceCarriesHDR10PlusMetadata = false
+        sourceElType = nil
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
@@ -5019,12 +5023,102 @@ public final class AetherEngine: ObservableObject {
                 category: .engine
             )
         }
+        // A Profile 7 source with in-band parameter sets (`hev1` with an empty hvcC) is unclassifiable
+        // to the strict verdict below and would stay native for that reason alone. When the dual-layer
+        // route is wanted, complete the probe's record from the head of the stream first; the session
+        // reuses this demuxer, so the software host and its decoders see the completed record too.
+        if probeOpened, probe.videoStreamIndex >= 0, !options.isLive, probe.isSourceSeekable,
+           VideoRoutingPolicy.dualLayerRouteIsWanted(
+               codecID: detectedCodecID,
+               dvProfile: detectedDVProfileNum,
+               dolbyVisionHandling: options.dolbyVisionHandling,
+               preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
+               canHardwareDecode: nil) {
+            let vIdx = probe.videoStreamIndex
+            await BlockingWork.detached(priority: .userInitiated) { [probe] in
+                VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: probe, streamIndex: vIdx)
+            }.value
+            if loadGeneration != gen {
+                probe.markClosed()
+                BlockingWork.detached { [probe] in probe.close() }
+                try checkLoadCurrent(gen)
+            }
+        }
+        // Strict verdict: SoftwarePlaybackHost only opens HardwareVideoDecoder for a proven hardware
+        // session. An unclassifiable config record stays native, because the host would hand it to
+        // libavcodec, which cannot compose the dual layers. Shared by the el_type probe's gate and the
+        // routing decision below, so the two cannot disagree.
+        let opensHardwareHEVC: () -> Bool = {
+            if let vStream = probe.stream(at: probe.videoStreamIndex),
+               let cp = vStream.pointee.codecpar {
+                return VTCapabilityProbe.opensHardwareDecoder(codecpar: cp)
+            }
+            return false
+        }
+        // Dual-layer decision for a Profile 7 source: FEL only, behind a capability gate (hardware HEVC
+        // decode, and a pixel rate the box can decode twice in real time), logged once. The el_type
+        // probe reads up to 256 packets and seeks back, so it runs only when nothing in
+        // `blockingReasonBeforeProbe` (preference, handling, live/seekable, hardware) rules the route
+        // out. The geometry and the budget are NOT in that list: they run after the probe, in
+        // `decide`, because a MEL or unclassified el_type outranks them in the log line, so a stream
+        // that its size alone would refuse still pays the probe.
+        var elType: String? = nil
+        var dualLayerGeometry = DualLayerRouteDecision.Geometry(width: 0, height: 0, frameRate: nil)
+        if probeOpened, let vStream = probe.stream(at: probe.videoStreamIndex),
+           let cp = vStream.pointee.codecpar {
+            dualLayerGeometry = DualLayerRouteDecision.Geometry(
+                width: Int(cp.pointee.width), height: Int(cp.pointee.height),
+                frameRate: Self.detectFrameRate(stream: vStream))
+        }
+        let dualLayerSeekable = probeOpened && probe.videoStreamIndex >= 0 && probe.isSourceSeekable
+        if DualLayerRouteDecision.blockingReasonBeforeProbe(
+            codecID: detectedCodecID,
+            dvProfile: detectedDVProfileNum,
+            dolbyVisionHandling: options.dolbyVisionHandling,
+            preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
+            isLive: options.isLive,
+            isSourceSeekable: dualLayerSeekable,
+            canHardwareDecode: opensHardwareHEVC) == nil {
+            let vIdx = probe.videoStreamIndex
+            elType = await BlockingWork.detached(priority: .userInitiated) { [probe] in
+                let result = DolbyVisionRecordAudit.probeEnhancementLayerType(demuxer: probe, streamIndex: vIdx)
+                probe.seek(to: 0)
+                return result
+            }.value
+            if loadGeneration != gen {
+                probe.markClosed()
+                BlockingWork.detached { [probe] in probe.close() }
+                try checkLoadCurrent(gen)
+            }
+        }
+        let dualLayerDecision = DualLayerRouteDecision.decide(
+            codecID: detectedCodecID,
+            dvProfile: detectedDVProfileNum,
+            dolbyVisionHandling: options.dolbyVisionHandling,
+            preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
+            isLive: options.isLive,
+            isSourceSeekable: dualLayerSeekable,
+            canHardwareDecode: opensHardwareHEVC,
+            elType: elType,
+            geometry: dualLayerGeometry)
+        if let line = dualLayerDecision.logLine {
+            EngineLog.emit(line, category: .engine)
+        }
+        // A route that was not taken leaves no el_type behind, so neither the routing below nor a
+        // software host the session reaches for another reason composes the dual layers.
+        if !dualLayerDecision.isTaken { elType = nil }
+        sourceElType = elType
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
             av1Available: VTCapabilityProbe.av1Available,
             spsIndicatesInterlaced: spsIndicatesInterlaced,
-            stereo3DType: containerStereoType
+            stereo3DType: containerStereoType,
+            dvProfile: detectedDVProfileNum,
+            dolbyVisionHandling: options.dolbyVisionHandling,
+            preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
+            canHardwareDecode: opensHardwareHEVC,
+            elType: elType
         )
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
@@ -5247,7 +5341,8 @@ public final class AetherEngine: ObservableObject {
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
-                    generation: gen
+                    generation: gen,
+                    elType: elType
                 )
                 playbackBackend = .software
                 // AE#550: the one thing a viewer on a receiver needs said out loud. This backend's
@@ -6473,6 +6568,7 @@ public final class AetherEngine: ObservableObject {
         sourceDVProfile = nil
         dolbyVisionConversion = nil
         sourceCarriesHDR10PlusMetadata = false
+        sourceElType = nil
         sourceDVBLCompatID = nil
         sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil

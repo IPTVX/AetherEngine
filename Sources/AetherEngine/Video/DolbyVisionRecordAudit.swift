@@ -232,6 +232,45 @@ public enum DolbyVisionRecordAudit {
         return nil
     }
 
+    /// Walks the first video packets of an open demuxer for the first RPU of a Profile 7 source and reads
+    /// its enhancement-layer type ("FEL" or "MEL"). nil when no packet in the budget carries one.
+    ///
+    /// Takes the session's own probe demuxer, so the packets read here are packets the caller must not
+    /// need afterwards: the caller seeks it back or opens another. The same packet and byte ceilings as
+    /// `rpuProfile(walking:)` apply, for the same reason (audit BIT-2, BIT-103).
+    static func probeEnhancementLayerType(
+        demuxer: Demuxer, streamIndex: Int32, packetBudget: Int = auditPacketBudget,
+        byteBudget: Int64 = Int64(walkByteBudget)
+    ) -> String? {
+        guard let stream = demuxer.stream(at: streamIndex) else { return nil }
+        let codecpar = stream.pointee.codecpar
+        let framing = A53SEIParser.nalFraming(
+            codec: .hevc, extradata: codecpar?.pointee.extradata,
+            size: Int(codecpar?.pointee.extradata_size ?? 0))
+
+        demuxer.beginInputByteBudget(byteBudget)
+        defer { demuxer.endInputByteBudget() }
+
+        var walked = 0
+        var packetsRead = 0
+        var bytesRead = 0
+        while walked < packetBudget {
+            guard !walkExhausted(packetsRead: packetsRead, bytesRead: bytesRead, packetBudget: packetBudget)
+            else { return nil }
+            guard let packet = (try? demuxer.readPacket()) ?? nil else { return nil }
+            defer {
+                av_packet_unref(packet)
+                av_packet_free_safe(packet)
+            }
+            packetsRead += 1
+            bytesRead += Int(max(packet.pointee.size, 0))
+            guard packet.pointee.stream_index == streamIndex else { continue }
+            walked += 1
+            if let type = DoviRpuConverter.enhancementLayerType(packet, framing: framing) { return type }
+        }
+        return nil
+    }
+
     /// Audit BIT-2: the walk counted only video packets, so a source that stops delivering video after
     /// its head made every open read the rest of the file. Every packet counts against these instead.
     /// No AVDISCARD_ALL on the other streams: the demuxer would then skip them inside one read, where
