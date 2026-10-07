@@ -212,8 +212,7 @@ switching into a Dolby Vision mode, is answered by a pulse test that anyone with
 television and a phone can repeat: clips whose pixels are constant while only the RPU (or the
 enhancement-layer residual) switches, played through AVPlayer, VideoToolbox and the FEL route, and
 filmed. Clip generator, device host, harness scripts and analysis are in
-[`Probes/DolbyVisionPulse`](../Probes/DolbyVisionPulse/README.md), which arrives with the pulse-probe PR
-that follows this one; the link resolves once it has landed.
+[`Probes/DolbyVisionPulse`](../Probes/DolbyVisionPulse/README.md).
 
 ### 4.6 Caveat on the numbers
 
