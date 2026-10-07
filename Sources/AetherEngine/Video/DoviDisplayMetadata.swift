@@ -98,6 +98,11 @@ enum DoviDisplayMetadata {
     /// - Parameter nal: the Profile 8.1 `unspec62` NAL *including* its 2-byte header, as
     ///   returned by `dovi_write_unspec62_nalu`. The header is stripped here.
     static func attach(rpuNAL nal: [UInt8]?, to buffer: CVPixelBuffer) {
+        #if DEBUG
+        // Compiles out of Release entirely. Substitutes a pinned RPU when the consumption test
+        // is armed; a no-op returning `nal` unchanged otherwise. See `DoviDisplayMetadataDebug`.
+        let nal = DoviDisplayMetadataDebug.substitute(nal)
+        #endif
         guard let payload = payload(fromNAL: nal) else {
             CVBufferRemoveAttachment(buffer, rpuDataKey as CFString)
             CVBufferRemoveAttachment(buffer, compatibilityIDKey as CFString)

@@ -544,6 +544,10 @@ Sources/AetherEngine/
 │   ├── DoviRpuConverter.swift               libdovi RPU surgery for both routes. Native path: per-packet Profile 7 → 8.1 rewrite (convert type-62 RPU, drop type-63 EL). SW FEL path: `separateDualLayers` also lifts the EL into its own packet and returns the composer's reshaping parameters plus the 8.1 RPU attached as display metadata
 │   ├── DoviRpuConverter+Probe.swift         Diagnostic DV-conversion probe (`doviConvertProbe` / `DoviConvertProbeResult`), backs `aetherctl dovitest`
 │   ├── DoviDisplayMetadata.swift            SW FEL path: sets `DolbyVisionRPUData` (the Profile 8.1 RPU minus its NAL header) and `DolbyCompatibilityID` (the CFString "1", never a number) on every emitted buffer, or clears both; tvOS consumes them in backboardd
+│   ├── DoviDisplayMetadataDebug.swift       DEBUG-only pin test: substitutes a captured RPU on a duty cycle, the on-device consumption test
+│   ├── DoviRpuSurvey.swift                  L1 / L2 display-metadata survey over a title's RPUs (no decode, no GPU); backs `aetherctl dvsurvey`
+│   ├── AetherEngine+FelProbe.swift          FEL decode probe backing `aetherctl feltest`, and the `--cycle-el` residual switch
+│   ├── AetherEngine+DolbyVisionTest.swift   DEBUG-only `@_spi(Diagnostics)` hook (not host API) that arms the pin test from a debug menu or `aetherctl play --dv-pin`
 │   ├── Metal/
 │   │   ├── DoviFelComposer.swift            BL + EL + RPU composition: runtime-compiled pipelines, pooled P010 output, `composeAsync` bounded at `maxFramesInFlight` with completions on its own serial queue; RPU → `DoviMetalParams` parsing
 │   │   ├── DoviShaderSource.swift           Luma / chroma compose kernels (reshaping, inverse NLQ, bilinear EL upsampling, ordered dither) and the ABI layout probe, compiled at runtime
