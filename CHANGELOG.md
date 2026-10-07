@@ -14,6 +14,42 @@ the public-API contract.
 
 - Integrated the complete upstream 7.27.1 release, including transient ranged-open refusal recovery and audio-only end-of-media clock parking, while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. I-frame shutdown is included in the awaited source teardown before codec parameters are freed. Audio-only Play and speed writes preserve the end-of-media park, including IPTVX's speed-before-Play transport sequence. Startup audio correction now carries the epoch accepted by its own flush without admitting buffers retired by a concurrent seek or stop. The fork retains the complete FFmpegBuild 3.6.0 binaries with IPTVX packaging metadata matching their iOS/tvOS 16 Mach-O deployment target, and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
 
+## [7.28.2] - 2026-10-06
+
+### Changed
+
+- **A bounded live start on a source the engine cuts itself no longer waits a second grace (#686).** AVPlayer opens with two plain `/media.m3u8` requests, and on raw MPEG-TS under `.fastZap` each one waited out the bounded-start grace; #684's first-serve latch spared only ingest sessions. It now covers engine-cut sources too, the behaviour 7.26.3 put behind `AETHER_FIRST_SERVE_LATCH_ALL=1`. Measured by cmcpherson274 on an Apple TV 4K (1080p59.94 H.264 + AAC, 1.001 s segments, three runs per cell): every bounded start reached its picture 1.003 to 1.039 s sooner, the session sat 0.5 to 1.5 s nearer the edge after 60 s, and 18 latched launches logged no stall, `-16832` or `-12888`. Rebuilds from a backlog served a full cushion either way. `AETHER_FIRST_SERVE_LATCH_ALL=0` restores the old gate. No API change.
+
+## [7.28.1] - 2026-10-06
+
+### Fixed
+
+- **`[SWDiag]` reports `aLead` on live DVR sessions as well (#395).** 7.27.2 added the marker to the combined demux loop only. A live session loaded with `dvrWindowSeconds` feeds its audio from the ring pump, which never wrote it, so its line still read `aLead=-` throughout. The line now reads the pump's own fed PTS there, the value the pump paces on. Measured with `aetherctl dvr --path sw`: `aLead=-` before, `aLead=4.00`, `3.12`, `2.12` after. Diagnostic only, pacing unchanged, no API change.
+- **HEVC with a parameter-set change mid-title keeps its picture.** On an Annex-B HEVC source (Blu-ray M2TS, broadcast TS) movenc converted the samples itself and, under the `hvc1` sample entry, dropped every in-band VPS/SPS/PPS, so a stream that sends a new PPS mid-title had every later slice decoded against the stale one: sound continued over a frozen or black picture. The session muxer now gets a length-prefixed record and converts the samples itself with their parameter sets kept, the shape a Matroska remux of the same stream already had; `init.mp4` and `CODECS` are unchanged. The I-frame rendition muxer takes the same path. Measured on a fixture whose PPS changes at 20 s: 463 presented frames in 42 s before (none after the change), 936 after. Diagnosed by yipengfei329 (#703).
+- **A keyframe index that stops minutes before the end is no longer trusted.** A partial scan (an MKV whose Cues are missing or point past EOF) passed both the gap and the coverage check, and the keyframe planner then cut a final segment from the last scanned keyframe to the end of the title, which the producer can never finish. The index now also has to reach within 60 s of the source duration, otherwise the session takes the uniform plan. Diagnosed by yipengfei329 (#703).
+
+## [7.28.0] - 2026-10-06
+
+### Added
+
+- **HDR Vivid (CUVA) detection in the opt-in probe (#699).** `ProbeDetail.hdrVivid` scans HEVC packets for the CUVA T/UWA 005.1 T.35 SEI and sets the new `SourceProbe.carriesHDRVividMetadata`. It runs in the same packet pass as `.hdr10Plus` and under the same `HDR10PlusDetectionOptions` budget; asking for both still opens one connection, and a cap that ends the pass after one of the two was confirmed keeps that confirmation. libavcodec's CUVA parser is internal, so `HDRVividMetadataScan` walks the body with the same field widths and only counts a complete message with a defined `system_start_code` and zero bits after its last field. `videoFormat` does not move (Vivid rides an HLG or PQ base, which stays the label), and playback is unchanged: the SEI is stream-copied as before and no Apple platform applies it. `aetherctl probe --detect-hdr-vivid` prints the finding, and `Scripts/make-hdr10plus-fixture.py --vivid` builds a fixture ffprobe parses as Vivid. Requested by ijuniorfu.
+
+## [7.27.3] - 2026-10-05
+
+### Fixed
+
+- **An HEVC MP4 without composition offsets is presented in display order (#699).** The #409 repair only armed on H.264, so an HEVC file whose writer dropped `ctts` while the bitstream reorders pictures went to AVPlayer and the software decoder in decode order, which shows as flicker and back-and-forth motion. The repair now reads the picture order count with libavcodec's HEVC parser as well, and its window check also accepts a hierarchical mini-GOP longer than the reorder delay (five pictures at delay 2 on the reporting asset). Measured on that asset (4K50 Main 10, 1500 frames): 0 backward steps in the served stream, against 35 of 88 in the first frames before. The partial-region repair stays H.264-only. Reported by ijuniorfu.
+
+## [7.27.2] - 2026-10-05
+
+### Added
+
+- **The software path names its audio route, its audio lead on live, and its renderer state (#395).** A live software session that was silent on an AirPlay 2 receiver and audible over HDMI logged the same on both. The software host now writes `[SoftwarePlaybackHost] audioRoute ...` at session start with the route's output latency (same fields as the native host's line), the engine writes `[AetherEngine] audioRoute changed reason=N ...` on every route change once per process, `[SWDiag]` reports `aLead` on live sessions too (diagnostic marker only, pacing unchanged), and it carries `aRend=status/sufficient/error` for the audio renderer, whose error was only logged in DEBUG builds before. No API change.
+
+### Fixed
+
+- **An end-of-media park that runs late still stops the clock on the last sample (#694).** The park is deferred by the queued audio tail and ran wherever the clock stood when its task got the main actor, so a busy main actor parked it past the end (measured: 1.149 s on a 1.0 s source). Both the audio-only and the software host now put the clock back on the point the deferral aimed at.
+
 ## [7.27.1] - 2026-10-04
 
 ### Fixed

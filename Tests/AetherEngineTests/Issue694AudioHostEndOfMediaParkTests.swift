@@ -11,7 +11,7 @@ struct Issue694AudioHostEndOfMediaParkTests {
     /// IPTVX reapplies the requested speed before Play. Once the source ended, that transport
     /// sequence and a later Pause/Play must keep the clock parked until an explicit seek or reload.
     @MainActor
-    @Test("after end of media the clock stands still through speed and play requests")
+    @Test("after end of media the clock stays on the last sample through late park, speed and play requests")
     func clockParksOnTheLastSample() async throws {
         let host = AudioPlaybackHost()
         let demuxer = Demuxer()
@@ -25,6 +25,9 @@ struct Issue694AudioHostEndOfMediaParkTests {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         #expect(host.didReachEnd)
+        // What a loaded runner does to the deferred park (CI: parked at 1.149 s): hold the main actor
+        // past the queued tail, so the park runs after the clock has walked on.
+        usleep(500_000)
 
         let parkDeadline = Date().addingTimeInterval(2)
         while host.clockRateForTesting != 0, Date() < parkDeadline {
@@ -58,6 +61,14 @@ struct Issue694AudioHostEndOfMediaParkTests {
         try await Task.sleep(nanoseconds: 500_000_000)
         let afterPauseAndPlay = try #require(host.clockSecondsForTesting)
         #expect(abs(afterPauseAndPlay - afterPlay) < 0.01)
+    }
+
+    @Test("a park that runs after the clock passed its target puts it back on the target")
+    func lateParkLandsOnTheTarget() {
+        #expect(SoftwareEndOfMediaClock.parkSeconds(clockSeconds: 1.149, notAfter: 1.0) == 1.0)
+        #expect(SoftwareEndOfMediaClock.parkSeconds(clockSeconds: 0.98, notAfter: 1.0) == nil)
+        #expect(SoftwareEndOfMediaClock.parkSeconds(clockSeconds: 1.149, notAfter: .infinity) == nil)
+        #expect(SoftwareEndOfMediaClock.parkSeconds(clockSeconds: .nan, notAfter: 1.0) == nil)
     }
 
     private func makeWAV(seconds: Double) -> Data {

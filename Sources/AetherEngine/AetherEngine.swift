@@ -7478,6 +7478,10 @@ public final class AetherEngine: ObservableObject {
             lifecycleObservers.append(observer)
         }
 
+        #if os(iOS) || os(tvOS)
+        AudioRouteDescription.changeLogger
+        #endif
+
         #if os(iOS)
         let routeObserver = nc.addObserver(
             forName: AVAudioSession.routeChangeNotification,

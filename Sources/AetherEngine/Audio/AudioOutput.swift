@@ -56,6 +56,23 @@ final class AudioOutput: @unchecked Sendable {
         synchronizer.rate
     }
 
+    /// AE#395: the renderer's own view of its queue, for the diagnostic line: `status/sufficient/error`.
+    /// A session that is silent on one route while its clock runs at 1.00 has nothing else that could
+    /// say whether the renderer is playing what it was given, and the renderer error was only ever
+    /// logged in DEBUG builds.
+    var diagRendererState: String {
+        let status: String
+        switch renderer.status {
+        case .rendering: status = "rendering"
+        case .failed: status = "failed"
+        case .unknown: status = "unknown"
+        @unknown default: status = "?"
+        }
+        let sufficient = renderer.hasSufficientMediaDataForReliablePlaybackStart ? "y" : "n"
+        let error = (renderer.error as NSError?).map { "\($0.domain)/\($0.code)" } ?? "-"
+        return "\(status)/\(sufficient)/\(error)"
+    }
+
     /// AE#549: how often this renderer has flushed itself, for the diagnostic line.
     var automaticFlushCount: Int {
         lock.lock()
@@ -152,6 +169,17 @@ final class AudioOutput: @unchecked Sendable {
     /// Pause audio (and the master clock). Hosts resume via setRate (pausedByHost pattern); deliberately no resume() here.
     func pause() {
         let at = synchronizer.currentTime()
+        EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", at.seconds))", category: .swPlayback)
+        synchronizer.setRate(0.0, time: at)
+    }
+
+    /// Pause the master clock, at `latest` if it has already run past it. A park deferred to the last
+    /// sample runs whenever its task is scheduled, and on a starved main actor that is after the clock
+    /// has walked on (#694: 1.149 s on a 1.0 s source on a CI runner).
+    func pause(notAfter latest: Double) {
+        let now = synchronizer.currentTime()
+        let seconds = SoftwareEndOfMediaClock.parkSeconds(clockSeconds: CMTimeGetSeconds(now), notAfter: latest)
+        let at = seconds.map { CMTime(seconds: $0, preferredTimescale: 90000) } ?? now
         EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", at.seconds))", category: .swPlayback)
         synchronizer.setRate(0.0, time: at)
     }

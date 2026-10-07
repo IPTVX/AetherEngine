@@ -26,7 +26,7 @@ Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced th
 
 ### MP4 without composition offsets
 
-Some writers emit a sample table with no `ctts` while the H.264 bitstream still reorders pictures.
+Some writers emit a sample table with no `ctts` while the H.264 or HEVC bitstream still reorders pictures.
 Every sample then reports `PTS == DTS`, and since the native route stream-copies those timestamps
 into fMP4, AVPlayer is handed decode order as presentation order: each future reference picture is
 shown before the B pictures that precede it. Measured through AVFoundation's own decoder on a twin
@@ -34,8 +34,8 @@ pair (one encode muxed twice, composition offsets removed from one), 45 of 66 pi
 time belonging to a different picture, with the content order stepping backwards 30 times (#409).
 
 The container lost the information, but the bitstream did not: every slice header carries a picture
-order count, which is display order, and libavcodec's H.264 parser reads it without decoding a pixel
-and takes MP4's length-prefixed payload directly. `H264CompositionOffsetRepair` samples the head
+order count, which is display order, and libavcodec's H.264 and HEVC parsers read it without decoding
+a pixel and take MP4's length-prefixed payload directly. `H264CompositionOffsetRepair` samples the head
 (twelve pictures at most, held rather than re-read, so no rewind and no second fetch) and repairs a
 confirmed source at the demuxer boundary:
 
@@ -54,10 +54,12 @@ built from index entries and then filled with these packets.
 Detection is fail-closed and costs a healthy file almost nothing: the first real PTS-DTS offset ends
 the sample (usually on the first packet, since a reordered file's head sample sits one delay below
 zero). A source is only repaired when every sampled pair is equal, the decode ladder is uniform, the
-picture order regresses, and the ranks it produces are distinct and fill the sampled window. Anything
+picture order regresses, and the ranks it produces are distinct and fill the sampled window (or a
+decode-order prefix of at least nine pictures fills its own range exactly, which covers a
+hierarchical mini-GOP longer than the reorder delay, #699). Anything
 short of that (variable frame timing, a picture order that does not advance one rank per picture, a
 sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
-Reported by @orut34iop.
+Reported by @orut34iop; the HEVC case (#699) by @ijuniorfu.
 
 ### Matroska with presentation slots in coding order
 
@@ -213,6 +215,22 @@ including VP9/AV1 Matroska. No video decoder is opened just to inspect HEVC meta
 sets `SourceProbe.carriesHDR10PlusMetadata` independently of the primary format, preserving `.dolbyVision`.
 See [whole-probe limits and cancellation](api.md#whole-probe-limits-and-cancellation) for bounded source
 reads; absence of confirmation is not proof of absence or a statement about the connected display.
+
+### HDR Vivid (CUVA) dynamic metadata
+
+HDR Vivid (CUVA T/UWA 005.1) is built to be backward compatible: the base layer is plain HLG or PQ in
+BT.2020, and its dynamic metadata is an optional registered T.35 SEI on top (country 0x26, provider
+0x0004, oriented code 0x0005). The engine plays that base exactly like any HLG or HDR10 source and the
+SEI is stream-copied with the rest of the bitstream; no Apple platform applies it, and a display
+without Vivid support shows the static base, which is the format's intended fallback. There is no
+host-side tone mapping: the native route has no pixel stage, tvOS gives an app no EDR or panel-peak
+reading to map against, and the TV maps the HDR signal itself (#699).
+
+`probe(url:detecting: .hdrVivid)` reports carriage as `SourceProbe.carriesHDRVividMetadata`, in the
+same packet pass and budget as `.hdr10Plus`. libavcodec's CUVA parser is internal, so
+`HDRVividMetadataScan` walks the body with the same field widths and only counts a message whose
+`system_start_code` is one of the defined 1 to 7, whose fields are all present, and whose bits after
+the last field are zero. HEVC only, as in libavcodec. `videoFormat` stays `.hlg` / `.hdr10`.
 
 The label can also be taken back from the item itself, where the platform has no capability table to clamp it against (AE#515). A Dolby Vision source on macOS resolves to `.hdr10`, because `supportsDolbyVision` is unclaimable there without a host assertion, while AVFoundation goes on playing the `dvh1` sample entry the engine served. Measured with the assertion off on a 16" XDR, a Profile 5 and a Profile 8.1 grade of Dolby's reference content both strobe, so the RPU reaches the pixels with no claim set anywhere and the clamp was moving nothing but the label. When the item's sample entry reads `dvh1` / `dvhe` and the probe agrees the source is Dolby Vision, the label is upgraded from `.hdr10` to `.dolbyVision` at `readyToPlay`. It is an upgrade and not a mirror of what AVFoundation parsed, for two reasons that both matter: an `.sdr` label is the clamp being right about a display presenting no HDR at all, and on tvOS and iOS the per-mode table answers the capability question, so the label follows it rather than a sample entry that a Profile 5 master carries on every panel. Profile 8.1 keeps `.hdr10` on macOS: it reports `hvc1` with the DV configuration alongside it, it composes on that display all the same, and nothing in the stack reports that.
 

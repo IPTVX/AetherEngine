@@ -982,6 +982,12 @@ final class SoftwarePlaybackHost {
         self.audioOutput = AudioOutput()
         self.audioOutput?.volume = volume
         self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
+        // AE#395: the route this session plays into, the counterpart of the native host's line. Without
+        // it a silent software session on a long-latency route and an audible one on HDMI log the same.
+        if let route = AudioRouteDescription.current() {
+            EngineLog.emit("[SoftwarePlaybackHost] audioRoute \(route) (session start, live=\(isLive))",
+                           category: .swPlayback)
+        }
 
         // Reset the live feeder state for the new session.
         resetFeederState()
@@ -1231,17 +1237,19 @@ final class SoftwarePlaybackHost {
             lastAudioPts: demuxDiag.snapshot.lastAudioPts
         )
         guard tail > 0 else { return parkClockNow() }
+        // The deferral aims at the end of the queued tail; a task that runs late must not park past it.
+        let target = aOut.currentTimeSeconds + tail
         let generation = seekGeneration
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(tail * 1_000_000_000))
             guard let self, self.admitsRead(generation: generation) else { return }
-            self.parkClockNow()
+            self.parkClockNow(notAfter: target)
         }
     }
 
-    private func parkClockNow() {
+    private func parkClockNow(notAfter latest: Double = .infinity) {
         guard !stopRequested, let aOut = audioOutput else { return }
-        aOut.pause()
+        aOut.pause(notAfter: latest)
         rate = 0
         EngineLog.emit(
             "[SWHost] end of media: clock parked at "
@@ -2494,6 +2502,12 @@ final class SoftwarePlaybackHost {
         var everHadLead = false
         var parkedSeekGeneration = seekGeneration()
         let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
+        // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
+        // is the pacing input and only exists where audio is decoupled, so a live session's line read
+        // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
+        // route plays anything. The generation is the one the buffer was produced under (AE#479).
+        var diagAudioPtsSec = Double.nan
+        var diagAudioPtsGeneration = parkedSeekGeneration
 
         func freeParkedVideo() {
             for p in parkedVideo {
@@ -2600,9 +2614,9 @@ final class SoftwarePlaybackHost {
                 releaseRebufferHold("the renderer needs a running clock to take parked video")
                 armFromParkedVideoIfStuck()
                 drainParkedVideoNonblocking()
-                diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
+                diag?.update(lastAudioPts: diagAudioPtsSec,
                              parked: parkedVideo.count, rebuffering: rebuffering,
-                             generation: parkedSeekGeneration)
+                             generation: diagAudioPtsGeneration)
                 if stillWaiting() {
                     // The condition is broadcast on play, stop, background, seek-settled and feed-cursor
                     // changes, so those cut the wait short where the sleep used to ride them out.
@@ -2791,6 +2805,8 @@ final class SoftwarePlaybackHost {
                     parkedSeekGeneration = gen
                     freeParkedVideo()
                     lastEnqueuedAudioPtsSec = .nan
+                    diagAudioPtsSec = .nan
+                    diagAudioPtsGeneration = gen
                     rebuffering = false
                     // The lead is zero again after a seek, so the latch has to earn itself back:
                     // keeping it set pauses the clock for a rebuffer on the first post-seek check.
@@ -3109,9 +3125,13 @@ final class SoftwarePlaybackHost {
                     }
                     tapSink?(buf)   // #95: mirrored behind the accept, so a refused buffer is not transcribed
                 }
-                if decoupleAudio, let last = playableBuffers.last {
+                if let last = playableBuffers.last {
                     let pts = CMSampleBufferGetPresentationTimeStamp(last)
-                    if pts.isValid { lastEnqueuedAudioPtsSec = pts.seconds }
+                    if pts.isValid {
+                        if decoupleAudio { lastEnqueuedAudioPtsSec = pts.seconds }
+                        diagAudioPtsSec = pts.seconds
+                        diagAudioPtsGeneration = genBeforeRead
+                    }
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
                 if !clockArmed(), let firstBuffer = playableBuffers.first {
@@ -3150,10 +3170,10 @@ final class SoftwarePlaybackHost {
             let keepGoing: Bool = autoreleasepool {
                 demuxIteration()
             }
-            diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
+            diag?.update(lastAudioPts: diagAudioPtsSec,
                          parked: parkedVideo.count,
                          rebuffering: rebuffering,
-                         generation: parkedSeekGeneration)
+                         generation: diagAudioPtsGeneration)
             if !keepGoing { break }
         }
         freeParkedVideo()
@@ -3220,6 +3240,15 @@ final class SoftwarePlaybackHost {
     /// the line stops rather than repeating itself at 1 Hz for as long as the host holds the engine.
     private var didEmitParkedDiag = false
 
+    /// AE#395: a DVR session feeds audio from the ring pump, which never writes `demuxDiag`, so its
+    /// line read `aLead=-` throughout. The pump's own fed PTS is the marker it paces on, and a DVR
+    /// seek clears it, so it carries no pre-seek value.
+    nonisolated static func diagAudioMarker(
+        demuxLoopPts: Double, dvrPumpPts: Double, isDVRSession: Bool
+    ) -> Double {
+        isDVRSession ? dvrPumpPts : demuxLoopPts
+    }
+
     /// 1 Hz [SWDiag] line: clock + clock delta, decoded-audio and video lead over the clock, parked
     /// video PACKET FIFO depth, rebuffer state, frames produced vs frames handed to the layer with
     /// the spacing of the timestamps they carried, and the display layer's OWN drop counter with its
@@ -3249,7 +3278,11 @@ final class SoftwarePlaybackHost {
             if prevClock.isFinite, clock == prevClock { didEmitParkedDiag = true }
         }
         diagPrevClock = clock
-        let lead = d.lastAudioPts.isFinite && clock.isFinite ? d.lastAudioPts - clock : Double.nan
+        let audioMarker = Self.diagAudioMarker(
+            demuxLoopPts: d.lastAudioPts,
+            dvrPumpPts: audioLookahead.lastFedAudioPTS,
+            isDVRSession: isLive && dvrRing != nil)
+        let lead = audioMarker.isFinite && clock.isFinite ? audioMarker - clock : Double.nan
         let enqueued = framesEnqueued
         let dEnq = enqueued - diagPrevEnqueued
         diagPrevEnqueued = enqueued
@@ -3300,6 +3333,9 @@ final class SoftwarePlaybackHost {
                 // deactivated audio session are the same "dclk=0.00" and different defects.
                 + "rate=\(String(format: "%.2f", self.audioOutput?.rate ?? 0)) "
                 + "aLead=\(lead.isFinite ? String(format: "%.2f", lead) : "-") "
+                // AE#395: status/sufficient/error of the audio renderer, the one stage after the feed
+                // that nothing on this line described.
+                + "aRend=\(self.audioOutput?.diagRendererState ?? "-") "
                 + "vLead=\(videoLead.map { String(format: "%.2f", $0) } ?? "-") "
                 + "parkedPkts=\(d.parked) rebuf=\(d.rebuffering ? "y" : "n") "
                 + (d.sourceExhausted ? "eof=y " : "")
