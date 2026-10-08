@@ -382,7 +382,7 @@ struct CancellableLoadTests {
             engine.claimSoftwarePathTakeover()
             engine.stopInternal(resetDisplayCriteria: false, keepCustomReader: true)
             let gen = engine.loadGeneration
-            await Task.detached {
+            await BlockingWork.detached {
                 var byte: UInt8 = 0
                 _ = reader.read(&byte, size: 1)
             }.value

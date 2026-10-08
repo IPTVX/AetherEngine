@@ -17,6 +17,11 @@ protocol HLSSegmentProvider: AnyObject {
     /// Default forwards to `mediaSegment(at:)` without ever signalling.
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data?
 
+    /// As above, but a VOD segment that is still being written may come back as a reader over it,
+    /// which the server sends chunk by chunk (`LoadOptions.progressiveSegmentDelivery`). Default
+    /// wraps `mediaSegment(at:onSlow:)`.
+    func mediaSegmentSource(at index: Int, onSlow: (@Sendable () -> Void)?) -> SegmentSource?
+
     /// Optional file URL for disk-backed segments (cache adopt path). Server streams file -> socket bypassing Foundation Data; sendfile(2) was tried but SIGSYS'd on tvOS sandbox.
     /// Must name a file that exists: the server stats and opens it afterwards, and a URL whose file
     /// has gone is answered with an error response rather than the bytes the bookkeeping promised.
@@ -27,6 +32,10 @@ protocol HLSSegmentProvider: AnyObject {
     /// The axis is a statement about bytes in AVPlayer's timeline, so a placement composed from a
     /// request needs to know whether that request was answered. Default ignores it.
     func didServeMediaSegment(index: Int, delivered: Bool)
+
+    /// One more chunk of a progressively delivered segment left the server: the request-counting
+    /// wedge watchdog's evidence that AVPlayer is still reading. Default ignores it.
+    func didDeliverProgressiveChunk(index: Int)
 
     var segmentCount: Int { get }
     func segmentDuration(at index: Int) -> Double
@@ -143,8 +152,12 @@ protocol HLSSegmentProvider: AnyObject {
 
 extension HLSSegmentProvider {
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? { mediaSegment(at: index) }
+    func mediaSegmentSource(at index: Int, onSlow: (@Sendable () -> Void)?) -> SegmentSource? {
+        mediaSegment(at: index, onSlow: onSlow).map { .data($0) }
+    }
     func mediaSegmentURL(at index: Int) -> URL? { nil }
     func didServeMediaSegment(index: Int, delivered: Bool) {}
+    func didDeliverProgressiveChunk(index: Int) {}
     var staticMasterPlaylistBody: String? { nil }
     var firstVisibleSegmentIndex: Int { 0 }
     func segmentIsDiscontinuous(at index: Int) -> Bool { false }
@@ -390,6 +403,9 @@ final class HLSLocalServer: @unchecked Sendable {
 
     private var listenFd: Int32 = -1
     private var shouldStop = false
+    /// Bumped by every start and stop, so an accept loop from an earlier start exits even when a
+    /// later start has cleared `shouldStop` again.
+    private var listenGeneration: UInt64 = 0
     private var clientFds = Set<Int32>()
 
     /// Audit SUB-107: whether `pathToken` is registered with the log redactor. The token is the
@@ -495,6 +511,9 @@ final class HLSLocalServer: @unchecked Sendable {
     /// Audit NET-13: one line per failed accept, when the process is out of descriptors, is a busy
     /// loop that floods the host's log ring. Failures back off and their line is rate limited.
     private static let acceptFailureBackoffMicroseconds: useconds_t = 100_000
+    /// How long the accept loop waits for a connection before it checks for a stop again. Also the
+    /// longest a stopped server keeps its port.
+    static let acceptPollMilliseconds: Int32 = 100
     private var acceptFailureLog = LogThrottle(interval: 5)
     private var refusalLog = LogThrottle(interval: 5)
     /// Audit NET-111: every line a connection that never presented the token can cause shares this, so
@@ -608,6 +627,8 @@ final class HLSLocalServer: @unchecked Sendable {
         listenFd = fd
         port = assignedPort
         shouldStop = false
+        listenGeneration &+= 1
+        let generation = listenGeneration
         if !tokenRegistered {
             tokenRegistered = LogRedaction.register(pathToken)
         }
@@ -616,7 +637,10 @@ final class HLSLocalServer: @unchecked Sendable {
         EngineLog.emit("[HLSLocalServer] Listening on port \(assignedPort)",
                        category: .hlsServer)
 
-        let accepter = Thread { [weak self] in self?.acceptLoop() }
+        let accepter = Thread { [weak self] in
+            guard let self else { close(fd); return }
+            self.acceptLoop(listenFd: fd, generation: generation)
+        }
         accepter.name = "com.aetherengine.hls.accept"
         accepter.qualityOfService = .userInitiated
         accepter.start()
@@ -625,15 +649,20 @@ final class HLSLocalServer: @unchecked Sendable {
     func stop() {
         stateLock.lock()
         shouldStop = true
-        let fdToClose = listenFd
         listenFd = -1
+        listenGeneration &+= 1
         let closingPort = port
         port = 0
         loggedMasterPlaylist = false
         loggedReducedMasterPlaylist = false
         loggedMediaPlaylist = false
         mediaPlaylistBuildCount = 0
-        let clients = clientFds
+        // Under the lock: a handler removes its fd here before it closes it, so a number still in the
+        // set is still that handler's. Shut down outside the lock, the handler could close in between
+        // and the number go to another socket in the process, whose connection this then ended
+        // (an origin read with no response, a body cut short).
+        for fd in clientFds { shutdown(fd, SHUT_RDWR) }
+        let clientCount = clientFds.count
         clientFds.removeAll()
         let unregisterToken = tokenRegistered
         tokenRegistered = false
@@ -644,29 +673,31 @@ final class HLSLocalServer: @unchecked Sendable {
         // AE#597: the one line that says a listener went away. Without it a log cannot tell a
         // server that was released from one that outlived its session on a port of its own.
         EngineLog.emit(
-            "[HLSLocalServer] stop: port \(closingPort) released, \(clients.count) connection(s) "
+            "[HLSLocalServer] stop: port \(closingPort) released, \(clientCount) connection(s) "
             + "shut down", category: .hlsServer)
-
-        // shutdown() BEFORE close() on the listen fd: close releases the fd number while the accept loop may have captured it; a new session could recycle that number and the dying loop would accept on the new session's socket. shutdown() wakes the blocked accept without releasing the number.
-        if fdToClose >= 0 {
-            shutdown(fdToClose, SHUT_RDWR)
-            close(fdToClose)
-        }
-        // shutdown() (NOT close) client fds: close would release the fd number while the handler still owns it; a channel-zap reuses that number immediately on the process-wide singleton engine, so the handler's late send()/deferred close() would hit the new session's descriptor.
-        for fd in clients {
-            shutdown(fd, SHUT_RDWR)
-        }
+        // The listen fd is not closed here: the accept loop owns it and closes it on its way out.
+        // Closing it from this thread freed the number while that loop could still call accept on
+        // it, and the next socket in the process to get the number lost a connection to it.
+        // shutdown() does not wake a blocked accept on Darwin, so the loop polls instead.
     }
 
     // MARK: - Accept loop
 
-    private func acceptLoop() {
+    private func acceptLoop(listenFd fd: Int32, generation: UInt64) {
+        defer { close(fd) }
         while true {
             stateLock.lock()
-            let stopping = shouldStop
-            let fd = listenFd
+            let current = !shouldStop && listenGeneration == generation
             stateLock.unlock()
-            if stopping || fd < 0 { return }
+            if !current { return }
+
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pfd, 1, Self.acceptPollMilliseconds)
+            if ready == 0 { continue }
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return
+            }
 
             var clientAddr = sockaddr_in()
             var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -677,7 +708,6 @@ final class HLSLocalServer: @unchecked Sendable {
             }
             if clientFd < 0 {
                 let err = errno
-                // EBADF means listenFd was closed by stop(); exit cleanly.
                 if err == EBADF || err == EINVAL {
                     return
                 }
@@ -1209,7 +1239,7 @@ final class HLSLocalServer: @unchecked Sendable {
                     // ~3.5 s time-to-first-byte watchdog logs -12889 per silent request and three
                     // strikes fail the item (failedToPlayToEndTime, terminal from the couch).
                     let early = EarlyHeaderState()
-                    let data = provider?.mediaSegment(at: index, onSlow: { [weak self] in
+                    let source = provider?.mediaSegmentSource(at: index, onSlow: { [weak self] in
                         guard let self, early.markSentOnce() else { return }
                         EngineLog.emit(
                             "[HLSLocalServer] seg\(index): slow serve, sending early chunked header",
@@ -1218,6 +1248,23 @@ final class HLSLocalServer: @unchecked Sendable {
                                           data: Self.chunkedResponseHeader(contentType: "video/mp4"),
                                           path: "\(normalizedPath) [early header]")
                     })
+                    // A segment being written: commit the chunked header (unless the slow-serve
+                    // signal already did) and send each fragment as it lands. An abandoned segment
+                    // ends the connection without the final chunk, so AVPlayer retries it rather
+                    // than taking the partial bytes for a whole segment.
+                    if case .progressive(let reader) = source {
+                        if early.markSentOnce() {
+                            guard writeAll(fd: fd, data: Self.chunkedResponseHeader(contentType: "video/mp4"),
+                                           path: "\(normalizedPath) [progressive header]") else {
+                                return refused(false)
+                            }
+                        }
+                        return delivered(sendProgressiveBody(fd: fd, path: normalizedPath, reader: reader))
+                    }
+                    let data: Data? = {
+                        if case .data(let d) = source { return d }
+                        return nil
+                    }()
                     if early.wasSent {
                         guard let data, !data.isEmpty else {
                             // Headers are committed; abort so AVPlayer sees a truncated transfer
@@ -1293,6 +1340,37 @@ final class HLSLocalServer: @unchecked Sendable {
 
     static let chunkFrameTrailer = Data("\r\n".utf8)
     static let chunkedFinal = Data("0\r\n\r\n".utf8)
+
+    /// Body for a progressively delivered segment: one chunk per read (usually the fragment the muxer
+    /// just flushed), the final chunk once the sealed segment is read to its end. Returns false
+    /// without the final chunk when the producer abandons the segment.
+    private func sendProgressiveBody(fd: Int32, path: String, reader: ProgressiveSegmentReader) -> Bool {
+        let provider = self.provider
+        var sent = 0
+        while true {
+            switch reader.next() {
+            case .bytes(let data):
+                guard writeAll(fd: fd, data: Self.chunkFrameHeader(size: data.count), path: "\(path) [chunk size]"),
+                      writeAll(fd: fd, data: data, path: path),
+                      writeAll(fd: fd, data: Self.chunkFrameTrailer, path: "\(path) [chunk trailer]") else {
+                    return false
+                }
+                sent += data.count
+                provider?.didDeliverProgressiveChunk(index: reader.index)
+            case .finished:
+                EngineLog.emit(
+                    "[HLSLocalServer] -> 200 \(path) bytes=\(sent) type=video/mp4 [progressive]",
+                    category: .hlsServer, level: .verbose)
+                return writeAll(fd: fd, data: Self.chunkedFinal, path: "\(path) [chunk final]")
+            case .abandoned:
+                EngineLog.emit(
+                    "[HLSLocalServer] \(path): the producer abandoned this segment after \(sent) B sent; "
+                    + "closing so AVPlayer asks for it again",
+                    category: .hlsServer)
+                return false
+            }
+        }
+    }
 
     /// Body for an early-header serve: the whole segment as one chunk. Four separate send()
     /// calls so mmap-backed segment Data is never copied into a Swift heap buffer.
