@@ -14,6 +14,26 @@ the public-API contract.
 
 - Integrated the complete upstream 7.27.1 release, including transient ranged-open refusal recovery and audio-only end-of-media clock parking, while retaining iOS/tvOS 16 and macOS 14 support. The software renderer uses the display-layer queue on older systems and the cached video renderer on iOS/tvOS 18+ and macOS 15+; older availability guards, startup A/V skew correction, and seek hold-frame behavior remain covered by tests. I-frame shutdown is included in the awaited source teardown before codec parameters are freed. Audio-only Play and speed writes preserve the end-of-media park, including IPTVX's speed-before-Play transport sequence. Startup audio correction now carries the epoch accepted by its own flush without admitting buffers retired by a concurrent seek or stop. The fork retains the complete FFmpegBuild 3.6.0 binaries with IPTVX packaging metadata matching their iOS/tvOS 16 Mach-O deployment target, and LibDovi `2.1.0-iptvx` for the tvOS 16 deployment floor.
 
+## [7.32.3] - 2026-10-08
+
+### Fixed
+
+- **The delivery-gap watchdog no longer cuts the open's first byte short.** `open()` waits for its first byte within `SourceOpenPolicy.firstByteTimeout` (and the retry within `sizeProbeTimeout`), but the #309 watchdog ended that same request once `connStallTimeout` had passed without data, and the retry the same way, so the open failed with `noResponse` at the stall threshold. With the defaults (stall 20 s, first byte 15 s) the open's budget ran out first, so this only reached a host that sets a longer first-byte budget than 20 s, for an origin that is slow to answer. The generation the open is waiting on is now left to the open's budget; every later generation, including one that never sees a first byte, is still ended at the threshold.
+
+### Tests and CI
+
+- Two CI flakes on `main` traced to their timing assumptions, both reproduced on demand. #309's detection test opened with a 0.6 s stall threshold, so a first byte slower than that on a loaded runner failed the open (the watchdog fix above; measured 0.4 s opened, 0.8 s failed), and it gave positive events it needed fixed deadlines (10 s, 5 s), which a loaded runner spent. Those waits now follow the suite's rule: a step that has to happen gets no deadline, the test's `.timeLimit` catches a hang. #377's idle-refill test slept a fixed 8 s for a paused budget that only starts once the window is full, so a slow fill kept the connection alive (`asks == [0]`, reproduced with a 2.5 MB/s origin); it now waits for the end itself, and reads `asks[1]` only behind `#require`, since the trap took the whole test process and every buffered result with it.
+- `StreamingBufferTrimTests` asked for two chunks kept after the first trim, which depends on how URLSession cuts the body; a loaded machine coalesces it, leaves one, and the run went red. One kept chunk carries the same address check.
+- `RemoteDiscSessionReleaseTests` proved that the open reached the origin by the sockets open at that instant, which URLSession had already released on a CI runner; it counts accepted connections, as its sibling test does.
+- The AE#711 still fixture deadlocked its own `AVAssetWriter` on CI: the writer stopped taking video until audio caught up, and the audio track's `requestMediaDataWhenReady` block was never called again (`video 88/120 ready=false, audio 21/40 ready=true`, the audio block called once in total). One loop now feeds both tracks whenever each is ready and never waits on either, so nothing depends on AVFoundation re-invoking a block. Its failure now says where each track stood.
+
+## [7.32.2] - 2026-10-08
+
+### Fixed
+
+- **A software resume on a long-GOP source starts where it was asked to (#724).** `load(url:startPosition:)` repositions to the keyframe before the target, so the first decoded audio arrives up to a whole GOP early, and the software host moved its clock back onto that sample: a 17.3 s resume on a 10 s GOP published 9.98 s and played audio under a picture that could not present until 17.3. `SWClockAnchorPolicy` now re-anchors only on a sample AHEAD of the anchor (the mid-stream join it exists for, #107); one behind it is preroll and the anchor stands. A paused resume also kept its position until `play()`: the 4 Hz publisher wrote the still unarmed synchronizer (0) over the anchor. Reported with a synthetic fixture and repeated measurements by @alsoeoe.
+- **A software resume on a source whose timestamps do not start at zero lands on its target.** The resume position is a session-axis value like any seek, but `load()` handed it to the demuxer unconverted, because the session zero only existed once the first sample had arrived: a 17.3 s resume on a source starting at 600 s landed on the first packet (600.0) and published 17.3 over content from the head. The host now carries the source's origin into the resume before the reposition (`SWClockAnchorPolicy.resumeSessionZero`), so the first picture is 617.29 and the position matches the native path's.
+
 ## [7.32.1] - 2026-10-08
 
 ### Fixed

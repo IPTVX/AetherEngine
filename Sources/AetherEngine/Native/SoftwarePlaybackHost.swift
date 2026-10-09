@@ -1065,19 +1065,25 @@ final class SoftwarePlaybackHost {
         resetFeederState()
 
         if let start = startPosition, start.isFinite, start > 0 {
+            // AE#724: the anchor is a session-axis position; on an offset-origin source it is carried
+            // over before it reaches the demuxer, the skip threshold and the clock, as a seek's is.
+            let zero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
+            clockSessionZero = zero
+            let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            _ = await dem.seekBounded(to: start, timeout: Self.seekBudgetSeconds, on: seekQueue)
+            _ = await dem.seekBounded(to: sourceStart, timeout: Self.seekBudgetSeconds, on: seekQueue)
             // This is load()'s only suspension point, so it is also the only place a stop() can land
             // mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
             guard !stopRequested else { return }
             // Mirror seek() skip-PTS + clock alignment so demux drops pre-keyframe frames and synchronizer starts at the resume offset.
-            let startTime = CMTime(seconds: start, preferredTimescale: 90000)
+            let startTime = CMTime(seconds: sourceStart, preferredTimescale: 90000)
             videoDecoder.skipUntilPTS = startTime
             renderer.setSkipThreshold(startTime)
             initialClockTime = startTime
             currentTime = start
+            sourceClockSeconds = sourceStart
         } else {
             initialClockTime = .zero
         }
@@ -1816,6 +1822,7 @@ final class SoftwarePlaybackHost {
         let rndr = renderer
         let condition = demuxCondition
         let initialClock = initialClockTime
+        let initialSessionZero = clockSessionZero
         // Read at arm time, not captured: a host setRate between load and arming must reach
         // the anchor (the eager synchronizer call it replaced is gated on clockArmed, #107).
         let currentRate: @Sendable () -> Float = { [weak self] in
@@ -1920,9 +1927,12 @@ final class SoftwarePlaybackHost {
             self?.backgroundAudioOnly ?? false
         }
         // #107: the demux loop reports the resolved session-zero offset when it re-anchors
-        // the clock at a deviating first-sample PTS (mid-stream-joined source).
+        // the clock at a first-sample PTS far past the anchor (mid-stream-joined source).
         let onClockAnchored: @Sendable (Double) -> Void = { [weak self] zero in
-            self?.clockSessionZero = zero
+            self?.clockSessionZero = SWClockAnchorPolicy.reanchoredSessionZero(
+                initialSessionZeroSeconds: initialSessionZero,
+                additionalOffsetSeconds: zero
+            )
         }
 
         if liveSession, let ring {
@@ -3267,7 +3277,7 @@ final class SoftwarePlaybackHost {
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
                 if !clockArmed(), let firstBuffer = playableBuffers.first {
-                    // #107: anchor at the buffer PTS when it deviates from the load anchor
+                    // #107: anchor at the buffer PTS when it lies far past the load anchor
                     // (mid-stream-joined source); aligned sources keep the anchor verbatim.
                     let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
                     let resolution = SWClockAnchorPolicy.resolve(
@@ -3326,6 +3336,9 @@ final class SoftwarePlaybackHost {
                 guard !self.seekInFlight else { return }
                 let raw = aOut.currentTimeSeconds
                 self.emitDiagIfDue(clock: raw)
+                // AE#724: until the first sample arms it, the synchronizer still reads 0, and a paused
+                // resume would publish that over the anchor load() set.
+                if !self.isLive, !self.clockArmed { return }
                 if raw.isFinite, raw >= 0 {
                     self.vodPacketReadAhead?.updatePlayhead(raw)
                     // Raw clock = source/subtitle axis; published alongside the mapped position (#107).

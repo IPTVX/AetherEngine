@@ -62,12 +62,13 @@ struct SWClockAnchorPolicyTests {
         #expect(r.sessionZeroSeconds == 2.01)
     }
 
-    @Test("session zero never goes negative when the stream starts before the anchor")
+    @Test("a first sample behind the anchor keeps the load anchor (AE#724 resume preroll)")
     func firstSampleBehindAnchor() {
-        // A first sample far BEHIND the requested anchor (broken seek) still re-anchors
-        // so samples present, but session zero clamps at 0 to keep positions monotonic.
-        let r = SWClockAnchorPolicy.resolve(initialSeconds: 64000, firstSampleSeconds: 10)
-        #expect(r.anchorSeconds == 10)
+        // A resume lands on the keyframe at or before the target, and its audio starts with it.
+        // Measured on a 10 s GOP: anchor 17.3, first decoded audio 9.984. That is preroll the
+        // skip threshold and the synchronizer discard, not a source that starts elsewhere.
+        let r = SWClockAnchorPolicy.resolve(initialSeconds: 17.3, firstSampleSeconds: 9.984)
+        #expect(r.anchorSeconds == 17.3)
         #expect(r.sessionZeroSeconds == 0)
     }
 
@@ -172,6 +173,103 @@ struct SWClockAnchorPolicyTests {
         // Assert — carrying the resume offset advances fifteen source seconds, not forty-five.
         #expect(abs(sourceSeconds - 32101.445) < 1e-9)
         #expect(abs(sourceSeconds - correction.clockResolution.anchorSeconds - 15) < 1e-9)
+    }
+
+    @Test("a first sample far behind the anchor keeps it too")
+    func firstSampleFarBehindAnchor() {
+        // A reposition that fell back to the head of the file: the video skip threshold still
+        // stands at the anchor, so a clock moved back to the head would play audio under a
+        // picture that cannot present until the anchor anyway.
+        let r = SWClockAnchorPolicy.resolve(initialSeconds: 64000, firstSampleSeconds: 10)
+        #expect(r.anchorSeconds == 64000)
+        #expect(r.sessionZeroSeconds == 0)
+    }
+
+    @Test("a large negative first PTS on a cold start keeps the zero anchor")
+    func largeNegativeFirstPts() {
+        let r = SWClockAnchorPolicy.resolve(initialSeconds: 0, firstSampleSeconds: -5)
+        #expect(r.anchorSeconds == 0)
+        #expect(r.sessionZeroSeconds == 0)
+    }
+
+    // MARK: - Session zero for a resume on an offset-origin source
+
+    @Test("a resume on a source whose timestamps start at 600 s carries the origin as session zero")
+    func resumeOnOffsetOrigin() {
+        // Measured on `-output_ts_offset 600`: a 17.3 s resume landed on the source's first
+        // packet (600.0) while publishing 18.2, because the target reached the demuxer unconverted.
+        #expect(SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: 599.979) == 599.979)
+    }
+
+    @Test("an origin inside the tolerance stays a zero-based source, as on a cold start")
+    func resumeOnNearZeroOrigin() {
+        for origin in [0, 0.021, 1.4, 2.0] {
+            #expect(SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: origin) == 0)
+        }
+    }
+
+    @Test("an unknown or negative origin is no session zero")
+    func resumeOnUnknownOrigin() {
+        for origin in [Double.nan, .infinity, -5] {
+            #expect(SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: origin) == 0)
+        }
+    }
+
+    /// A resume target stays ahead of keyframe preroll even when audio and video are skewed.
+    @Test("startup correction does not move a resume anchor back onto video preroll")
+    func test_startupAVSkewCorrection_videoBeforeResumeAnchor_preservesAnchor() {
+        // Arrange — both first samples precede a resume at source timestamp 617.3.
+        let audio = 600.0
+        let video = 610.0
+
+        // Act — evaluate the same startup correction used by the combined demux loop.
+        let correction = SWClockAnchorPolicy.startupAVSkewCorrection(
+            initialSeconds: 617.3,
+            firstAudioSampleSeconds: audio,
+            firstVideoSampleSeconds: video
+        )
+
+        // Assert — preroll must never replace the requested resume anchor.
+        #expect(correction == nil)
+    }
+
+    /// Both startup corrections preserve the session axis established before an offset resume.
+    @Test("a clock re-anchor after an offset-origin resume keeps its source origin")
+    func test_reanchoredSessionZero_offsetResume_preservesRequestedPosition() throws {
+        // Arrange — a source starting at 600 resumes at session 17.3 with audio preroll.
+        let requestedPosition = 17.3
+        let initialZero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: 600)
+        let sourceAnchor = SWClockAnchorPolicy.sourceSeconds(
+            forSession: requestedPosition,
+            sessionZeroSeconds: initialZero
+        )
+        let correction = try #require(
+            SWClockAnchorPolicy.startupAVSkewCorrection(
+                initialSeconds: sourceAnchor,
+                firstAudioSampleSeconds: 610,
+                firstVideoSampleSeconds: 618
+            )
+        )
+        let aheadSample = SWClockAnchorPolicy.resolve(
+            initialSeconds: sourceAnchor,
+            firstSampleSeconds: 621
+        )
+
+        // Act — compose each re-anchor with the origin captured at load time.
+        for resolution in [correction.clockResolution, aheadSample] {
+            let sessionZero = SWClockAnchorPolicy.reanchoredSessionZero(
+                initialSessionZeroSeconds: initialZero,
+                additionalOffsetSeconds: resolution.sessionZeroSeconds
+            )
+            let publishedPosition = resolution.anchorSeconds - sessionZero
+
+            // Assert — both paths still publish the requested resume position.
+            #expect(abs(publishedPosition - requestedPosition) < 1e-9)
+            #expect(abs(SWClockAnchorPolicy.sourceSeconds(
+                forSession: requestedPosition,
+                sessionZeroSeconds: sessionZero
+            ) - resolution.anchorSeconds) < 1e-9)
+        }
     }
 
     // MARK: - Carrying a seek target back to the source axis
