@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **TrueHD Atmos to APAC encodes while it decodes.** The object decoder and Apple's APAC encoder
+  each take about a core and ran one after the other on the producer thread, which is what a seek
+  past the produced range waited for. The bridge now hands each rendered chunk to a serial encode
+  queue and decodes the next one meanwhile: Dolby's Unfold demo went from 2.73 s to 1.60 s
+  (M1, release), 10x to 17x real time. Same packets, same timestamps (#731).
 
 ## [7.34.0] - 2026-10-11
 
