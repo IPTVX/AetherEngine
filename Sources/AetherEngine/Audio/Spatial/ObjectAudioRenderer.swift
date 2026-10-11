@@ -7,6 +7,10 @@ enum ObjectAudioRole: Sendable, Equatable {
     /// target layout lacks (a 7.1.2 bed's top-middle pair on a 5.1.4 layout) still lands where it
     /// should, as a phantom between the speakers that bracket it.
     case bed(SpatialSpeaker)
+    /// A bed channel at a fixed position the room model names no speaker for (screen, centre back,
+    /// top centre). Rendered as a phantom from the moment the renderer exists, like a bed channel the
+    /// layout lacks, so it plays in a presentation that never sends metadata.
+    case fixed(SIMD3<Float>)
     /// The low-frequency effects channel. Routed to the layout's LFE, never panned.
     case lfe
     /// A dynamic object, positioned by metadata.
@@ -90,8 +94,11 @@ final class ObjectAudioRenderer {
             hasMetadata[index] = false
             if roles[index] == .object {
                 for c in current[index].indices { current[index][c] = 0 }
-                target[index] = current[index]
+            } else {
+                // A bed fade cut off by the reset would otherwise stay at the ramp's origin.
+                staticGains(for: roles[index], state: ObjectAudioElementState(), into: &current[index])
             }
+            target[index] = current[index]
         }
     }
 
@@ -121,9 +128,11 @@ final class ObjectAudioRenderer {
         updates: [ObjectAudioMetadataUpdate],
         outputs: [UnsafeMutablePointer<Float>]
     ) {
-        precondition(inputs.count == roles.count, "one input plane per role")
-        precondition(outputs.count == layout.channelCount, "one output plane per layout channel")
         for out in outputs { vDSP_vclr(out, 1, vDSP_Length(frameCount)) }
+        // A block from a configuration this renderer was not built for renders as silence rather than
+        // trapping: the bridge rebuilds on `configurationGeneration`, and a mismatch here is a stream
+        // that changed shape without saying so.
+        guard inputs.count == roles.count, outputs.count == layout.channelCount else { return }
 
         var cursor = 0
         var pending = updates[...]
@@ -155,7 +164,7 @@ final class ObjectAudioRenderer {
                 panner(excluding: state.excluded).objectGains(
                     position: state.position, size: state.size, snap: state.snap, into: &gains)
                 if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
-            case .bed, .lfe:
+            case .bed, .lfe, .fixed:
                 staticGains(for: roles[index], state: state, into: &gains)
             }
             // A ramp still in flight restarts from where it has got to, not from its origin.
@@ -183,15 +192,33 @@ final class ObjectAudioRenderer {
             for c in gains.indices { gains[c] = 0 }
             gains[layout.lfeIndex] = state.gain
         case .bed(let speaker):
-            if let direct = layout.speakers.firstIndex(of: speaker) {
+            if let direct = layout.speakers.firstIndex(of: speaker) ?? Self.downmixTarget(speaker, in: layout) {
                 for c in gains.indices { gains[c] = 0 }
                 gains[direct] = state.gain
             } else {
                 panner(excluding: []).pointGains(speaker.position, into: &gains)
                 if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
             }
+        case .fixed(let position):
+            panner(excluding: []).pointGains(position, into: &gains)
+            if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
         case .object:
             break
+        }
+    }
+
+    /// Where a speaker-anchored bed channel the layout lacks goes when panning it would be wrong. A
+    /// 7.1 bed's side and rear surrounds both belong on a 5.1 layout's surround pair, the way a 7.1 to
+    /// 5.1 downmix folds them; panned by position, a side surround halfway down the wall would put
+    /// half its power in the front speakers.
+    static func downmixTarget(_ speaker: SpatialSpeaker, in layout: SpatialSpeakerLayout) -> Int? {
+        let speakers = layout.speakers
+        switch speaker {
+        case .sideLeft, .rearLeft: return speakers.firstIndex(of: .surroundLeft)
+        case .sideRight, .rearRight: return speakers.firstIndex(of: .surroundRight)
+        case .surroundLeft: return speakers.firstIndex(of: .sideLeft)
+        case .surroundRight: return speakers.firstIndex(of: .sideRight)
+        default: return nil
         }
     }
 

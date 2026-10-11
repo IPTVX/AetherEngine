@@ -37,8 +37,11 @@ struct TrueHDObjectMetadataMappingTests {
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_TSR) == .bed(.topMiddleRight))
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_LFE) == .lfe)
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_LFE2) == .lfe)
-        // No home bed uses the screen, centre back or top centre channels; metadata places them.
-        #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_TC) == .object)
+        // No home layout has the screen, centre back or top centre channels; they sit at their
+        // nominal position so a presentation without metadata still plays them.
+        #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_TC) == .fixed(SIMD3(0.5, 0.5, 1)))
+        #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_CB) == .fixed(SIMD3(0.5, 1, 0)))
+        #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_LSC) == .fixed(SIMD3(0.25, 0, 0)))
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_OBJECT) == .object)
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_UNKNOWN) == .object)
     }
@@ -73,11 +76,13 @@ struct TrueHDObjectMetadataMappingTests {
         #expect(state.position.z == 0)
     }
 
-    @Test("a screen-anchored object sits on the front wall, the top of the screen halfway up")
+    @Test("a screen-anchored object keeps its room depth, the top of the screen halfway up the room")
     func screenReference() {
         let flags = TRUEHD_ATMOS_ELEMENT_ACTIVE | TRUEHD_ATMOS_ELEMENT_ELEVATION | TRUEHD_ATMOS_ELEMENT_SCREEN_REF
+        // Only x and z are screen-anchored; y is still depth, so an object flying from the screen to
+        // the back wall travels (review of eae933d0 found it pinned to the front wall).
         let state = TrueHDObjectAudioDecoder.state(for: element(flags: flags, position: (0.8, 0.6, 1)))
-        #expect(state.position == SIMD3(0.8, 0, 0.5))
+        #expect(state.position == SIMD3(0.8, 0.6, 0.5))
     }
 
     @Test("an ISF object, whose position is not decoded, is spread over the room")
@@ -110,6 +115,10 @@ struct TrueHDObjectMetadataMappingTests {
         let surround = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_SURROUND_ONLY)
         #expect(surround.isSuperset(of: [.left, .right, .center]))
         #expect(!surround.contains(.sideLeft))
+
+        let centerBack = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_CENTER_BACK)
+        #expect(centerBack.isSuperset(of: [.left, .right, .sideLeft, .sideRight]))
+        #expect(!centerBack.contains(.center) && !centerBack.contains(.rearLeft))
 
         #expect(TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_ALL).isEmpty)
     }

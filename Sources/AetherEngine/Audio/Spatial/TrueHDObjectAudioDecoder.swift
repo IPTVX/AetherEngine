@@ -92,9 +92,10 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
 
     // MARK: - Mapping
 
-    /// Bed speakers the renderer's room model names route discretely; the rest (screen, centre
-    /// back and top centre channels, which home Atmos beds do not use) are positioned by their
-    /// metadata like objects.
+    /// Bed speakers the renderer's room model names route discretely; the other speaker codes
+    /// (screen, centre back, top centre, surround direct) sit at their nominal position, so a
+    /// channel-based presentation without metadata still plays them. Objects and unlabelled
+    /// channels are positioned by metadata.
     static func role(forSpeaker code: UInt8) -> ObjectAudioRole {
         switch code {
         case TRUEHD_ATMOS_SPEAKER_LFE, TRUEHD_ATMOS_SPEAKER_LFE2: return .lfe
@@ -113,6 +114,13 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         case TRUEHD_ATMOS_SPEAKER_TSR: return .bed(.topMiddleRight)
         case TRUEHD_ATMOS_SPEAKER_TBL: return .bed(.topRearLeft)
         case TRUEHD_ATMOS_SPEAKER_TBR: return .bed(.topRearRight)
+        case TRUEHD_ATMOS_SPEAKER_LSC: return .fixed(SIMD3(0.25, 0, 0))
+        case TRUEHD_ATMOS_SPEAKER_RSC: return .fixed(SIMD3(0.75, 0, 0))
+        case TRUEHD_ATMOS_SPEAKER_CB: return .fixed(SIMD3(0.5, 1, 0))
+        case TRUEHD_ATMOS_SPEAKER_LSD: return .fixed(SpatialSpeaker.sideLeft.position)
+        case TRUEHD_ATMOS_SPEAKER_RSD: return .fixed(SpatialSpeaker.sideRight.position)
+        case TRUEHD_ATMOS_SPEAKER_TC: return .fixed(SIMD3(0.5, 0.5, 1))
+        case TRUEHD_ATMOS_SPEAKER_TFC: return .fixed(SIMD3(0.5, 0, 1))
         default: return .object
         }
     }
@@ -128,15 +136,15 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
             p = (0.5, 0.5, 0.5)
             size = 1
         } else if element.flags & TRUEHD_ATMOS_ELEMENT_SCREEN_REF != 0 {
-            // Screen-anchored: x across the screen, z −1…1 over the screen's height, both on the
-            // front wall. A home room has no screen geometry to map that onto exactly; keep the
-            // object on the front wall and put the top of the screen halfway up the room rather
-            // than at the ceiling.
-            p = (p.0, 0, max(0, p.2) * 0.5)
+            // Screen-anchored: x across the screen and z −1…1 over its height, while y stays room
+            // depth (header, COORDINATES). A home room has no screen geometry to map that onto
+            // exactly, so the screen spans the front wall's width and its top sits halfway up the
+            // room rather than at the ceiling.
+            p = (p.0, p.1, max(0, p.2) * 0.5)
         }
         var excluded = excludedSpeakers(zone: element.zone)
         if element.kind == TRUEHD_ATMOS_ELEMENT_OBJECT, element.flags & TRUEHD_ATMOS_ELEMENT_ELEVATION == 0 {
-            excluded.formUnion(SpatialSpeaker.allCases.filter(\.isHeight))
+            excluded.formUnion(heights)
         }
         return ObjectAudioElementState(
             position: SIMD3(p.0, p.1, max(0, p.2)),
@@ -146,17 +154,23 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
             excluded: excluded)
     }
 
+    /// Built once: they run per changed element on every metadata update.
+    private static let heights = Set(SpatialSpeaker.allCases.filter(\.isHeight))
+    private static let noBack: Set<SpatialSpeaker> = [.rearLeft, .rearRight, .surroundLeft, .surroundRight]
+    private static let noSides: Set<SpatialSpeaker> = [.sideLeft, .sideRight, .wideLeft, .wideRight]
+    private static let screenOnly = noSides.union(noBack)
+    private static let surroundOnly: Set<SpatialSpeaker> = [.left, .right, .center, .wideLeft, .wideRight]
+    /// Centre and back zones only: off the front pair, the wides and the sides.
+    private static let centerBack: Set<SpatialSpeaker> = [.left, .right, .wideLeft, .wideRight, .sideLeft, .sideRight]
+
     /// OAMD horizontal zone constraints (TS 103 420 table 20) as speakers the object may not use.
-    /// "Centre back" has no clean equivalent in a home bed and is left unconstrained.
     static func excludedSpeakers(zone: UInt8) -> Set<SpatialSpeaker> {
-        let front: Set<SpatialSpeaker> = [.left, .right, .center, .wideLeft, .wideRight]
-        let sides: Set<SpatialSpeaker> = [.sideLeft, .sideRight, .wideLeft, .wideRight]
-        let back: Set<SpatialSpeaker> = [.rearLeft, .rearRight, .surroundLeft, .surroundRight]
         switch zone {
-        case TRUEHD_ATMOS_ZONE_NO_BACK: return back
-        case TRUEHD_ATMOS_ZONE_NO_SIDES: return sides
-        case TRUEHD_ATMOS_ZONE_SCREEN_ONLY: return sides.union(back)
-        case TRUEHD_ATMOS_ZONE_SURROUND_ONLY: return front
+        case TRUEHD_ATMOS_ZONE_NO_BACK: return noBack
+        case TRUEHD_ATMOS_ZONE_NO_SIDES: return noSides
+        case TRUEHD_ATMOS_ZONE_CENTER_BACK: return centerBack
+        case TRUEHD_ATMOS_ZONE_SCREEN_ONLY: return screenOnly
+        case TRUEHD_ATMOS_ZONE_SURROUND_ONLY: return surroundOnly
         default: return []
         }
     }
