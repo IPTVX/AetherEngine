@@ -4658,7 +4658,9 @@ public final class AetherEngine: ObservableObject {
         let selectedAudio = Self.selectAudioIndex(
             tracks: probedAudioTracks,
             override: audioSourceStreamIndex,
-            preferredLanguages: options.preferredAudioLanguages
+            preferredLanguages: options.preferredAudioLanguages,
+            prefersTrueHDAtmos: options.objectAudioRendering != .off,
+            defaultIndex: probedDefaultAudioIndex
         ) ?? (probeOpened ? nil : audioSourceStreamIndex)
         let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
         activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
