@@ -2395,7 +2395,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // the NEW producer's position. Cutting on it would adopt this pump's partial segment under
         // its full index; the teardown rule decides what happens to the in-flight segment instead.
         if checkShouldStop() { return nil }
-
         switch muxer.cutFragmentForNextSegment(newIdx) {
         case .completed(let path, let bytesWritten):
             EngineLog.emit(
@@ -4259,6 +4258,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                     // Live: keyframe cutter uses shifted pts. VOD: unused; routing uses prev.dts at look-behind site.
                     let isVideoKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+                    // #731: a bridge that encodes on its own queue hands packets back a feed or more
+                    // late, and they are routed by the cutter (sequential origins) and the open muxer
+                    // (the `max` in `ensureMuxer`). Settle it before this packet advances the cutter
+                    // or the look-behind write below cuts, so every packet is routed where a
+                    // synchronous encode routed it. A cut the audio starts itself writes in order.
+                    if !isLive, let audio = audioConfig, let bridge = audio.bridge {
+                        let advancesCutter = audioFollowsVideoCut && isVideoKeyframe
+                            && vodCutter.peekIndex(
+                                pts: planBoundaryAxis.timestamp(dts: packet.pointee.dts, pts: packet.pointee.pts),
+                                isKeyframe: true) != vodCutter.current
+                        let lookBehindCuts = pendingVideoPkt != nil && currentMuxer != nil
+                            && pendingVideoSegIndex > currentMuxerSegmentIndex
+                        if advancesCutter || lookBehindCuts, !writeBridgedAudio(bridge.settle(), audio: audio) {
+                            exitReason = .muxerFailed
+                            break readLoop
+                        }
+                    }
                     // VOD now cuts keyframe-gated like live (and like FFmpeg's hls muxer): a segment opens
                     // at the IRAP that reaches its plan boundary, so the IRAP is the segment's first sample
                     // and its open-GOP RASL leading pictures stay with it (#92). Routing by DTS against PTS
@@ -4382,28 +4398,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             continue
                         }
-                        var bridgedMuxerGone = false
-                        for fp in flacPackets {
-                            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
-                            if bridgedMuxerGone {
-                                trackedPacketFree(&fpVar)
-                                continue
-                            }
-                            let fpSeg = bridgedAudioSegmentIndex(fp, audio: audio)
-                            guard let muxer = ensureMuxer(forSegmentIndex: fpSeg) else {
-                                trackedPacketFree(&fpVar)
-                                bridgedMuxerGone = true
-                                continue
-                            }
-                            fp.pointee.stream_index = muxer.audioOutputStreamIndex
-                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
-                            let prime = copyAudioPrimeCandidate(fp)
-                            if muxer.writePacket(fp).rc >= 0, let prime {
-                                audioMoovPrimeFrame = prime
-                            }
-                            trackedPacketFree(&fpVar)
-                        }
-                        if bridgedMuxerGone {
+                        if !writeBridgedAudio(flacPackets, audio: audio) {
                             exitReason = .muxerFailed
                             break readLoop
                         }
@@ -4506,6 +4501,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         freeUnreplayedPregateAudio()
 
         // Flush look-behind; fallback duration produces tail-correct trun for the final fragment.
+        // #731: the last keyframe can open a final segment; what the bridge still encodes belongs
+        // before that cut. Only an EOF adopts the open segment, so only an EOF needs it.
+        if case .eof = exitReason, let audio = audioConfig, let bridge = audio.bridge {
+            _ = writeBridgedAudio(bridge.settle(), audio: audio)
+        }
         if let prev = pendingVideoPkt {
             let prevSeg = pendingVideoSegIndex   // unified: live + VOD both carry the routed index
             if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
@@ -4572,6 +4572,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
         finishCondition.unlock()
 
         onPumpFinished?(exitReason)
+    }
+
+    /// Route and mux packets a bridge returned. False when the muxer is gone; every packet is freed
+    /// either way.
+    private func writeBridgedAudio(_ packets: [UnsafeMutablePointer<AVPacket>], audio: AudioConfig) -> Bool {
+        var muxerGone = false
+        for fp in packets {
+            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+            defer { trackedPacketFree(&fpVar) }
+            if muxerGone { continue }
+            guard let muxer = ensureMuxer(forSegmentIndex: bridgedAudioSegmentIndex(fp, audio: audio)) else {
+                muxerGone = true
+                continue
+            }
+            fp.pointee.stream_index = muxer.audioOutputStreamIndex
+            av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+            let prime = copyAudioPrimeCandidate(fp)
+            if muxer.writePacket(fp).rc >= 0, let prime {
+                audioMoovPrimeFrame = prime
+            }
+        }
+        return !muxerGone
     }
 
     /// The segment a bridged audio packet belongs to. Live and sequential audio follow the video

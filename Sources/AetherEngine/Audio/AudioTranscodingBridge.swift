@@ -26,6 +26,9 @@ protocol AudioTranscodingBridge: AnyObject, Sendable {
     /// Decode, transcode and return 0+ packets in `encoderTimeBase`. The caller owns them and frees
     /// them with `trackedPacketFree` after muxing.
     func feed(packet: UnsafePointer<AVPacket>) throws -> [UnsafeMutablePointer<AVPacket>]
+    /// Packets for audio already fed that the bridge is still encoding, waited for. The producer
+    /// calls it before cutting a segment, so a cut splits the audio where a synchronous encode would.
+    func settle() -> [UnsafeMutablePointer<AVPacket>]
     /// Drain at source EOF. The bridge is unusable afterwards until `startSegment`.
     func flush() -> [UnsafeMutablePointer<AVPacket>]
     /// A producer restart boundary: drop buffered audio and rebase timestamps off the next packet.
@@ -43,4 +46,5 @@ protocol AudioTranscodingBridge: AnyObject, Sendable {
 extension AudioBridge: AudioTranscodingBridge {
     var soundSampleEntryOverride: Data? { nil }
     var servedChannelCount: Int? { nil }
+    func settle() -> [UnsafeMutablePointer<AVPacket>] { [] }
 }
