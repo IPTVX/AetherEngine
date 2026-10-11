@@ -4502,7 +4502,7 @@ public final class AetherEngine: ObservableObject {
 
         // Custom sources have no URL to reopen from: a failed probe is fatal.
         if case .custom = source, !probeOpened {
-            publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed")
+            publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed", underlying: probeFailure)
             throw DemuxerError.openFailed(code: -1)
         }
 
