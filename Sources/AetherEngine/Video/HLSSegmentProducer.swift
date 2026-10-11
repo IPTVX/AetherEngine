@@ -4259,13 +4259,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // Live: keyframe cutter uses shifted pts. VOD: unused; routing uses prev.dts at look-behind site.
                     let isVideoKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                     // #731: a bridge that encodes on its own queue hands packets back a feed or more
-                    // late. Routing is decided by the cutter and the open muxer, and both move only on
-                    // a keyframe read here or on writing the look-behind keyframe below, so settling
-                    // the bridge first routes every packet as a synchronous encode routed it.
-                    if !isLive, let audio = audioConfig, let bridge = audio.bridge,
-                       isVideoKeyframe
-                        || pendingVideoPkt.map({ ($0.pointee.flags & AV_PKT_FLAG_KEY) != 0 }) == true {
-                        if !writeBridgedAudio(bridge.settle(), audio: audio) {
+                    // late, and they are routed by the cutter (sequential origins) and the open muxer
+                    // (the `max` in `ensureMuxer`). Settle it before this packet advances the cutter
+                    // or the look-behind write below cuts, so every packet is routed where a
+                    // synchronous encode routed it. A cut the audio starts itself writes in order.
+                    if !isLive, let audio = audioConfig, let bridge = audio.bridge {
+                        let advancesCutter = audioFollowsVideoCut && isVideoKeyframe
+                            && vodCutter.peekIndex(
+                                pts: planBoundaryAxis.timestamp(dts: packet.pointee.dts, pts: packet.pointee.pts),
+                                isKeyframe: true) != vodCutter.current
+                        let lookBehindCuts = pendingVideoPkt != nil && currentMuxer != nil
+                            && pendingVideoSegIndex > currentMuxerSegmentIndex
+                        if advancesCutter || lookBehindCuts, !writeBridgedAudio(bridge.settle(), audio: audio) {
                             exitReason = .muxerFailed
                             break readLoop
                         }
@@ -4496,6 +4501,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         freeUnreplayedPregateAudio()
 
         // Flush look-behind; fallback duration produces tail-correct trun for the final fragment.
+        // #731: the last keyframe can open a final segment; what the bridge still encodes belongs
+        // before that cut. Only an EOF adopts the open segment, so only an EOF needs it.
+        if case .eof = exitReason, let audio = audioConfig, let bridge = audio.bridge {
+            _ = writeBridgedAudio(bridge.settle(), audio: audio)
+        }
         if let prev = pendingVideoPkt {
             let prevSeg = pendingVideoSegIndex   // unified: live + VOD both carry the routed index
             if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
@@ -4564,10 +4574,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         onPumpFinished?(exitReason)
     }
 
-    /// The segment a bridged audio packet belongs to. Live and sequential audio follow the video
-    /// cutter; everything else is routed by the packet's own time against the plan. One helper for the
-    /// per-feed and the end-of-file flush, because the flush missing the sequential rule opened a plan
-    /// index the cutter never reached and cost the archive its final segment (audit SEG-103).
     /// Route and mux packets a bridge returned. False when the muxer is gone; every packet is freed
     /// either way.
     private func writeBridgedAudio(_ packets: [UnsafeMutablePointer<AVPacket>], audio: AudioConfig) -> Bool {
@@ -4590,6 +4596,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return !muxerGone
     }
 
+    /// The segment a bridged audio packet belongs to. Live and sequential audio follow the video
+    /// cutter; everything else is routed by the packet's own time against the plan. One helper for the
+    /// per-feed and the end-of-file flush, because the flush missing the sequential rule opened a plan
+    /// index the cutter never reached and cost the archive its final segment (audit SEG-103).
     private func bridgedAudioSegmentIndex(_ packet: UnsafeMutablePointer<AVPacket>, audio: AudioConfig) -> Int {
         if isLive { return liveCurrentSegmentIndex }
         if audioFollowsVideoCut { return vodCutter.current }
