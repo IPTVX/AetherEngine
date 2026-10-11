@@ -83,7 +83,7 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
         let size: Int64
     }
 
-    /// The current clip, plus room for a read across a clip boundary and a side reader looking back.
+    /// The current clip, plus room for a read across a clip boundary and a seek back into the last one.
     static let openLimit = 3
 
     private let segments: [Segment]
@@ -91,13 +91,19 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
     private let starts: [Int64]
     private let totalLength: Int64
     private let opener: @Sendable (String) -> IOReader?
-    private let lock = NSLock()
+    /// Serializes `read`, `seek` and `close`, and is held across the network. `cancel` never takes it:
+    /// it exists to unblock a read parked under it.
+    private let ioLock = NSLock()
     private var position: Int64 = 0
+    /// Guards the fields below, and is only ever held briefly.
+    private let stateLock = NSLock()
     /// Open readers by segment index, and their use order: the least recently used one closes first.
     private var open: [Int: IOReader] = [:]
     private var recent: [Int] = []
     /// Bytes fetched by readers already closed, so the transfer count survives their eviction.
     private var retiredSourceBytes: Int64 = 0
+    /// Bumped by `cancel`, so a file that was still opening when it arrived is cancelled once it exists.
+    private var cancelGeneration = 0
 
     init(segments: [Segment], opener: @escaping @Sendable (String) -> IOReader?) {
         self.segments = segments
@@ -113,7 +119,7 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
     }
 
     var sourceBytesFetched: Int64 {
-        lock.lock(); defer { lock.unlock() }
+        stateLock.lock(); defer { stateLock.unlock() }
         return retiredSourceBytes + open.values.reduce(0) { $0 + Self.fetched($1) }
     }
 
@@ -121,29 +127,41 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
         (reader as? SourceTransferCounting)?.sourceBytesFetched ?? 0
     }
 
-    /// The reader of segment `index`, opening it if needed. Called with the lock held.
+    /// The reader of segment `index`, opening it if needed. Called with `ioLock` held; the open itself
+    /// (a range probe on HTTP) runs outside `stateLock`, so `cancel` never waits for it.
     private func reader(for index: Int) -> IOReader? {
+        stateLock.lock()
         if let existing = open[index] {
             recent.removeAll { $0 == index }
             recent.append(index)
+            stateLock.unlock()
             return existing
         }
+        let generation = cancelGeneration
+        stateLock.unlock()
+
         guard let fresh = opener(segments[index].path) else { return nil }
+
+        stateLock.lock()
+        let cancelledWhileOpening = cancelGeneration != generation
         open[index] = fresh
         recent.append(index)
+        var evicted: [IOReader] = []
         while recent.count > Self.openLimit {
-            let evicted = recent.removeFirst()
-            if let gone = open.removeValue(forKey: evicted) {
+            if let gone = open.removeValue(forKey: recent.removeFirst()) {
                 retiredSourceBytes += Self.fetched(gone)
-                gone.close()
+                evicted.append(gone)
             }
         }
+        stateLock.unlock()
+        evicted.forEach { $0.close() }
+        if cancelledWhileOpening { fresh.cancel() }
         return fresh
     }
 
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
         guard let buffer, size > 0 else { return -1 }
-        lock.lock(); defer { lock.unlock() }
+        ioLock.lock(); defer { ioLock.unlock() }
         guard position < totalLength else { return 0 }
         var index = starts.lastIndex { $0 <= position } ?? 0
         let toRead = min(Int64(size), totalLength - position)
@@ -177,7 +195,7 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
 
     func seek(offset: Int64, whence: Int32) -> Int64 {
         if whence == 65536 { return totalLength }               // AVSEEK_SIZE
-        lock.lock(); defer { lock.unlock() }
+        ioLock.lock(); defer { ioLock.unlock() }
         let target: Int64
         switch whence {
         case SEEK_SET: target = offset
@@ -190,21 +208,25 @@ final class MultiFileConcatIOReader: IOReader, SourceTransferCounting, @unchecke
         return position
     }
 
+    /// Waits for a read in flight, as before the split, so no read is left holding a closed file.
     func close() {
-        lock.lock()
+        ioLock.lock(); defer { ioLock.unlock() }
+        stateLock.lock()
         let readers = Array(open.values)
         retiredSourceBytes += readers.reduce(0) { $0 + Self.fetched($1) }
         open.removeAll()
         recent.removeAll()
-        lock.unlock()
+        stateLock.unlock()
         readers.forEach { $0.close() }
     }
 
-    /// Passed on to the open file readers, so a stop unblocks a read parked on the network.
+    /// Passed on to the open file readers, so a stop unblocks a read parked on the network. It takes
+    /// only `stateLock`: the read it is meant to unblock holds `ioLock` for as long as it is parked.
     func cancel() {
-        lock.lock()
+        stateLock.lock()
+        cancelGeneration &+= 1
         let readers = Array(open.values)
-        lock.unlock()
+        stateLock.unlock()
         readers.forEach { $0.cancel() }
     }
 

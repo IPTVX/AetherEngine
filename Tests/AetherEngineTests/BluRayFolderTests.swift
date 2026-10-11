@@ -271,6 +271,57 @@ struct BluRayFolderTests {
         #expect(n == 50)
     }
 
+    /// A file whose reads park until `cancel`, the way a network read waits on a stalled origin.
+    final class ParkingReader: IOReader, @unchecked Sendable {
+        let parked = DispatchSemaphore(value: 0)
+        private let release = DispatchSemaphore(value: 0)
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+            parked.signal()
+            release.wait()
+            return -1
+        }
+        func seek(offset: Int64, whence: Int32) -> Int64 { offset }
+        func close() {}
+        func cancel() { release.signal() }
+    }
+
+    @Test("a cancel unblocks a read parked inside a file", .timeLimit(.minutes(1)))
+    func cancelUnblocksAParkedRead() {
+        let file = ParkingReader()
+        let reader = MultiFileConcatIOReader(segments: [.init(path: "f", size: 100)], opener: { _ in file })
+        let returned = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            var buffer = [UInt8](repeating: 0, count: 10)
+            _ = buffer.withUnsafeMutableBufferPointer { reader.read($0.baseAddress, size: 10) }
+            returned.signal()
+        }
+        #expect(file.parked.wait(timeout: .now() + 10) == .success)
+        reader.cancel()
+        #expect(returned.wait(timeout: .now() + 10) == .success)
+    }
+
+    @Test("a cancel that arrives while a file is still opening cancels that file once it exists", .timeLimit(.minutes(1)))
+    func cancelDuringOpen() {
+        let file = ParkingReader()
+        let opening = DispatchSemaphore(value: 0)
+        let proceed = DispatchSemaphore(value: 0)
+        let reader = MultiFileConcatIOReader(segments: [.init(path: "f", size: 100)], opener: { _ in
+            opening.signal()
+            proceed.wait()
+            return file
+        })
+        let returned = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            var buffer = [UInt8](repeating: 0, count: 10)
+            _ = buffer.withUnsafeMutableBufferPointer { reader.read($0.baseAddress, size: 10) }
+            returned.signal()
+        }
+        #expect(opening.wait(timeout: .now() + 10) == .success)
+        reader.cancel()
+        proceed.signal()
+        #expect(returned.wait(timeout: .now() + 10) == .success)
+    }
+
     // MARK: - Over HTTP, and through the engine
 
     @Test("an HTTP folder plays the same bytes, with an independent reader of its own", .timeLimit(.minutes(1)))
