@@ -25,7 +25,7 @@ struct APACEncoderTests {
     }
 
     @Test("every bed layout opens, with a dapa cookie, 2048 frames of priming and 1024-frame packets",
-          arguments: [SpatialSpeakerLayout.l512, .l712, .l714, .l916])
+          arguments: SpatialSpeakerLayout.allCases)
     func opens(layout: SpatialSpeakerLayout) throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let encoder = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000)
@@ -85,5 +85,17 @@ struct APACEncoderTests {
         let packets = try withPlanes(layout, frames: frames) { try encoder.encode(planes: $0, frameCount: frames) }
         let total = packets.count + (try encoder.flush()).count
         #expect(abs(total - (frames + encoder.leadingFrames + 1023) / 1024) <= 1)
+    }
+
+    @Test("encode after flush throws instead of swallowing the input")
+    func encodeAfterFlushThrows() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let layout = SpatialSpeakerLayout.l512
+        let encoder = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000)
+        _ = try withPlanes(layout, frames: 2048) { try encoder.encode(planes: $0, frameCount: 2048) }
+        _ = try encoder.flush()
+        #expect(throws: APACEncoder.EncoderError.self) {
+            try withPlanes(layout, frames: 1000) { try encoder.encode(planes: $0, frameCount: 1000) }
+        }
     }
 }
