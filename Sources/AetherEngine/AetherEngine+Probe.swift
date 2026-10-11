@@ -661,12 +661,20 @@ extension AetherEngine {
         }
         // No language preference decided it: the session would take its default track, so a TrueHD
         // Atmos track in that track's language replaces it.
+        // Same dub only: a script or region both tags state and disagree on (es-ES against es-419) is
+        // another dub, not another format of this one.
         guard prefersTrueHDAtmos,
               let fallback = tracks.first(where: { $0.id == Int(defaultIndex) }),
               !isRenderableTrueHDAtmos(fallback),
-              let language = fallback.language,
-              let atmos = tracks.first(where: { isRenderableTrueHDAtmos($0) && languageMatches($0.language, language) })
+              let language = fallback.language
         else { return nil }
+        let candidates = tracks.compactMap { track -> (track: TrackInfo, rank: Int)? in
+            guard isRenderableTrueHDAtmos(track),
+                  let rank = languageMatchRank(track.language, language, kind: .audio),
+                  rank / 3 < 2, rank % 3 < 2 else { return nil }
+            return (track, rank)
+        }
+        guard let atmos = candidates.min(by: { $0.rank < $1.rank })?.track else { return nil }
         return Int32(atmos.id)
     }
 

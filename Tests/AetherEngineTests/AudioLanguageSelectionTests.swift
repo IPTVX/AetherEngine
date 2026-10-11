@@ -133,4 +133,23 @@ struct AudioLanguageSelectionTests {
         #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: ["en"],
                                               prefersTrueHDAtmos: true) == 1)
     }
+
+    @Test("a preference nothing matches still lets the default's language take its TrueHD Atmos track")
+    func unmatchedPreferenceFallsBackToDefaultLanguage() {
+        // Sodalite always sends the device locale; on a German box a film with only English audio
+        // matches nothing and plays its default track.
+        let tracks = [audio(1, "eng", codec: "dts"), audio(2, "eng", codec: "truehd", atmos: true)]
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: ["de"],
+                                              prefersTrueHDAtmos: true, defaultIndex: 1) == 2)
+    }
+
+    @Test("the fallback keeps the dub: a region both tags state and disagree on is another track")
+    func fallbackKeepsTheDub() {
+        let tracks = [audio(1, "es-ES", codec: "dts"), audio(2, "es-419", codec: "truehd", atmos: true)]
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: [],
+                                              prefersTrueHDAtmos: true, defaultIndex: 1) == nil)
+        let same = [audio(1, "es-ES", codec: "dts"), audio(2, "es", codec: "truehd", atmos: true)]
+        #expect(AetherEngine.selectAudioIndex(tracks: same, override: nil, preferredLanguages: [],
+                                              prefersTrueHDAtmos: true, defaultIndex: 1) == 2)
+    }
 }
