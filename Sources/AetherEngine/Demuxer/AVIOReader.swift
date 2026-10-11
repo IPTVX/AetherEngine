@@ -3783,8 +3783,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         applyExtraHeaders(&request)
 
         // #377: this connection is open for the whole session, so it holds its slot for the whole
-        // session, which is exactly what it costs the origin. Scoped to this function because the
-        // function does not return until the transfer ends. A streaming-mode source has no detour
+        // session, which is exactly what it costs the origin. Returned at network completion so a
+        // lower-priority caller need not resume first. A streaming-mode source has no detour
         // or ranged probe to starve (they are all switched off on this path), so a held slot here
         // blocks nothing but a second reader on the same origin, which is the point.
         let streamTicket: OriginRequestBudget.Ticket?
@@ -3798,7 +3798,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             streamDataReady.signal()
             return
         }
-        defer { OriginRequestBudget.shared.release(streamTicket) }
+        let lease = OriginRequestBudget.Lease(streamTicket)
+        defer { lease.release() }
 
         let semaphore = DispatchSemaphore(value: 0)
 
@@ -3872,6 +3873,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             self.addBytesFetched(data.count)
             self.streamDataReady.signal()
         } onComplete: { [weak self] error in
+            lease.release()
             guard let self else {
                 semaphore.signal()
                 return
@@ -3887,7 +3889,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let streamSession = URLSession(
             configuration: Self.makeSessionConfig(longLived: true),
             delegate: delegate,
-            delegateQueue: nil
+            delegateQueue: AVIOReader.makePlaybackDelegateQueue()
         )
         let task = streamSession.dataTask(with: request)
 
@@ -4027,6 +4029,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     // MARK: - Network (seekable mode)
 
+    /// These callbacks deliver foreground playback bytes and return origin slots to blocked
+    /// demux threads. URLSession's implicit queue can run at utility QoS and cannot donate
+    /// priority through a semaphore. Each session keeps its own serial callback queue.
+    static func makePlaybackDelegateQueue() -> OperationQueue {
+        let queue = OperationQueue()
+        queue.name = "aether.avio.callbacks"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }
+
     /// Long-lived session for file-size probes. Per-request sessions force fresh TLS
     /// handshakes, which Cloudflare-fronted origins can flag as suspicious. Distinct
     /// from syncRequest's per-request pattern (load-bearing for chunk-fetch leak control).
@@ -4034,7 +4047,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let config = URLSessionConfiguration.default
         config.urlCache = nil
         config.timeoutIntervalForRequest = 20
-        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: AVIOReader.makePlaybackDelegateQueue())
     }()
 
     /// Audit DMX-5: where a 206 says its body starts, when that is not where it was asked to.
@@ -4235,14 +4248,22 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=size-probe-stop method=\(method) range=\(range ?? "none") reason=slot-unavailable-or-cancelled", category: .demux)
             return -1
         }
-        defer { OriginRequestBudget.shared.release(ticket) }
+        let lease = OriginRequestBudget.Lease(ticket)
+        defer { lease.release() }
         guard !scope.isStopped, !isClosed, remaining() > 0 else { return -1 }
         request.timeoutInterval = max(0.001, remaining())
         let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
         let task = Self.probeSession.dataTask(with: request)
         task.delegate = delegate
         let completion = DispatchSemaphore(value: 0)
-        delegate.onCompletion = { completion.signal() }
+        delegate.onCompletion = { [weak self] response in
+            if let response, Self.isRateLimitStatus(response.statusCode) {
+                self?.noteOriginRefusal(status: response.statusCode,
+                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
+            }
+            lease.release()
+            completion.signal()
+        }
         delegate.onResolved = { [weak self] in
             guard !scope.isStopped else { return }
             self?.recordResolvedURL($0)
@@ -4258,10 +4279,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if outcome == .signaled {
             size = delegate.totalSize ?? -1
             status = delegate.statusCode
-            if let response = delegate.response, Self.isRateLimitStatus(status) {
-                noteOriginRefusal(status: status, retryAfter: Self.parseRetryAfter(response),
-                                  respondedBy: response.url)
-            }
             noteTransportSecurityFailure(delegate.error)
         } else {
             task.cancel()
@@ -4299,14 +4316,22 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         } catch {
             return nil
         }
-        defer { OriginRequestBudget.shared.release(ticket) }
+        let lease = OriginRequestBudget.Lease(ticket)
+        defer { lease.release() }
 
         let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
         let task = (probeRequestSession ?? Self.probeSession).dataTask(with: request)
         task.delegate = delegate
 
         let semaphore = DispatchSemaphore(value: 0)
-        delegate.onCompletion = { semaphore.signal() }
+        delegate.onCompletion = { [weak self] response in
+            if let response, Self.isRateLimitStatus(response.statusCode) {
+                self?.noteOriginRefusal(status: response.statusCode,
+                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
+            }
+            lease.release()
+            semaphore.signal()
+        }
         delegate.onResolved = { [weak self] resolved in
             self?.recordResolvedURL(resolved)
         }
@@ -4346,9 +4371,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                if Self.isRateLimitStatus(status) {
-                    noteOriginRefusal(status: status, respondedBy: (response as? HTTPURLResponse)?.url)
-                }
                 EngineLog.emit("[AVIOReader] HEAD failed (HTTP \(status))", category: .demux, level: .verbose)
                 return -1
             }
@@ -4437,7 +4459,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// No invalidation overhead.
     private static let chunkSession: URLSession = {
         let config = makeSessionConfig()
-        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: AVIOReader.makePlaybackDelegateQueue())
     }()
 
     /// #220: long-lived session for the persistent streaming path, paired with a per-task
@@ -4453,7 +4475,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     ///
     /// Never invalidated. Releasing a connection is `task.cancel()` now, not session teardown.
     private static let persistentSession: URLSession = {
-        URLSession(configuration: makeSessionConfig(longLived: true), delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        URLSession(configuration: makeSessionConfig(longLived: true), delegate: EngineTLS.sessionDelegate, delegateQueue: AVIOReader.makePlaybackDelegateQueue())
     }()
 
     /// Outcome of an abortable semaphore wait (issue #27).
@@ -4591,11 +4613,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                              slotWait: TimeInterval = AVIOReader.shortFetchSlotWaitSeconds) throws -> (Data, URLResponse) {
         // #377: every short fetch the reader makes (detour blocks, size probes, HEAD) funnels
         // through here, so this is the one place that has to take an origin slot for all of them.
-        // Scoped to the call: unlike the pump's, this request's life IS this function's.
+        // Refusals are charged before the completion callback returns the slot. Early exit
+        // releases the same lease idempotently.
         let slotURL = request.url ?? url
         let ticket = try requestTicket(
             for: slotURL, label: "\(label) \(slotLabel)", timeout: slotWait)
-        defer { OriginRequestBudget.shared.release(ticket) }
+        let lease = OriginRequestBudget.Lease(ticket)
+        defer { lease.release() }
 
         let delegate = ChunkFetchDelegate(extraHeaders: headers(for: request.url),
                                           bodyLimit: Self.expectedBodyBytes(for: request))
@@ -4603,7 +4627,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         task.delegate = delegate
 
         let semaphore = DispatchSemaphore(value: 0)
-        delegate.onCompletion = { semaphore.signal() }
+        delegate.onCompletion = { [weak self] response in
+            if let response, Self.isRateLimitStatus(response.statusCode) {
+                self?.noteOriginRefusal(status: response.statusCode,
+                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
+            }
+            lease.release()
+            semaphore.signal()
+        }
         delegate.onResolved = { [weak self] resolved in
             self?.recordResolvedURL(resolved)
         }
@@ -5041,7 +5072,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     /// Set when the origin sent past `bodyLimit` and the task was cancelled mid-body, so the
     /// caller reads the kept prefix as a success instead of a cancellation failure.
     var truncated = false
-    var onCompletion: (() -> Void)?
+    var onCompletion: ((HTTPURLResponse?) -> Void)?
     var onResolved: ((URL) -> Void)?
 
     init(extraHeaders: [String: String], bodyLimit: Int?) {
@@ -5133,7 +5164,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         didCompleteWithError error: Error?
     ) {
         self.error = error
-        onCompletion?()
+        onCompletion?(response as? HTTPURLResponse)
     }
 }
 
@@ -5233,7 +5264,7 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     var statusCode: Int = 0
     var response: HTTPURLResponse?
     var error: Error?
-    var onCompletion: (() -> Void)?
+    var onCompletion: ((HTTPURLResponse?) -> Void)?
     var onResolved: ((URL) -> Void)?
 
     init(extraHeaders: [String: String]) {
@@ -5282,7 +5313,7 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         self.error = error
-        onCompletion?()
+        onCompletion?(response)
     }
 }
 
