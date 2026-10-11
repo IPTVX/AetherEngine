@@ -23,6 +23,15 @@ the public-API contract.
   request count. TLS validation, the redirect header policy and the body limits are unchanged, and
   sources without the option keep their transport (#732).
 
+### Fixed
+
+- **Ceiling speakers sit where TS 103 448 puts them.** The renderer placed the top speakers in the
+  room's corners, so overhead content near the front leaked backwards and the whole mix sat higher
+  than Apple's own render of the same title. They now sit a quarter of the room in from each wall.
+  Against Apple's render of the matching DD+ Atmos, energy-weighted: Black Hawk Down 3.3° → 0.8°
+  direction error, +3.2° → +0.4° elevation bias, +4.1 → +0.6 points top-share; a single overhead
+  helicopter 6.3° → 0.2°; Dolby's Amaze 4.7° → 3.3°.
+
 ## [7.34.1] - 2026-10-11
 
 ### Changed
