@@ -62,6 +62,15 @@ extension HLSVideoEngine {
             }
             return nil
         }
+        // VOD only: the live reopen and splice paths re-time the bridge in ways this one's encoder
+        // latency and fixed packet stamping do not follow.
+        guard !isLiveSession else {
+            EngineLog.emit(
+                "[HLSVideoEngine] TrueHD Atmos rendering is VOD only; keeping the channel bridge on this live session",
+                category: .session
+            )
+            return nil
+        }
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else {
             EngineLog.emit(
                 "[HLSVideoEngine] TrueHD Atmos rendering needs OS 26 (APAC encoder API); keeping the channel bridge",

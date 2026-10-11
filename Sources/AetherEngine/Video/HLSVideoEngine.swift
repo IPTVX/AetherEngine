@@ -2001,8 +2001,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // true on a source whose stream-copy was rejected and bridged to FLAC; objects do not survive
         // that, hence the `.streamCopy` conjunct. Without it a downgraded session would advertise
         // `CHANNELS="16/JOC"` over a FLAC bed, which is worse than saying nothing.
+        // #731: the APAC bed is muxed behind a 2-channel ALAC stand-in, so its bridge states the count.
         let servedAudioChannels: Int? = savedAudioConfig.map {
-            Int($0.codecpar.pointee.ch_layout.nb_channels)
+            $0.bridge?.servedChannelCount ?? Int($0.codecpar.pointee.ch_layout.nb_channels)
         }
         let servedAudioIsAtmosStreamCopy =
             audioIsAtmosStreamCopy && audioDelivery == .streamCopy && savedAudioConfig != nil

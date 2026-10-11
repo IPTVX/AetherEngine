@@ -21,6 +21,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
     private var roles: [ObjectAudioRole] = []
     private var rolesSerial: UInt32?
     private var planes: [UnsafePointer<Float>] = []
+    private(set) var selfResetCount = 0
 
     init() throws {
         guard let handle = truehd_atmos_decoder_create(TRUEHD_ATMOS_PRESENTATION_HIGHEST) else {
@@ -40,6 +41,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         if status == TRUEHD_ATMOS_ERR_PANIC {
             let failure = error(status)
             reset()
+            selfResetCount += 1
             throw failure
         }
         guard status == TRUEHD_ATMOS_OK else { throw error(status) }
@@ -54,6 +56,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
             // at the next major sync instead of staying silent for the rest of the session.
             let failure = error(status)
             reset()
+            selfResetCount += 1
             throw failure
         }
         guard status == TRUEHD_ATMOS_OK else { throw error(status) }

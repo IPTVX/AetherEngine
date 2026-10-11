@@ -40,6 +40,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     let soundSampleEntryOverride: Data?
     /// HLS `CODECS` value for the track.
     let hlsCodecs: String
+    var servedChannelCount: Int? { layout.channelCount }
 
     private let srcTimeBase: AVRational
     private let decoder: ObjectAudioDecoding
@@ -71,6 +72,13 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private var packetsOut: Int64 = 0
     private var nextExpectedInputOffset: Int64?
     private var drainedAtEOF = false
+    /// The decoder reset itself after an internal failure: its offsets count from zero again, so the
+    /// next block re-anchors on the next packet's timestamp instead of being appended to the encoder.
+    private var decoderSelfResetsSeen = 0
+    private var reanchorPending = false
+    /// Feeds in a row that threw, for a rate-limited log and the AE#641 report of a bridge that
+    /// keeps failing (a decoder that panics on every unit, a rate the renderer refuses).
+    private var consecutiveFeedFailures = 0
 
     private let opLock = NSLock()
     private var stats = AudioBridge.FeedStats()
@@ -165,29 +173,66 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         // Every exit: a decoder that rejects each packet has decoded nothing too.
         defer { noteDecodedNothingIfNeeded() }
 
-        if originFrame == nil, packet.pointee.pts != Self.avNoPTS {
-            originFrame = av_rescale_q(packet.pointee.pts, srcTimeBase, encoderTimeBase)
-        }
         guard let data = packet.pointee.data, packet.pointee.size > 0 else { return [] }
         do {
             try decoder.push(UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
         } catch {
             stats.packetsRejected += 1
+            noteDecoderSelfReset()
+            noteFeedFailure(error)
             return []
         }
+        // The anchor is the first packet the decoder actually took, so its input offsets count from
+        // this packet. dts covers a packet whose pts the demuxer left unset.
+        if originFrame == nil {
+            let ts = packet.pointee.pts != Self.avNoPTS ? packet.pointee.pts : packet.pointee.dts
+            if ts != Self.avNoPTS { originFrame = av_rescale_q(ts, srcTimeBase, encoderTimeBase) }
+        }
 
+        // Packets already stamped stay in the result when a later block of the same packet fails:
+        // their timestamps are right, and dropping them would leave a hole the source never had.
         var results: [UnsafeMutablePointer<AVPacket>] = []
         do {
             while let block = try decoder.nextBlock() {
                 stats.framesDecoded += 1
                 try renderAndEncode(block, into: &results)
             }
+            consecutiveFeedFailures = 0
         } catch {
             stats.decodeErrors += 1
-            for p in results { var pp: UnsafeMutablePointer<AVPacket>? = p; trackedPacketFree(&pp) }
-            throw error
+            noteDecoderSelfReset()
+            noteFeedFailure(error)
         }
         return results
+    }
+
+    /// Caller holds `opLock`. After the decoder reset itself, the bytes of the failing packet are gone
+    /// and its offsets restart at zero: anchor again on the next packet it takes.
+    private func noteDecoderSelfReset() {
+        guard decoder.selfResetCount != decoderSelfResetsSeen else { return }
+        decoderSelfResetsSeen = decoder.selfResetCount
+        originFrame = nil
+        nextExpectedInputOffset = nil
+        reanchorPending = encoderStartFrame != nil
+    }
+
+    /// Caller holds `opLock`. The first failure and every `silentFeedPacketThreshold`th after it are
+    /// logged; a run that long is reported once as a bridge that produces nothing.
+    private func noteFeedFailure(_ error: Error) {
+        consecutiveFeedFailures += 1
+        if consecutiveFeedFailures == 1 || consecutiveFeedFailures % Self.silentFeedPacketThreshold == 0 {
+            EngineLog.emit(
+                "[SpatialAudioBridge] feed failed (\(consecutiveFeedFailures) in a row): \(error)",
+                category: .session)
+        }
+        guard !decodedNothingReported,
+              consecutiveFeedFailures >= Self.silentFeedPacketThreshold else { return }
+        // One latch with the decoded-nothing report: a decoder that refuses every packet is both.
+        decodedNothingReported = true
+        EngineLog.emit(
+            "[SpatialAudioBridge] ERROR: AE#641 every feed has failed for \(consecutiveFeedFailures) packets: "
+            + "\(stats.summary)", category: .session)
+        onDecoderProducedNothing?(stats)
     }
 
     /// Caller holds `opLock`.
@@ -231,6 +276,9 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         packetsOut = 0
         nextExpectedInputOffset = nil
         drainedAtEOF = false
+        decoderSelfResetsSeen = decoder.selfResetCount
+        reanchorPending = false
+        consecutiveFeedFailures = 0
     }
 
     func noteTimelineJump(deltaSeconds: Double) {
@@ -282,9 +330,15 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         // filled with silence so everything after it stays on its timestamp.
         if encoderStartFrame == nil {
             encoderStartFrame = (originFrame ?? 0) + block.inputFrameOffset
-        } else if let expected = nextExpectedInputOffset, block.inputFrameOffset > expected {
-            let gap = Int(min(block.inputFrameOffset - expected, Int64(Self.sampleRate * 5)))
-            try encodeSilence(frames: gap, into: &results)
+        } else if reanchorPending, let start = encoderStartFrame {
+            // After the decoder's own reset: put this block where the source says it plays.
+            reanchorPending = false
+            let target = (originFrame ?? start + encoderFramesIn + Int64(pendingFrames)) + block.inputFrameOffset
+            try place(at: target, into: &results)
+        } else if let expected = nextExpectedInputOffset, block.inputFrameOffset > expected,
+                  let start = encoderStartFrame {
+            let end = start + encoderFramesIn + Int64(pendingFrames)
+            try place(at: end + (block.inputFrameOffset - expected), into: &results)
         }
         nextExpectedInputOffset = block.inputFrameOffset + Int64(block.frameCount)
 
@@ -297,6 +351,33 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         stats.packetsFedSinceLastEnqueue = 0
         if pendingFrames >= Self.encodeChunkFrames { try encodePending(into: &results) }
     }
+
+    /// Continue the encoder's input at `target` (a source position in 48 kHz frames): a short gap
+    /// ahead is filled with silence, anything longer or behind restarts the encoder there, so every
+    /// later packet keeps its source position.
+    private func place(at target: Int64, into results: inout [UnsafeMutablePointer<AVPacket>]) throws {
+        guard let start = encoderStartFrame else { return }
+        let end = start + encoderFramesIn + Int64(pendingFrames)
+        let gap = target - end
+        if gap == 0 { return }
+        if gap > 0, gap <= Int64(Self.maxSilenceFillFrames) {
+            try encodeSilence(frames: Int(gap), into: &results)
+            return
+        }
+        try encodePending(into: &results)
+        if let tail = try? encoder.flush() { emit(tail, into: &results) }
+        encoder.reset()
+        limiter.reset()
+        encoderStartFrame = target
+        encoderFramesIn = 0
+        packetsOut = 0
+        EngineLog.emit(
+            "[SpatialAudioBridge] encoder re-anchored \(String(format: "%+.3f", Double(gap) / Double(Self.sampleRate))) s "
+            + "off its running position", category: .session)
+    }
+
+    /// The longest gap filled with silence rather than by restarting the encoder.
+    private static let maxSilenceFillFrames = sampleRate * 5
 
     private func encodeSilence(frames: Int, into results: inout [UnsafeMutablePointer<AVPacket>]) throws {
         guard frames > 0 else { return }

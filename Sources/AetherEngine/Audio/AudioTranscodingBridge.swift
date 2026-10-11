@@ -18,6 +18,11 @@ protocol AudioTranscodingBridge: AnyObject, Sendable {
     /// to keep movenc's.
     var soundSampleEntryOverride: Data? { get }
 
+    /// Channels the delivered track really carries, for the master's `CHANNELS`, when the muxer's
+    /// codec parameters describe a stand-in instead (the APAC bed behind a 2-channel ALAC stand-in).
+    /// Nil reads the count off `encoderCodecpar`.
+    var servedChannelCount: Int? { get }
+
     /// Decode, transcode and return 0+ packets in `encoderTimeBase`. The caller owns them and frees
     /// them with `trackedPacketFree` after muxing.
     func feed(packet: UnsafePointer<AVPacket>) throws -> [UnsafeMutablePointer<AVPacket>]
@@ -37,4 +42,5 @@ protocol AudioTranscodingBridge: AnyObject, Sendable {
 
 extension AudioBridge: AudioTranscodingBridge {
     var soundSampleEntryOverride: Data? { nil }
+    var servedChannelCount: Int? { nil }
 }

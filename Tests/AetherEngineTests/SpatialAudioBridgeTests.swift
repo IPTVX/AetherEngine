@@ -561,3 +561,118 @@ struct BedLevelMeterTests {
         #expect(BedLevelMeter.configurationSummary([.bed(.left), .bed(.right), .object]) == "beds L R + no LFE + 1 objects")
     }
 }
+
+extension SpatialAudioBridgeTests {
+    // MARK: - Review round 1 of the bridge (#731)
+
+    /// Contiguous like `ClickDecoder`, but at push `panicAt` it fails the way the real one does on a
+    /// caught panic: the push throws, the decoder resets itself, and its offsets start from zero.
+    final class SelfResettingDecoder: ObjectAudioDecoding {
+        let panicAt: Int
+        private var pushes = 0
+        private var inputFrames: Int64 = 0
+        private var blocks: [(offset: Int64, frames: Int)] = []
+        private let plane = UnsafeMutablePointer<Float>.allocate(capacity: 1 << 16)
+        private(set) var selfResetCount = 0
+        struct Panic: Error {}
+
+        init(panicAt: Int) { self.panicAt = panicAt; plane.initialize(repeating: 0.1, count: 1 << 16) }
+        deinit { plane.deallocate() }
+
+        func push(_ bytes: UnsafeRawBufferPointer) throws {
+            pushes += 1
+            if pushes == panicAt {
+                inputFrames = 0; blocks = []; selfResetCount += 1
+                throw Panic()
+            }
+            blocks.append((inputFrames, bytes.count * 40))
+            inputFrames += Int64(bytes.count * 40)
+        }
+
+        func nextBlock() throws -> ObjectAudioDecodedBlock? {
+            guard !blocks.isEmpty else { return nil }
+            let b = blocks.removeFirst()
+            return ObjectAudioDecodedBlock(
+                sampleRate: 48_000, frameCount: b.frames, inputFrameOffset: b.offset,
+                configurationGeneration: 0, roles: [.bed(.left)], planes: [UnsafePointer(plane)], updates: [])
+        }
+
+        func reset() { inputFrames = 0; blocks = [] }
+    }
+
+    /// Decodes fine at a rate the renderer refuses, so every block throws.
+    final class WrongRateDecoder: ObjectAudioDecoding {
+        private var pending = 0
+        private let plane = UnsafeMutablePointer<Float>.allocate(capacity: 4096)
+        deinit { plane.deallocate() }
+        func push(_ bytes: UnsafeRawBufferPointer) throws { pending += 1 }
+        func nextBlock() throws -> ObjectAudioDecodedBlock? {
+            guard pending > 0 else { return nil }
+            pending -= 1
+            return ObjectAudioDecodedBlock(
+                sampleRate: 44_100, frameCount: 40, inputFrameOffset: 0, configurationGeneration: 0,
+                roles: [.bed(.left)], planes: [UnsafePointer(plane)], updates: [])
+        }
+        func reset() { pending = 0 }
+    }
+
+    private func drain(_ bridge: some AudioTranscodingBridge) -> [Int64] {
+        bridge.flush().map { fp in
+            defer { var p: UnsafeMutablePointer<AVPacket>? = fp; trackedPacketFree(&p) }
+            return fp.pointee.pts
+        }
+    }
+
+    @Test("after the decoder resets itself mid-stream, later audio keeps its source position")
+    func selfResetReanchors() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: SelfResettingDecoder(panicAt: 50))
+        defer { bridge.close() }
+        // 100 packets of 20 ms from 1 s. Packet 50 is lost to the panic; its 960 frames come back as
+        // silence, so the stream is as long as an unbroken one. Appended onto the encoder instead,
+        // everything after the panic would play 20 ms early and the stream would end a packet short.
+        let packets = try feed(bridge, startMs: 1000, count: 100).map(\.pts) + drain(bridge)
+        #expect(packets.first == 48_000)
+        #expect(zip(packets, packets.dropFirst()).allSatisfy { $1 - $0 == 1024 })
+        #expect(packets.count == 2 + Int((Double(96_000) / 1024).rounded(.up)))
+    }
+
+    @Test("a seek after the end of the file anchors on the new position")
+    func seekAfterEOF() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: ClickDecoder(clickFrame: .max))
+        defer { bridge.close() }
+        _ = try feed(bridge, startMs: 0, count: 50)
+        _ = drain(bridge)
+        bridge.startSegment()
+        let after = try feed(bridge, startMs: 5000, count: 50)
+        #expect(after.first?.pts == 240_000, "5 s at 48 kHz")
+        #expect(!after.isEmpty)
+    }
+
+    @Test("a bridge whose every feed fails is reported once and never throws at the producer")
+    func persistentFailureReportedOnce() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: WrongRateDecoder())
+        defer { bridge.close() }
+        let reports = Reports()
+        bridge.onDecoderProducedNothing = { _ in reports.add() }
+        let out = try feed(bridge, startMs: 0, count: SpatialAudioBridge.silentFeedPacketThreshold * 2 + 5)
+        #expect(out.isEmpty)
+        #expect(reports.value == 1)
+    }
+
+    @Test("the master's CHANNELS counts the bed, not the 2-channel stand-in the muxer is given",
+          arguments: [SpatialSpeakerLayout.l714, .l916])
+    func servedChannelsAreTheBeds(layout: SpatialSpeakerLayout) throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: layout, decoder: ClickDecoder(clickFrame: .max))
+        defer { bridge.close() }
+        #expect(bridge.encoderCodecpar?.pointee.ch_layout.nb_channels == 2)
+        #expect(bridge.servedChannelCount == layout.channelCount)
+    }
+}
