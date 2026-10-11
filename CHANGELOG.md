@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.34.1] - 2026-10-11
+
 ### Changed
 
 - **TrueHD Atmos to APAC encodes while it decodes.** The object decoder and Apple's APAC encoder
