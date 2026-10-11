@@ -2,11 +2,11 @@ import AVFoundation
 
 /// Keeps a tvOS HDMI route in Dolby Atmos while the engine's `AVPlayer` plays an APAC track.
 ///
-/// tvOS hands APAC to the receiver as Dolby MAT, but measured on an Apple TV 4K (tvOS 27.2) with an
-/// Atmos soundbar that was not enough: the route stayed at 2 output channels and the soundbar showed
-/// no Atmos, although `AVAudioSession` reported a MAT format throughout. A second, unmuted player
-/// looping a silent E-AC-3 stream signalled as Dolby Atmos switched the route to 32 channels and the
-/// soundbar to Atmos before the first frame, and kept it there across a seek.
+/// tvOS hands APAC to the receiver as Dolby MAT, and some sinks show Dolby Atmos for that on their own.
+/// Not all do: a Samsung HW-Q990C fed by an Apple TV 4K (tvOS 27.2) played APAC without ever showing
+/// Atmos, although `AVAudioSession` reported a MAT format throughout. A second, unmuted player looping
+/// a silent E-AC-3 stream signalled as Dolby Atmos brought it to Atmos before the first frame and kept
+/// it there across a seek. Nothing the app can read tracked the indicator; only the sink shows it.
 ///
 /// The stream (`Resources/silent-atmos.mp4`, written bit by bit by `Scripts/make-silent-atmos.swift`)
 /// decodes to digital silence, so nothing is mixed into the programme. It plays only while the host
