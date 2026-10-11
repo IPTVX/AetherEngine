@@ -1034,6 +1034,21 @@ extension AetherEngine {
                 self.setPresentationAxis(map)
             }
         }
+        session.onLivePlaylistRenewal = { [weak self, weak session] in
+            self?.hop(for: generation) { [weak self, weak session] in
+                guard let self, let session, self.nativeVideoSession === session,
+                      let oldURL = (self.currentAVPlayer?.currentItem?.asset as? AVURLAsset)?.url,
+                      let url = session.renewedLivePlaylistURL(replacing: oldURL), url != oldURL else { return }
+                self.stallReengageTask?.cancel()
+                self.stallReengageTask = nil
+                self.liveOutageResumeWatcher?.cancel()
+                self.liveOutageResumeWatcher = nil
+                session.clearLiveOutageEndlist()
+                self.reloadStalledConsumerItem(position: self.renderedPositionMirror.get(),
+                    allowPausedConsumer: true, liveRejoinOverride: self.currentTime,
+                    replacementURL: url)
+            }
+        }
         session.onLiveSourceReset = { [weak self, weak session] in
             Task { @MainActor in
                 // Stale session (superseded by a zap) must not retune the current channel.

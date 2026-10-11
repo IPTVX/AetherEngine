@@ -1030,7 +1030,9 @@ final class NativeAVPlayerHost {
                 remoteHLSOriginRefused = true
                 return
             }
-            if let code, MasterFallbackDecision.isMasterRejectionCode(code) {
+            if let error = item.error as NSError?, MasterFallbackDecision.isMasterRejection(error,
+                mediaErrorCodes: item.errorLog()?.events.map(\.errorStatusCode) ?? []) {
+                let code = error.code
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sessionID) startup .failed is a master rejection "
                     + "(code=\(code)); signalling engine for media fallback instead of surfacing",

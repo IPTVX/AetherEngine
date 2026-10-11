@@ -557,3 +557,20 @@ handling. Bridged audio and separate side-audio sources are excluded.
 The cutter watchdog distinguishes an intentional overlap scan from a stuck cut
 while continuing to detect source starvation. No host API or resource policy is
 added; the guard and its packet history belong to the producer thread.
+
+### Live playlist renewal after a longer GOP
+
+The first live media playlist seals its target duration. If a later finalized
+segment's serialized `EXTINF`, rounded to an integer, exceeds that value, the
+provider creates a new `live-N/` playlist namespace with a larger seal. The old
+video and subtitle URLs keep their original target and retain the end index before
+an oversized segment, even after that segment leaves the live window. Relative segment/init/subtitle URLs resolve within either
+namespace to the same retained cache; source acquisition is not reopened.
+
+The native consumer swaps to the renewed URL using the existing in-place reload
+and playlist placement machinery. The viewing position and play/pause intent
+are carried across the swap, including a DVR position behind live. A renewal
+never repeats an already completed startup cushion wait. The change does not
+cut a GOP at a dependent frame or falsify a segment's duration. A consumer item
+replacement can still cause a short interruption; missing source frames cannot
+be reconstructed by this policy.

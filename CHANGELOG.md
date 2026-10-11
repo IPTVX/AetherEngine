@@ -86,6 +86,7 @@ the public-API contract.
 
 ### Fixed
 
+- Renew the live playlist URL when a later GOP exceeds the sealed target duration. Retired video/subtitle playlists keep their original target and endpoint; the replacement item retains the source, cache, viewing position and transport intent. Media-duration failures no longer count as HDR/master rejection evidence.
 - **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
   divides the source size by the duration it reads off the timestamps, which over such a title is as
   wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
