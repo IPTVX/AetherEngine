@@ -15,10 +15,14 @@ the public-API contract.
 - **TrueHD Atmos to APAC encodes while it decodes.** The object decoder and Apple's APAC encoder
   each take about a core and ran one after the other on the producer thread, which is what a seek
   past the produced range waited for. The bridge now hands each rendered chunk to a serial encode
-  queue and decodes the next one meanwhile: Dolby's Unfold demo went from 2.73 s to 1.75 s
-  (M1, release), 10x to 15x real time. The producer waits for the queue at every video keyframe,
-  where its cutter and muxer move, so every segment carries the same audio packets as before, byte
-  for byte, on pts-routed and sequential origins alike (#731).
+  queue and decodes the next one meanwhile. The producer waits for the queue only where its
+  segment cutter or open muxer is about to move, so every segment carries the same audio packets
+  as before, byte for byte, on pts-routed and sequential origins alike (#731).
+- **LibTrueHD 2.2.0: the TrueHD object decode is about 30% faster.** Its `truehd` crate copied
+  160-row sample buffers for blocks that are usually 40 samples; truehdd#42 sizes them to the
+  samples they hold, with byte-identical output. Together with the encode queue above, Dolby's
+  Unfold demo now takes 1.40 s instead of 2.73 s (M1, release), 19x real time instead of 10x,
+  which is what a seek past the produced range waits for (#731).
 
 ## [7.34.0] - 2026-10-11
 
