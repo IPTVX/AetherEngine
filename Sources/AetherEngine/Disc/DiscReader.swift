@@ -103,7 +103,7 @@ enum DiscReader {
     /// A run of this many unreadable playlists means the source is gone (cancelled or closed reader).
     private static let maxConsecutiveShortReads = 16
     /// `readAll`'s ceiling.
-    private static let maxSmallFileBytes: Int64 = 8 * 1024 * 1024
+    static let maxSmallFileBytes: Int64 = 8 * 1024 * 1024
 
     /// Reads and parses the `.mpls` entries of a PLAYLIST directory under the bounds above. Stops at the
     /// first bound that trips and keeps what was parsed before it.
@@ -112,12 +112,23 @@ enum DiscReader {
         extents: (UDFEntry) -> [(offset: Int64, length: Int64)],
         read: ([(offset: Int64, length: Int64)]) -> [UInt8]
     ) -> [MPLSPlaylist] {
+        scanPlaylists(entries, name: \.name, extents: extents, read: { _, exts in read(exts) })
+    }
+
+    /// The same scan over any directory listing: a UDF directory, or the files of a disc folder
+    /// (`DiscDirectoryReader`), where each playlist is one whole file rather than a set of extents.
+    static func scanPlaylists<Entry>(
+        _ entries: [Entry],
+        name: (Entry) -> String,
+        extents: (Entry) -> [(offset: Int64, length: Int64)],
+        read: (Entry, [(offset: Int64, length: Int64)]) -> [UInt8]
+    ) -> [MPLSPlaylist] {
         var parsed: [MPLSPlaylist] = []
         var examined = 0
         var bytesRead: Int64 = 0
         var items = 0
         var shortReads = 0
-        for e in entries where e.name.hasSuffix(".mpls") {
+        for e in entries where name(e).hasSuffix(".mpls") {
             examined += 1
             guard examined <= maxPlaylistFiles else {
                 EngineLog.emit("[disc] PLAYLIST scan stopped at \(maxPlaylistFiles) .mpls entries", category: .demux)
@@ -132,7 +143,7 @@ enum DiscReader {
                 EngineLog.emit("[disc] PLAYLIST scan stopped after \(maxPlaylistBytes) bytes of playlists", category: .demux)
                 break
             }
-            let bytes = read(exts)
+            let bytes = read(e, exts)
             if Int64(bytes.count) < declared {
                 shortReads += 1
                 if shortReads >= maxConsecutiveShortReads {
@@ -161,16 +172,28 @@ enum DiscReader {
         clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
         extentsOfClip: (String) -> [(offset: Int64, length: Int64)]?
     ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan]) {
-        var allExtents: [(offset: Int64, length: Int64)] = []
+        let assembled = assembleBluRayTitle(clipIDs: clipIDs, subtractTicks: subtractTicks,
+                                            cumulativeBeforeTicks: cumulativeBeforeTicks,
+                                            piecesOfClip: extentsOfClip, length: \.length)
+        return (assembled.pieces, assembled.clipTimeline)
+    }
+
+    /// The same assembly over any byte source of a clip: the extents of an image, or the one file a clip is
+    /// in a disc folder. `length` is a piece's byte count in the concatenated stream.
+    static func assembleBluRayTitle<Piece>(
+        clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
+        piecesOfClip: (String) -> [Piece]?, length: (Piece) -> Int64
+    ) -> (pieces: [Piece], clipTimeline: [ClipSpan]) {
+        var allExtents: [Piece] = []
         var clipTimeline: [ClipSpan] = []
-        var resolved: [String: [(offset: Int64, length: Int64)]?] = [:]
+        var resolved: [String: [Piece]?] = [:]
         var byteStart: Int64 = 0
         for (k, clip) in clipIDs.enumerated() {
-            let lookup: [(offset: Int64, length: Int64)]?
+            let lookup: [Piece]?
             if let known = resolved[clip] {
                 lookup = known
             } else {
-                lookup = extentsOfClip(clip)
+                lookup = piecesOfClip(clip)
                 resolved[clip] = .some(lookup)
             }
             guard let exts = lookup else { continue }
@@ -185,7 +208,7 @@ enum DiscReader {
                                          predictedShiftSec: predictedShift))
             EngineLog.emit("[disc] AE#105 clip[\(k)] id=\(clip) subTicks=\(k < subtractTicks.count ? subtractTicks[k] : 0) predictedSec=\(String(format: "%.3f", predictedShift)) cumBeforeSec=\(String(format: "%.3f", cumBeforeSec)) byteStart=\(byteStart)", category: .demux, level: .verbose)
             allExtents += exts
-            byteStart += exts.reduce(Int64(0)) { $0 + max(0, $1.length) }
+            byteStart += exts.reduce(Int64(0)) { $0 + max(0, length($1)) }
         }
         return (allExtents, clipTimeline)
     }
@@ -237,6 +260,11 @@ enum DiscReader {
     /// Blu-ray ISO, else nil. `selectTitleID` chooses the title (default = main). DVD titles are the
     /// per-VTS VOB groups, filtered by the VMGI TT_SRPT title list (whole-VTS; per-cell splitting deferred).
     static func wrap(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
+        // A disc folder is a set of files, not one byte range, so it is recognized before the cache,
+        // which rebuilds a reader from extents of a single image.
+        if let folder = reader as? DiscDirectoryReader {
+            return wrapBluRayFolder(folder, selectTitleID: selectTitleID)
+        }
         if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,

@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **A Blu-ray ripped as a `BDMV` folder plays over HTTP.** A host hands the folder to `load(source: .custom(reader))`
+  as a `DiscDirectoryReader`, or as the ready-made `HTTPDiscDirectoryReader` with one URL per file, and
+  the engine recognizes it the way it recognizes a Blu-ray ISO: the same bounded playlist scan and title
+  selection, the selected title's clips concatenated in playlist order, and the same multi-clip timeline,
+  chapters and track languages. The origin serves plain files over `Range` and never remuxes the disc. An
+  optional `preferredPlaylist` names the main title, so only that playlist is read. A controlled probe
+  (`limits` or `cancellation`) does not recognize a folder yet.
 - **`heldSourceConnection` now covers the HEVC-in-MPEG-TS HLS VOD ingest: one persistent HTTP/1.1
   connection, reused across segments.** Some origins refuse a segment over h2 and over freshly
   opened connections, but serve consecutive requests on one keep-alive connection. With the option
@@ -22,6 +29,17 @@ the public-API contract.
   while idle is retried once on a fresh one. Every open and close is logged with its protocol and
   request count. TLS validation, the redirect header policy and the body limits are unchanged, and
   sources without the option keep their transport (#732).
+
+### Fixed
+
+- **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
+  divides the source size by the duration it reads off the timestamps, which over such a title is as
+  wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
+  as 388 s and declared `BANDWIDTH=2253434656`; AVPlayer never picked the variant and waited with no
+  item to play. Whenever libavformat produces a rate for a disc title, the rate is now the title's size
+  over its playlist duration (66.9 Mbit/s for that title, which then started playing). A title
+  libavformat gives no rate for, which is what a remote ISO opened by URL gets, keeps the over-declared
+  fallback as before.
 
 ## [7.34.1] - 2026-10-11
 
