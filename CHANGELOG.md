@@ -23,6 +23,15 @@ the public-API contract.
   request count. TLS validation, the redirect header policy and the body limits are unchanged, and
   sources without the option keep their transport (#732).
 
+### Fixed
+
+- **TrueHD Atmos rendered to APAC lights Atmos on the receiver.** On an Apple TV 4K (tvOS 27.2)
+  with an Atmos soundbar, APAC played but the HDMI route stayed at 2 channels and the soundbar
+  showed no Atmos. While an APAC session plays on tvOS, the engine now loops a silent E-AC-3
+  stream signalled as Dolby Atmos beside its player (`AtmosOutputActivator`), which switched the
+  route to 32 channels and the soundbar to Atmos, before the first frame and after a seek. The
+  2 s stream is digital silence written from the specifications by `Scripts/make-silent-atmos.swift`.
+
 ## [7.34.1] - 2026-10-11
 
 ### Changed

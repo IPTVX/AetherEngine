@@ -6456,8 +6456,12 @@ public final class AetherEngine: ObservableObject {
         didSet {
             observeExternalPlayback()
             observeCurrentItem()
+            followAtmosOutput()
         }
     }
+
+    /// Keeps the HDMI route in Atmos while `currentAVPlayer` plays APAC (tvOS; see `followAtmosOutput`).
+    var atmosOutputActivator: AtmosOutputActivator?
 
     /// Item currently loaded into `currentAVPlayer` (#260). Published separately because items are swapped in
     /// place (`replaceCurrentItem`, on every audio-track reload and episode autoplay) without the player itself

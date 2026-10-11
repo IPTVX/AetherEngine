@@ -65,6 +65,8 @@ let package = Package(
                 .product(name: "Dovi", package: "LibDovi"),
                 .product(name: "TrueHD", package: "LibTrueHD"),
             ],
+            // Silent E-AC-3 Atmos that `AtmosOutputActivator` loops beside an APAC track on tvOS.
+            resources: [.copy("Resources/silent-atmos.mp4")],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AVKit"),
