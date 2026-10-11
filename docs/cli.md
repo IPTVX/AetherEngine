@@ -273,6 +273,10 @@ asking again every drain cycle. The observable is the range count, in the origin
 point is that there is no second ask to refuse. Two shapes are worth running deliberately, because
 they are the two the flag has to survive: a long uninterrupted read, and a PAUSE, which must end the
 connection after five seconds and cost exactly one re-request at the frontier when playback resumes.
+On a finite HEVC-in-MPEG-TS HLS VOD (the AE#268 ingest) the same flag puts the playlist and every
+segment on one persistent HTTP/1.1 connection (AE#732); the observable there is the
+`[HLSVODIngest] AE#732 connection ... open` and `... closed after N requests reason=...` lines, one
+pair per connection, and a run without seeks should show exactly one.
 
 `--progressive-segments` sets `LoadOptions.progressiveSegmentDelivery`: each VOD segment is served
 while it is written. Run it against a throttled origin and compare the `FIRSTFRAME` and first
