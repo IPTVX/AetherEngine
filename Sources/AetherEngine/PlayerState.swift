@@ -757,6 +757,14 @@ public struct LoadOptions: Sendable, Equatable {
     /// transport: they park deliberately for minutes, which is the one shape a held connection
     /// must not take.
     ///
+    /// AE#732: it also covers a finite HLS VOD that takes the AE#268 ingest (HEVC in MPEG-TS). Its
+    /// playlist, key and segment requests then run over one persistent HTTP/1.1 connection per
+    /// origin, reused across segment boundaries, one segment at a time instead of four in parallel,
+    /// for origins that refuse h2 or a freshly opened connection but serve consecutive requests on
+    /// one keep-alive connection. The connection is replaced only when the origin closes it, the
+    /// origin changes, or a seek abandons a body mid-transfer; each open and close is logged with
+    /// its protocol and request count. Other HLS routes keep their transport.
+    ///
     /// Names the session rather than tuning it: the transport is chosen when the source is opened,
     /// so a reload cannot change it. Default false, which is every reader shipped so far.
     public var heldSourceConnection: Bool = false

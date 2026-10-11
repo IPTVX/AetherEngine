@@ -10,7 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`heldSourceConnection` now covers the HEVC-in-MPEG-TS HLS VOD ingest: one persistent HTTP/1.1
+  connection, reused across segments.** Some origins refuse a segment over h2 and over freshly
+  opened connections, but serve consecutive requests on one keep-alive connection. With the option
+  set, the AE#268 ingest sends its playlist, key and segment requests over one HTTP/1.1 connection
+  per origin, one segment at a time, and the carriage probe downloads the first segment whole so
+  the producer does not fetch it twice. A new connection opens only when the origin closes one, the
+  origin changes, or a seek abandons a body mid-transfer; a reused connection the origin dropped
+  while idle is retried once on a fresh one. Every open and close is logged with its protocol and
+  request count. TLS validation, the redirect header policy and the body limits are unchanged, and
+  sources without the option keep their transport (#732).
 
 ## [7.34.1] - 2026-10-11
 
