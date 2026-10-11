@@ -52,6 +52,10 @@ let package = Package(
         // floated every `from: "1.0.x"` consumer onto it and then failed on the
         // floor instead of backing off, so all of 5.x stopped resolving.
         .package(url: "https://github.com/superuser404notfound/LibDovi", .upToNextMinor(from: "2.1.0")),  // 2.1.0: dolby_vision 3.4.0, header additive only (two new CMv4.0 metadata entry points, nothing removed); 2.0.0: visionOS (xros) device + simulator slices, declared tvOS floor corrected to 17.0 (was published as 1.1.0, withdrawn: a floor raise is breaking and broke every 5.x pin that floated onto it); 1.0.2: iOS slices + x86_64 (Intel Macs)
+        // TrueHD decoder that also decodes the Atmos object presentation (beds, objects, OAMD) for
+        // `objectAudioRendering` (#731). The Rust `truehd` crate (Apache-2.0) behind a C API, prebuilt
+        // as an xcframework like LibDovi so consumers need no Rust. Pinned to the minor for the same reason.
+        .package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "2.0.0")),  // 2.0.0: transferred from Silo-Server/SiloObjectAudio and renamed (product TrueHD), rebuilt from source; same decoder as SiloObjectAudio 1.0.0
     ],
     targets: [
         .target(
@@ -59,6 +63,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
+                .product(name: "TrueHD", package: "LibTrueHD"),
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
