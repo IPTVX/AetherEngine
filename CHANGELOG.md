@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **TrueHD Atmos keeps its heights.** Apple TV cannot bitstream TrueHD, so the bridge decoded its
+  7.1 presentation and every height and object position was gone. `LoadOptions.objectAudioRendering
+  = .apac(layout)` decodes the Atmos object presentation (bed, up to 15 objects and their metadata,
+  through the new [LibTrueHD](https://github.com/superuser404notfound/LibTrueHD) dependency), renders
+  it into the host's speaker bed (5.1.2 to 9.1.6) with an allocentric constant-power panner, and
+  delivers Apple Positional Audio, which tvOS sends to an Atmos receiver as Dolby MAT and iOS plays as
+  Spatial Audio. A linked peak limiter keeps the bed under full scale, because the APAC encoder carries
+  anything over it through (Dolby's Unfold demo reaches -1.2 dB of reduction). Opt-in and lossy, at
+  320 kbps per bed channel in place of the lossless 7.1; only TrueHD that FFmpeg marks Atmos, at
+  48 kHz, on OS 26+, and any failure to start falls back to `audioBridgeMode`. `aetherctl serve
+  --atmos-bed 7.1.4 --audio-index N` serves it. Ported from Silo's fork, which offered its
+  implementation as the reference (Silo-Server/AetherEngine#6, #8, #17). (#731)
 
 ## [7.33.2] - 2026-10-09
 

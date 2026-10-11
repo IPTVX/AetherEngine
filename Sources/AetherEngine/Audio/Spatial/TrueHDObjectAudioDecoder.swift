@@ -35,6 +35,13 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         guard let base = bytes.baseAddress, bytes.count > 0 else { return }
         let status = truehd_atmos_decoder_push(
             handle, base.assumingMemoryBound(to: UInt8.self), bytes.count, Int64.min)
+        // BUFFER_FULL (8 MiB waiting) cannot happen behind the bridge, which drains every block after
+        // each push; a panic resets for the same reason as in `nextBlock`.
+        if status == TRUEHD_ATMOS_ERR_PANIC {
+            let failure = error(status)
+            reset()
+            throw failure
+        }
         guard status == TRUEHD_ATMOS_OK else { throw error(status) }
     }
 
@@ -42,6 +49,13 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         var block = TrueHDAtmosBlock()
         let status = truehd_atmos_decoder_pull(handle, &block)
         if status == TRUEHD_ATMOS_NEED_MORE_DATA { return nil }
+        if status == TRUEHD_ATMOS_ERR_PANIC {
+            // The handle refuses every call until it is reset. Reset it here, so the stream resumes
+            // at the next major sync instead of staying silent for the rest of the session.
+            let failure = error(status)
+            reset()
+            throw failure
+        }
         guard status == TRUEHD_ATMOS_OK else { throw error(status) }
 
         let channels = Int(block.channel_count)

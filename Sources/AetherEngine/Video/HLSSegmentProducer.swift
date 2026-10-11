@@ -93,7 +93,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// inputTimeBase instead landed the target 48x too far into the source for bridged DTS.
         let sourceTimeBase: AVRational
         /// Non-nil routes each packet through bridge.feed and muxes the returned FLAC packets.
-        let bridge: AudioBridge?
+        let bridge: (any AudioTranscodingBridge)?
         /// Strip 7/9-byte ADTS header per frame for MPEG-TS AAC stream-copy into fMP4; engine synthesises the ASC.
         let stripAacAdts: Bool
         /// AE#458: the source track's language as ISO 639-2/T, carried into every muxer this config builds
@@ -105,7 +105,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
              sourceStreamIndex: Int32,
              inputTimeBase: AVRational,
              sourceTimeBase: AVRational,
-             bridge: AudioBridge?,
+             bridge: (any AudioTranscodingBridge)?,
              stripAacAdts: Bool = false,
              language: String? = nil) {
             self.codecpar = codecpar
@@ -2146,7 +2146,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             nalFramingLatch: isAdCreative ? nil : videoConfig.nalFramingLatch
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
-            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase, language: a.language)
+            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase,
+                                        soundSampleEntryOverride: a.bridge?.soundSampleEntryOverride, language: a.language)
         }
 
         do {
