@@ -100,6 +100,31 @@ struct ObjectMetadataHoldTests {
         #expect(out.allSatisfy { $0.updates.isEmpty })
     }
 
+    @Test("a new configuration after the first metadata is held again, since its renderer starts without positions")
+    func configurationChangeRearms() {
+        let blocks = Blocks(), hold = ObjectMetadataHold()
+        let carrier = blocks.block(0, generation: 1, updateAt: 0)
+        _ = hold.admit(carrier, firstStates: firstStates(carrier))
+        _ = drain(hold)
+        #expect(hold.admit(blocks.block(1, generation: 1), firstStates: nil) != nil)
+        #expect(hold.admit(blocks.block(2, generation: 2), firstStates: nil) == nil)
+        let next = blocks.block(3, generation: 2, updateAt: 5)
+        _ = hold.admit(next, firstStates: firstStates(next))
+        let out = drain(hold).blocks
+        #expect(out.map(\.inputFrameOffset) == [80, 120])
+        #expect(out[0].updates.first?.frameOffset == 0)
+    }
+
+    @Test("at the end of input, held blocks go out as they are")
+    func endOfInputReleasesHeld() {
+        let blocks = Blocks(), hold = ObjectMetadataHold()
+        for n in 0..<2 { _ = hold.admit(blocks.block(n), firstStates: nil) }
+        hold.releaseAll()
+        let out = drain(hold).blocks
+        #expect(out.map(\.inputFrameOffset) == [0, 40])
+        #expect(out.allSatisfy { $0.updates.isEmpty })
+    }
+
     @Test("a configuration change releases what was held for the old one, unprimed")
     func configurationChangeReleasesHeld() {
         let blocks = Blocks(), hold = ObjectMetadataHold()

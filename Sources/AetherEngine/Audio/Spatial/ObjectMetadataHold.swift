@@ -9,7 +9,8 @@ import Foundation
 /// Nature's Fury. Held here instead, they are released when the payload arrives, the first of them
 /// carrying that payload's first state as a jump at frame 0, so they play where the stream puts the
 /// objects next. Only blocks with objects are held, at most `maxHeldFrames` of them, and none from the
-/// first metadata until the next reset, so steady-state blocks pass straight through, uncopied.
+/// first metadata until the next reset or configuration change, so steady-state blocks pass straight
+/// through, uncopied.
 final class ObjectMetadataHold {
 
     /// Payloads come every 1536 frames on measured streams. A stream that sends none this long after
@@ -40,6 +41,7 @@ final class ObjectMetadataHold {
     }
 
     private var armed = true
+    private var generation: Int?
     private var held: [Copy] = []
     private var heldFrames = 0
     private var released: [Copy] = []
@@ -57,14 +59,17 @@ final class ObjectMetadataHold {
     /// `firstStates` is every element's state as of the block's first metadata update, nil when the
     /// block carries no metadata.
     func admit(_ block: ObjectAudioDecodedBlock, firstStates: [ObjectAudioElementState?]?) -> ObjectAudioDecodedBlock? {
+        // A new configuration gets a new renderer, which starts without positions as well: what was
+        // held for the old one goes out as it is, and the hold starts again.
+        if let generation, generation != block.configurationGeneration {
+            releaseHeld()
+            armed = true
+        }
+        generation = block.configurationGeneration
         guard armed else {
             if released.isEmpty { return block }
             released.append(Copy(block))
             return nil
-        }
-        // A new configuration gets a new renderer, which starts without positions as well.
-        if let first = held.first, first.block.configurationGeneration != block.configurationGeneration {
-            releaseHeld()
         }
         let hasObjects = block.roles.contains(.object)
         held.append(Copy(block))
@@ -78,6 +83,12 @@ final class ObjectMetadataHold {
             releaseHeld()
         }
         return nil
+    }
+
+    /// End of input: no metadata will come for what is held, so it goes out as it is.
+    func releaseAll() {
+        armed = false
+        releaseHeld()
     }
 
     /// The next released block, in decode order.

@@ -123,6 +123,10 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         lent = nil
     }
 
+    func finishInput() {
+        hold.releaseAll()
+    }
+
     private func error(_ status: Int32) -> DecoderError {
         let message = truehd_atmos_decoder_last_error(handle).map { String(cString: $0) } ?? ""
         return DecoderError(status: status, message: message)
