@@ -1034,6 +1034,20 @@ extension AetherEngine {
                 self.setPresentationAxis(map)
             }
         }
+        session.onLiveSourceReopening = { [weak self, weak session] in
+            self?.hop(for: generation) { [weak self, weak session] in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                self.endRecordingIfRunning(reason: .sourceReset)
+            }
+        }
+        session.onLiveSourceReplayExhausted = { [weak self, weak session] in
+            self?.hop(for: generation) { [weak self, weak session] in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                self.noteLiveSourceGivenUp()
+                self.endRecordingIfRunning(reason: .sourceReset)
+                self.liveSourceReplayExhausted.send()
+            }
+        }
         session.onLiveSourceReset = { [weak self, weak session] in
             Task { @MainActor in
                 // Stale session (superseded by a zap) must not retune the current channel.
@@ -1814,7 +1828,8 @@ extension AetherEngine {
                       // AE#520: the session knows whether the bitstream it stream-copied carries JOC;
                       // the HDMI route cannot, because Atmos passthrough and a stereo LPCM route
                       // report the same two channels.
-                      audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true))
+                      audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true,
+                      nativeVideoFrameDiagnostics: loadedOptions.nativeVideoFrameDiagnostics))
         forceNativeLegibleDeselectedUntilHostSelects()
         // Sodalite#175: from the session's own pick, since a track-switch reload has no active index yet.
         let sessionAudioPick = nativeVideoSession.map(\.activeAudioSourceStreamIndex).flatMap { $0 >= 0 ? Int($0) : nil }

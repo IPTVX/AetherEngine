@@ -68,6 +68,12 @@ player.$state
 
 It is assigned before `state`, so a `$state` sink reads this failure's own info rather than the previous one's, and it is cleared by the state's move away from `.error`, so the two cannot drift. Substring rules over the message instead bucket every non-English device into "other".
 
+Software live source read failures, including an interrupted verified replay,
+report `liveSourceUnavailable` rather than `softwarePipelineFailed`. This is a
+source continuity failure, not evidence that the codec requires a different
+engine. Hosts choose retry timing through their existing live recovery policy.
+The software route's error remains available through `$errorInfo` and `.error`.
+
 ### `.ended` is terminal
 
 `.ended` means the source played to completion, on any backend. It is not a pause at the last frame:
@@ -85,9 +91,50 @@ The clock stops with it, on both backends: `clock.currentTime` and `clock.source
 player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
 ```
 
-Live's counterpart to a terminal `.error`, and a host that plays live has to subscribe. It fires where the session cannot be revived from inside the engine and only a new `load` can: a source restarted from byte 0 (a transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), an in-engine reopen transport whose budget is spent (#199). Production is halted before it fires.
+An interrupted exact replay first tries the bounded in-engine source reopen when
+there is a URL or fresh-reader factory. It retains the same cache, player item and
+bounded exact-packet history, so media already in the DVR window is not appended
+again even when the viewer is behind live. The failed connection is retired before
+opening the replacement. A changed track layout or ordinary source loss that
+exhausts in-engine recovery requests host negotiation through this subject.
+Verified replay that cannot reach new media uses `liveSourceReplayExhausted`
+below, so an automatic full load cannot bypass the retained evidence.
+A complete overlap continues in place; an ambiguous clock reset retains ordinary
+discontinuity handling. Fresh-source recovery ends an active recording with
+`sourceReset` rather than silently splicing a new source into the old file.
 
-Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded count per session, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.
+A live host subscribes to this event when acquisition cannot continue under the
+engine's bounded recovery round, or the stalled consumer requests renewed source
+acquisition. After its own backoff, first try `retryLiveSourceRecovery()`: a
+previously productive native live session can renew its source while retaining
+its DVR timeline, including before any replay has been detected. A `false` return
+requires fresh negotiation (for example a changed track layout or a custom reader
+without a reopen factory); use a bounded full-load policy for that case.
+
+Keep one recovery in flight. Do not turn ordinary source loss into a decoder
+compatibility failure merely because an origin remains unavailable.
+
+### Live: exhausted verified replay
+
+`liveSourceReplayExhausted` is a per-session subject for native HLS recovery that
+cannot reach new media after verifying previously admitted packets. Production
+parks while cached DVR media and replay history remain available. This is a
+source recovery event, not a codec failure or a requirement to show an error.
+
+After its own backoff, a host can call `retryLiveSourceRecovery() -> Bool` to
+resume source acquisition into the same cache and consumer item. It returns
+`true` when that retained session accepts the request or has a retry in flight, and
+`false` after stop/replacement, on unsupported routes, or when a changed track
+layout requires fresh negotiation. Concurrent calls coalesce. A stalled live producer can also be renewed through
+this method: its reader is cancelled and its pump must finish before history is
+transferred to a replacement. A new exhaustion
+publishes the subject again; retry delays, cancellation and any overall limit
+belong to the host. Calling `load` or switching decoders instead discards this
+history and can replay the old broadcast.
+
+Once a session has verified replay, later source-open exhaustion keeps this same
+retained recovery contract even if an earlier reconnect produced new media.
+A changed track layout still uses `liveSourceReset` for fresh negotiation.
 
 ### Live: a resume that had to move
 
@@ -695,6 +742,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | `nativeLiveDVRMandatoryBytes` | The finite pinned playback payload that may exceed that allowance. Excludes init and subtitle data, muxer staging, AVPlayer's buffers, filesystem overhead and recordings. |
 | `setSoftwareLiveDVRLimits(_:availableCapacityBytes:)`, `softwareLiveDVRBytes` | The same lease for the software live spool, which needs `LoadOptions.softwareDVRRetention`. Expiry withdraws seekable history and prunes at the next append, so it is not an immediate physical reclaim while no packets arrive. A feeder whose cursor was evicted re-anchors through its normal seek before pumping again; a newer seek, pause, stop or source change wins over that recovery. `softwareLiveDVRBytes` is the retained packet payload. |
 | `liveSourceReset` | The retune contract above. |
+| `liveSourceReplayExhausted` | Verified replay exhausted one bounded recovery round. Cached DVR stays readable; retry via `retryLiveSourceRecovery()` under the host’s backoff without losing packet history. |
 | Timestamp resets | On the native loopback path `currentTime`, the seekable range, item placement and seek targets keep the session's initial timeline shift when the origin resets its timestamps, so the display time stays continuous. `clock.sourceTime` stays the presented frame's source PTS for cue matching, so the two intentionally differ after a reset. |
 | `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see above. |
 | `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Still on the live session axis, decoded from what the session already holds. A native session reads its DVR segment cache; a software session reads its DVR packet ring (#544), so a tuner channel the box decodes in software has a scrub preview too. |
@@ -1063,6 +1111,14 @@ A certificate the host does not accept still reaches the host as
 as well.
 
 ## Diagnostics
+
+`LoadOptions.nativeVideoFrameDiagnostics` opts into decoded-frame observation on SDR native
+loopback playback. It defaults to `false`; remote bypass, HDR, external playback, mobile
+background activity, pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
+samples frame timestamps without suppressing the player layer or retaining pixel buffers.
+`EngineLog` reports output progress, gaps/resumption and observation-task delays. A decoded
+output gap is not proof of a physical screen freeze; unavailable output is reported explicitly,
+and the observation never seeks, retries, changes decoder routing or publishes a playback error.
 
 | Symbol | Notes |
 | --- | --- |

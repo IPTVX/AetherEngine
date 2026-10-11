@@ -719,8 +719,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Fires on live program-boundary rebase: `(newShiftSeconds, seamOutputSeconds)`. AetherEngine
     /// defers applying the shift until playback crosses `seamOutputSeconds` so the clock doesn't jump.
     var onPlaylistShiftRebased: (@Sendable (Double, Double) -> Void)?
-    /// Fires on `PumpExitReason.sourceReplay`; host must re-negotiate a fresh session.
+    /// Fires when no in-engine source reopen can continue the session.
     var onLiveSourceReset: (@Sendable () -> Void)?
+    var onLiveSourceReplayExhausted: (@Sendable () -> Void)?
+    /// A fresh source may change format; the owner ends the old recording before that seam.
+    var onLiveSourceReopening: (@Sendable () -> Void)?
     /// AE#627: the first join read video for the whole keyframe wait and found no point the native
     /// route can open a segment on. Reopening joins the same bitstream, so the engine decides between
     /// the software path and telling the host (`escalateLiveReopenExhaustion`) instead. Unset, the
@@ -2655,6 +2658,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         retentionClaim = nil
         let p = producer
         producer = nil
+        liveRecoveryProducer = nil
         let s = server
         server = nil
         let c = cache
@@ -3006,6 +3010,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Barren-cycle backstop: an open-then-starve source would cycle forever without this.
     /// After `maxBarrenReopenCycles` consecutive cycles producing no new segment, stop reviving.
     var barrenReopenCycles = 0
+    var liveRecoveryHasVerifiedReplay = false
+    var liveSourceRequiresNegotiation = false
+    var liveRecoveryProducer: HLSSegmentProducer?
     var lastReopenSegmentCount = -1
     static let maxBarrenReopenCycles = 3
     /// Live muxerFailed in-place rebuilds, bounded by progress like the reopen cycles above: new segments
