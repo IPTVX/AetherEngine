@@ -75,6 +75,12 @@ struct APACEncodePipelineTests {
         pipeline.reset()
         submit(pipeline, &buffer, chunks: 0..<10, origin: 480_000)
         let out = pipeline.finish()
+
+        let fresh = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+                                       bufferFrames: Self.chunk)
+        var freshBuffer = fresh.takeInitialBuffer()
+        submit(fresh, &freshBuffer, chunks: 0..<10, origin: 480_000)
+        #expect(out.packets.map(\.data) == fresh.finish().packets.map(\.data), "the encoder really started over")
         #expect(out.errors.isEmpty)
         #expect(out.packets.first?.pts == 480_000, "nothing from before the reset survives")
         #expect(out.packets.map(\.pts) == out.packets.indices.map { 480_000 + Int64($0) * 1024 })
@@ -114,21 +120,48 @@ struct APACEncodePipelineTests {
         #expect(out.packets.map(\.pts) == out.packets.indices.map { Int64(6 * Self.chunk) + Int64($0) * 1024 })
     }
 
-    @Test("a shift moves every packet stamped after it")
+    @Test("a shift moves every packet stamped after it, the encoder's held-back ones included")
     func shiftMovesLaterPackets() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let reference = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+                                           bufferFrames: Self.chunk)
+        var referenceBuffer = reference.takeInitialBuffer()
+        submit(reference, &referenceBuffer, chunks: 0..<5, origin: 0)
+        let unshifted = reference.settle().packets.count
+
+        let pipeline = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+                                          bufferFrames: Self.chunk)
+        var buffer = pipeline.takeInitialBuffer()
+        submit(pipeline, &buffer, chunks: 0..<5, origin: 0)
+        pipeline.shift(by: 4800)
+        submit(pipeline, &buffer, chunks: 5..<10, origin: 4800)
+        let pts = pipeline.finish().packets.map(\.pts)
+        #expect(pts[..<unshifted].elementsEqual((0..<unshifted).map { Int64($0) * 1024 }))
+        #expect(pts[unshifted...].elementsEqual((unshifted..<pts.count).map { 4800 + Int64($0) * 1024 }))
+    }
+
+    @Test("a shift between runs leaves the next run on its own chunk's position")
+    func shiftBetweenRunsIsTheCallersPosition() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let pipeline = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
                                           bufferFrames: Self.chunk)
         var buffer = pipeline.takeInitialBuffer()
-        submit(pipeline, &buffer, chunks: 0..<10, origin: 0)
-        let before = pipeline.finish().packets.count
-        pipeline.reset()
-        submit(pipeline, &buffer, chunks: 0..<10, origin: 0)
+        submit(pipeline, &buffer, chunks: 0..<3, origin: 0)
+        pipeline.restart()
+        _ = pipeline.settle()
         pipeline.shift(by: 4800)
-        let pts = pipeline.finish().packets.map(\.pts)
-        #expect(pts.count == before)
-        let moved = try #require(pts.firstIndex { $0 % 1024 != 0 })
-        #expect(pts[..<moved].elementsEqual((0..<moved).map { Int64($0) * 1024 }))
-        #expect(pts[moved...].elementsEqual((moved..<pts.count).map { 4800 + Int64($0) * 1024 }))
+        submit(pipeline, &buffer, chunks: 0..<3, origin: 200_000)
+        #expect(pipeline.finish().packets.first?.pts == 200_000)
+    }
+
+    @Test("closing with work queued waits for it and leaves nothing running")
+    func closeWaitsForQueuedWork() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let pipeline = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+                                          bufferFrames: Self.chunk)
+        var buffer = pipeline.takeInitialBuffer()
+        submit(pipeline, &buffer, chunks: 0..<8, origin: 0)
+        pipeline.close()
+        #expect(!pipeline.collect().packets.isEmpty, "every queued chunk ran before close returned")
     }
 }

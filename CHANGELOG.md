@@ -16,7 +16,8 @@ the public-API contract.
   each take about a core and ran one after the other on the producer thread, which is what a seek
   past the produced range waited for. The bridge now hands each rendered chunk to a serial encode
   queue and decodes the next one meanwhile: Dolby's Unfold demo went from 2.73 s to 1.60 s
-  (M1, release), 10x to 17x real time. Same packets, same timestamps (#731).
+  (M1, release), 10x to 17x real time. The producer waits for the queue before each cut, so every
+  segment carries the same audio packets as before, byte for byte (#731).
 
 ## [7.34.0] - 2026-10-11
 

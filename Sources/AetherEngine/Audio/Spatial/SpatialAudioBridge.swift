@@ -183,7 +183,8 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
             noteDecoderSelfReset()
             noteFeedFailure(error)
             var results: [UnsafeMutablePointer<AVPacket>] = []
-            collectEncoded(into: &results)
+            // This feed has already counted as failed.
+            collectEncoded(into: &results, noteFailure: false)
             return results
         }
         // The anchor is the first packet the decoder actually took, so its input offsets count from
@@ -249,6 +250,16 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
             "[SpatialAudioBridge] ERROR: AE#641 the TrueHD object decoder has produced nothing: "
             + "\(stats.summary)", category: .session)
         onDecoderProducedNothing?(stats)
+    }
+
+    func settle() -> [UnsafeMutablePointer<AVPacket>] {
+        opLock.lock()
+        defer { opLock.unlock() }
+        var results: [UnsafeMutablePointer<AVPacket>] = []
+        let settled = pipeline.settle()
+        wrap(settled.packets, into: &results)
+        noteEncodeErrors(settled.errors)
+        return results
     }
 
     func flush() -> [UnsafeMutablePointer<AVPacket>] {
@@ -383,12 +394,19 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// The longest gap filled with silence rather than by restarting the encoder.
     private static let maxSilenceFillFrames = sampleRate * 5
 
+    /// In chunks, like rendered audio: a 5 s fill handed over in one piece would hold the encoder
+    /// for its whole length and grow every pooled buffer to it.
     private func encodeSilence(frames: Int) {
-        guard frames > 0 else { return }
-        output.ensureCapacity(pendingFrames + frames, keeping: pendingFrames)
-        for plane in output.planes { (plane + pendingFrames).update(repeating: 0, count: frames) }
-        pendingFrames += frames
-        if pendingFrames >= Self.encodeChunkFrames { encodePending() }
+        var remaining = frames
+        while remaining > 0 {
+            let n = min(remaining, max(Self.encodeChunkFrames - pendingFrames, 0))
+            if n == 0 { encodePending(); continue }
+            output.ensureCapacity(pendingFrames + n, keeping: pendingFrames)
+            for plane in output.planes { (plane + pendingFrames).update(repeating: 0, count: n) }
+            pendingFrames += n
+            remaining -= n
+            if pendingFrames >= Self.encodeChunkFrames { encodePending() }
+        }
     }
 
     /// Hand the rendered frames to the encoder's queue. Its packets come back through
@@ -408,18 +426,18 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     }
 
     /// Caller holds `opLock`. Everything the encoder has finished since the last call.
-    private func collectEncoded(into results: inout [UnsafeMutablePointer<AVPacket>]) {
+    private func collectEncoded(into results: inout [UnsafeMutablePointer<AVPacket>], noteFailure: Bool = true) {
         let encoded = pipeline.collect()
         wrap(encoded.packets, into: &results)
-        noteEncodeErrors(encoded.errors)
+        noteEncodeErrors(encoded.errors, noteFailure: noteFailure)
     }
 
     /// Caller holds `opLock`. A failed chunk is a gap the pipeline already stepped over; it counts
     /// as a failed feed for the log.
-    private func noteEncodeErrors(_ errors: [Error]) {
+    private func noteEncodeErrors(_ errors: [Error], noteFailure: Bool = true) {
         guard let first = errors.first else { return }
         stats.encodeErrors += errors.count
-        noteFeedFailure(first)
+        if noteFailure { noteFeedFailure(first) }
     }
 
     /// The level line, with the limiter's work over the same window when it had any.

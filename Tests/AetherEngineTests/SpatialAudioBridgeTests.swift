@@ -250,6 +250,47 @@ struct SpatialAudioBridgeTests {
         #expect(emitted > 0, "the decoder found its sync and the bridge encoded")
     }
 
+    /// The encoder runs on its own queue, so a feed returns what earlier chunks encoded. Settled
+    /// before every cut, the split is the one a synchronous encode makes.
+    @Test("settled after every feed, the bridge returns a synchronous encode's packets at each point")
+    func settleRestoresTheSynchronousSplit() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let pipelined = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: ClickDecoder(clickFrame: 30_000))
+        let settledEachFeed = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: ClickDecoder(clickFrame: 30_000))
+        defer { pipelined.close(); settledEachFeed.close() }
+        func take(_ packets: [UnsafeMutablePointer<AVPacket>]) -> [(pts: Int64, data: Data)] {
+            packets.map { fp in
+                defer { var p: UnsafeMutablePointer<AVPacket>? = fp; trackedPacketFree(&p) }
+                return (fp.pointee.pts, Data(bytes: fp.pointee.data, count: Int(fp.pointee.size)))
+            }
+        }
+        func feedOne(_ bridge: SpatialAudioBridge, ms: Int64) throws -> [(pts: Int64, data: Data)] {
+            let pkt = av_packet_alloc()!
+            defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+            _ = av_new_packet(pkt, 24)
+            pkt.pointee.pts = ms
+            pkt.pointee.dts = ms
+            return take(try bridge.feed(packet: pkt))
+        }
+        var a: [(pts: Int64, data: Data)] = [], b: [(pts: Int64, data: Data)] = []
+        for round in 0..<4 {
+            for i in 0..<25 {
+                let ms = Int64(round * 25 + i) * 20
+                a += try feedOne(pipelined, ms: ms)
+                b += try feedOne(settledEachFeed, ms: ms) + take(settledEachFeed.settle())
+            }
+            a += take(pipelined.settle())
+            #expect(a.map(\.pts) == b.map(\.pts), "after a cut both hold the same packets")
+        }
+        a += take(pipelined.flush())
+        b += take(settledEachFeed.flush())
+        #expect(!a.isEmpty)
+        #expect(a.map(\.pts) == b.map(\.pts))
+        #expect(a.map(\.data) == b.map(\.data))
+    }
+
     @Test("a producer restart re-anchors on the new position")
     func restartReanchors() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }

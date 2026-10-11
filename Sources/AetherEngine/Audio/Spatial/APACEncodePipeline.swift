@@ -149,6 +149,12 @@ final class APACEncodePipeline: @unchecked Sendable {
         return out
     }
 
+    /// Wait for every queued job, then collect.
+    func settle() -> (packets: [StampedPacket], errors: [Error]) {
+        close()
+        return collect()
+    }
+
     /// Wait for every queued job.
     func close() {
         cond.lock()

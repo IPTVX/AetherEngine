@@ -2395,6 +2395,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // the NEW producer's position. Cutting on it would adopt this pump's partial segment under
         // its full index; the teardown rule decides what happens to the in-flight segment instead.
         if checkShouldStop() { return nil }
+        // #731: audio the bridge is still encoding belongs to the segment being cut.
+        if let audio = audioConfig, let bridge = audio.bridge {
+            for fp in bridge.settle() {
+                var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+                fp.pointee.stream_index = muxer.audioOutputStreamIndex
+                av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+                let prime = copyAudioPrimeCandidate(fp)
+                if muxer.writePacket(fp).rc >= 0, let prime { audioMoovPrimeFrame = prime }
+                trackedPacketFree(&fpVar)
+            }
+        }
 
         switch muxer.cutFragmentForNextSegment(newIdx) {
         case .completed(let path, let bytesWritten):
