@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.34.0] - 2026-10-11
+
 ### Added
 
 - **TrueHD Atmos keeps its heights.** Apple TV cannot bitstream TrueHD, so the bridge decoded its
