@@ -55,7 +55,7 @@ let package = Package(
         // TrueHD decoder that also decodes the Atmos object presentation (beds, objects, OAMD) for
         // `objectAudioRendering` (#731). The Rust `truehd` crate (Apache-2.0) behind a C API, prebuilt
         // as an xcframework like LibDovi so consumers need no Rust. Pinned to the minor for the same reason.
-        .package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "2.0.0")),  // 2.0.0: transferred from Silo-Server/SiloObjectAudio and renamed (product TrueHD), rebuilt from source; same decoder as SiloObjectAudio 1.0.0
+        .package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "2.1.0")),  // 2.1.0: x86_64 in the iOS simulator slice, so a generic iOS Simulator build of a host links; same decoder; 2.0.0: transferred from Silo-Server/SiloObjectAudio and renamed (product TrueHD), rebuilt from source; same decoder as SiloObjectAudio 1.0.0
     ],
     targets: [
         .target(

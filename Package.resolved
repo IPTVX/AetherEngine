@@ -1,5 +1,5 @@
 {
-  "originHash" : "33f9ac72ed74a693d2455ce40b5d6f93daea61c61bf85012dffd7d8489ab884a",
+  "originHash" : "7a9556126bbb5ea825e9ca192f45967b9fdd59b545a3697f80224d1030225a39",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/superuser404notfound/LibTrueHD",
       "state" : {
-        "revision" : "7ac6b379cb5d77ff5f424bc9daa17131b044a962",
-        "version" : "2.0.0"
+        "revision" : "53ac5dc1ba87e098a4f96172e3490f26a152baf3",
+        "version" : "2.1.0"
       }
     },
     {
