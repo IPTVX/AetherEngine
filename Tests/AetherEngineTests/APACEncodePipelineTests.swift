@@ -162,6 +162,12 @@ struct APACEncodePipelineTests {
         var buffer = pipeline.takeInitialBuffer()
         submit(pipeline, &buffer, chunks: 0..<8, origin: 0)
         pipeline.close()
-        #expect(!pipeline.collect().packets.isEmpty, "every queued chunk ran before close returned")
+        let closed = pipeline.collect().packets.count
+
+        let reference = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+                                           bufferFrames: Self.chunk)
+        var referenceBuffer = reference.takeInitialBuffer()
+        submit(reference, &referenceBuffer, chunks: 0..<8, origin: 0)
+        #expect(closed == reference.settle().packets.count, "every queued chunk ran before close returned")
     }
 }

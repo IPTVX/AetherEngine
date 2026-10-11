@@ -2395,18 +2395,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // the NEW producer's position. Cutting on it would adopt this pump's partial segment under
         // its full index; the teardown rule decides what happens to the in-flight segment instead.
         if checkShouldStop() { return nil }
-        // #731: audio the bridge is still encoding belongs to the segment being cut.
-        if let audio = audioConfig, let bridge = audio.bridge {
-            for fp in bridge.settle() {
-                var fpVar: UnsafeMutablePointer<AVPacket>? = fp
-                fp.pointee.stream_index = muxer.audioOutputStreamIndex
-                av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
-                let prime = copyAudioPrimeCandidate(fp)
-                if muxer.writePacket(fp).rc >= 0, let prime { audioMoovPrimeFrame = prime }
-                trackedPacketFree(&fpVar)
-            }
-        }
-
         switch muxer.cutFragmentForNextSegment(newIdx) {
         case .completed(let path, let bytesWritten):
             EngineLog.emit(
@@ -4270,6 +4258,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                     // Live: keyframe cutter uses shifted pts. VOD: unused; routing uses prev.dts at look-behind site.
                     let isVideoKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+                    // #731: a bridge that encodes on its own queue hands packets back a feed or more
+                    // late. Routing is decided by the cutter and the open muxer, and both move only on
+                    // a keyframe read here or on writing the look-behind keyframe below, so settling
+                    // the bridge first routes every packet as a synchronous encode routed it.
+                    if !isLive, let audio = audioConfig, let bridge = audio.bridge,
+                       isVideoKeyframe
+                        || pendingVideoPkt.map({ ($0.pointee.flags & AV_PKT_FLAG_KEY) != 0 }) == true {
+                        if !writeBridgedAudio(bridge.settle(), audio: audio) {
+                            exitReason = .muxerFailed
+                            break readLoop
+                        }
+                    }
                     // VOD now cuts keyframe-gated like live (and like FFmpeg's hls muxer): a segment opens
                     // at the IRAP that reaches its plan boundary, so the IRAP is the segment's first sample
                     // and its open-GOP RASL leading pictures stay with it (#92). Routing by DTS against PTS
@@ -4393,28 +4393,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             continue
                         }
-                        var bridgedMuxerGone = false
-                        for fp in flacPackets {
-                            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
-                            if bridgedMuxerGone {
-                                trackedPacketFree(&fpVar)
-                                continue
-                            }
-                            let fpSeg = bridgedAudioSegmentIndex(fp, audio: audio)
-                            guard let muxer = ensureMuxer(forSegmentIndex: fpSeg) else {
-                                trackedPacketFree(&fpVar)
-                                bridgedMuxerGone = true
-                                continue
-                            }
-                            fp.pointee.stream_index = muxer.audioOutputStreamIndex
-                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
-                            let prime = copyAudioPrimeCandidate(fp)
-                            if muxer.writePacket(fp).rc >= 0, let prime {
-                                audioMoovPrimeFrame = prime
-                            }
-                            trackedPacketFree(&fpVar)
-                        }
-                        if bridgedMuxerGone {
+                        if !writeBridgedAudio(flacPackets, audio: audio) {
                             exitReason = .muxerFailed
                             break readLoop
                         }
@@ -4589,6 +4568,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// cutter; everything else is routed by the packet's own time against the plan. One helper for the
     /// per-feed and the end-of-file flush, because the flush missing the sequential rule opened a plan
     /// index the cutter never reached and cost the archive its final segment (audit SEG-103).
+    /// Route and mux packets a bridge returned. False when the muxer is gone; every packet is freed
+    /// either way.
+    private func writeBridgedAudio(_ packets: [UnsafeMutablePointer<AVPacket>], audio: AudioConfig) -> Bool {
+        var muxerGone = false
+        for fp in packets {
+            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+            defer { trackedPacketFree(&fpVar) }
+            if muxerGone { continue }
+            guard let muxer = ensureMuxer(forSegmentIndex: bridgedAudioSegmentIndex(fp, audio: audio)) else {
+                muxerGone = true
+                continue
+            }
+            fp.pointee.stream_index = muxer.audioOutputStreamIndex
+            av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+            let prime = copyAudioPrimeCandidate(fp)
+            if muxer.writePacket(fp).rc >= 0, let prime {
+                audioMoovPrimeFrame = prime
+            }
+        }
+        return !muxerGone
+    }
+
     private func bridgedAudioSegmentIndex(_ packet: UnsafeMutablePointer<AVPacket>, audio: AudioConfig) -> Int {
         if isLive { return liveCurrentSegmentIndex }
         if audioFollowsVideoCut { return vodCutter.current }
