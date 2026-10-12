@@ -1145,17 +1145,26 @@ public final class AetherEngine: ObservableObject {
     /// - keepVideoAlive: result of shouldKeepVideoAlive / shouldKeepVideoAliveTV.
     /// - pipActive: a live PiP window renders the SW layer's frames, so the SW host must keep
     ///   decoding video in background instead of dropping to audio-only (SW-PiP Phase A).
+    /// - softwareHostHasAudio: AE#739, the SW host renders audio of its own. Audio-only mode paces the
+    ///   demux loop on the audio renderer alone, so without audio nothing paces it: the loop dropped
+    ///   the rest of the file within moments and parked the clock at end of media in the background.
+    ///   Such a session has nothing to keep playing and is released like a paused one.
     nonisolated static func backgroundAction(
         isAudioBackend: Bool,
         hasSoftwareHost: Bool,
+        softwareHostHasAudio: Bool,
         keepVideoAlive: Bool,
         pipActive: Bool,
         state: PlaybackState
     ) -> BackgroundAction {
         if isAudioBackend { return .doNothing }
         if keepVideoAlive {
-            if hasSoftwareHost { return pipActive ? .doNothing : .enterSoftwareAudioOnly }
-            return .doNothing
+            if hasSoftwareHost {
+                if pipActive { return .doNothing }
+                if softwareHostHasAudio { return .enterSoftwareAudioOnly }
+            } else {
+                return .doNothing
+            }
         }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
@@ -7895,6 +7904,7 @@ public final class AetherEngine: ObservableObject {
         let action = Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
+            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state
@@ -7910,6 +7920,10 @@ public final class AetherEngine: ObservableObject {
         case .perform(.enterSoftwareAudioOnly):
             softwareHost?.enterBackgroundAudioOnly()
         case .perform(.teardownVideo):
+            if keepAlive {
+                EngineLog.emit("[AetherEngine] AE#739 the software host renders no audio, releasing it "
+                               + "instead of entering background audio-only", category: .engine)
+            }
             await teardownVideoForBackground()
         case .deferTeardown(let seconds):
             #if os(iOS)
@@ -8022,6 +8036,7 @@ public final class AetherEngine: ObservableObject {
         return Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
+            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state
