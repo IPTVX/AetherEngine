@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Testing
 import AetherLibavutil
 import AetherLibavcodec
@@ -49,14 +50,14 @@ struct LiveSourceReplayTests {
                          headFrames: Int = 8,
                          replayStartFrame: Int = 0) throws -> (head: Data, tail: Data,
                                                               replay: Data, diverged: Data) {
-        let aud = Data([0, 0, 0, 1, 9, 0xF0])
+        let aud = Data([0, 0, 0, 1, 9])
         var offsets: [Int] = []
         var position = 0
         while let range = data.range(of: aud, in: position..<data.count) {
             offsets.append(range.lowerBound)
             position = range.upperBound
         }
-        #expect(offsets.count == 16)
+        #expect(offsets.count > headFrames)
         let seam = try #require(offsets.dropFirst(headFrames).first) / 188 * 188
         let head = Data(data[..<seam])
         let replayStart = replayStartFrame == 0 ? 0 : offsets[replayStartFrame] / 188 * 188
@@ -64,7 +65,7 @@ struct LiveSourceReplayTests {
         var diverged = replay
         for offset in offsets.dropFirst(divergenceFrame).prefix(divergenceFrames) {
             let changedAUD = offset + 5 - replayStart
-            if changedAUD < diverged.count { diverged[changedAUD] = 0xD0 }
+            if changedAUD >= 0 && changedAUD < diverged.count { diverged[changedAUD] = 0xD0 }
         }
         return (head, Data(data[seam...]), replay, diverged)
     }
@@ -378,6 +379,83 @@ struct LiveSourceReplayTests {
         }
     }
 
+
+    /// Decode the actual admitted/remuxed media, including delayed B-frames. Packet counts
+    /// alone cannot detect a lost reference picture or a broken fMP4 sample description.
+    private func decodedPictures(_ bytes: Data, format: String, filterReplay: Bool) throws -> [SHA256.Digest] {
+        let demuxer = Demuxer()
+        try demuxer.open(reader: Reader(bytes), formatHint: format)
+        defer { demuxer.close() }
+        let video = demuxer.videoStreamIndex
+        let stream = try #require(demuxer.stream(at: video))
+        let codec = try #require(avcodec_find_decoder(stream.pointee.codecpar.pointee.codec_id))
+        let context = try #require(avcodec_alloc_context3(codec))
+        let frame = try #require(av_frame_alloc())
+        defer {
+            var c: UnsafeMutablePointer<AVCodecContext>? = context; avcodec_free_context(&c)
+            var f: UnsafeMutablePointer<AVFrame>? = frame; av_frame_free(&f)
+        }
+        #expect(avcodec_parameters_to_context(context, stream.pointee.codecpar) >= 0)
+        #expect(avcodec_open2(context, codec, nil) >= 0)
+        let tb = stream.pointee.time_base
+        let audio = demuxer.audioStreamIndex
+        let at = try #require(demuxer.stream(at: audio)).pointee.time_base
+        let admission = LiveReplayPacketReader(videoIndex: video, audioIndex: audio,
+            videoTimeBase: Double(tb.num) / Double(tb.den), audioTimeBase: Double(at.num) / Double(at.den))
+        var hashes: [SHA256.Digest] = []
+        func drain() {
+            while avcodec_receive_frame(context, frame) >= 0 {
+                #expect(frame.pointee.decode_error_flags == 0)
+                #expect(frame.pointee.format == AV_PIX_FMT_YUV420P.rawValue)
+                var pixels = Data()
+                for (plane, stride, divisor) in [(frame.pointee.data.0, frame.pointee.linesize.0, 1),
+                                                  (frame.pointee.data.1, frame.pointee.linesize.1, 2),
+                                                  (frame.pointee.data.2, frame.pointee.linesize.2, 2)] {
+                    guard let plane else { Issue.record("missing decoded plane"); continue }
+                    for row in 0..<(Int(frame.pointee.height) / divisor) {
+                        pixels.append(plane + row * Int(stride), count: Int(frame.pointee.width) / divisor)
+                    }
+                }
+                hashes.append(SHA256.hash(data: pixels))
+                av_frame_unref(frame)
+            }
+        }
+        while let packet = try (filterReplay ? admission.read(from: { try demuxer.readPacket() }) : demuxer.readPacket()) {
+            defer { var p: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&p) }
+            if packet.pointee.stream_index == video {
+                #expect(avcodec_send_packet(context, packet) >= 0)
+                drain()
+            }
+        }
+        #expect(avcodec_send_packet(context, nil) >= 0)
+        drain()
+        return hashes
+    }
+
+    @Test("long GOP replay preserves every decoded picture on software and remux paths", arguments: [false, true])
+    func longGOPDecodedContinuity(damaged: Bool) async throws {
+        let bytes = try LongGOPTransportStreamFixture.data()
+        let clip = try fixture(data: bytes, headFrames: 620, replayStartFrame: 120)
+        var head = clip.head
+        if damaged {
+            let aud = Data([0, 0, 0, 1, 9])
+            let last = try #require(head.range(of: aud, options: .backwards))
+            let previous = try #require(head.range(of: aud, options: .backwards, in: 0..<last.lowerBound))
+            head[previous.lowerBound / 188 * 188 + 1] |= 0x80
+        }
+        let expected = try decodedPictures(bytes, format: "mpegts", filterReplay: false)
+        #expect(expected.count == 800)
+        let replay = head + clip.replay + clip.tail
+        #expect(try decodedPictures(replay, format: "mpegts", filterReplay: true) == expected)
+        let cache = SegmentCache(forwardWindow: 32, backwardWindow: 32)
+        defer { cache.close() }
+        _ = try await run(replay, expected: "eof", expectedRebases: 0, retainedCache: cache)
+        var remuxed = try #require(cache.initData(versionID: 0))
+        for index in 0..<cache.count {
+            remuxed.append(try #require(cache.fetch(index: index, timeout: 0)))
+        }
+        #expect(try decodedPictures(remuxed, format: "mov", filterReplay: false) == expected)
+    }
 
     /// 8 s, 16x16 H.264 Baseline at 2 fps + AAC-LC stereo at 48 kHz, no B-frames.
     /// Regenerate with the TinyTransportStreamFixture command plus

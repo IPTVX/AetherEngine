@@ -25,6 +25,13 @@ the public-API contract.
   before the first frame and kept it there across a seek. The 2 s stream is digital silence
   written from the specifications by `Scripts/make-silent-atmos.swift`. A media services reset (#597)
   drops the activator's player along with the engine's, so the next session builds a fresh one.
+- **Audio progressing without video:** recover a previously visible native layer that remains
+  unready despite buffered, advancing foreground playback. Bound consumer repairs and preserve
+  the current live position, source and DVR; exclude PiP, seeks, hidden surfaces and starvation.
+  Detach optional frame diagnostics before PiP takes the layer, and log presentation eligibility
+  and repair results separately from decoded-frame sampling. Long-GOP H.264/AAC regressions
+  verify decoded pictures through software admission and native remuxing after damaged replay.
+
 - **Live damaged transport boundaries:** hold a flagged outgoing video packet until returning
   media proves replay and can replace it intact. Preserve late good pictures once, in decode
   order, without moving the DVR timeline backwards or dropping ambiguous fresh media.

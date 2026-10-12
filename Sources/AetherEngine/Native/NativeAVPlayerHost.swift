@@ -262,6 +262,22 @@ final class NativeAVPlayerHost {
     private var videoFrameProgress = VideoFrameProgress()
     private var videoFrameSampleAt: Double?
     private var videoFrameSummaryAt: Double?
+    private var videoPresentation = VideoPresentationProgress()
+    private var hasPresentedVideo = false
+    private var loadedVideoRanges: [(Double, Double)] = []
+    private var loadedVideoObservation: NSKeyValueObservation?
+    private var videoHealthSummaryAt: Double?
+    var onVideoPresentationRecovery: ((VideoPresentationProgress.Action, Double) -> Void)?
+    var pictureInPictureActive = false {
+        didSet {
+            // Detach BEFORE AVKit takes the layer, not on the first background polling tick.
+            if pictureInPictureActive, let output = diagnosticVideoOutput {
+                playerItem?.remove(output)
+                diagnosticVideoOutput = nil
+                videoFrameProgress.reset()
+            }
+        }
+    }
     private var statusObservation: NSKeyValueObservation?
     /// One-shot guard; route capability check runs after first .playing, not readyToPlay -- early sampling false-positived the downmix warning on stereo-idle sinks (issue #24).
     private var didSampleSettledRoute = false
@@ -542,6 +558,7 @@ final class NativeAVPlayerHost {
             Task { @MainActor in
                 guard let self, self.sessionID == sid else { return }
                 self.isVideoReadyForDisplay = ready
+                if ready { self.hasPresentedVideo = true }
             }
         }
 
@@ -615,6 +632,18 @@ final class NativeAVPlayerHost {
                 guard let self, self.sessionID == sid else { return }
                 self.seekableEnd = end
                 self.seekableStart = start
+            }
+        }
+
+        // Observe on the item's queue; do not poll a potentially wedged media server on main.
+        loadedVideoObservation = item.observe(\.loadedTimeRanges, options: [.initial, .new]) { [weak self] item, change in
+            let ranges = (change.newValue ?? item.loadedTimeRanges).map { value in
+                let r = value.timeRangeValue
+                return (r.start.seconds, (r.start + r.duration).seconds)
+            }
+            Task { @MainActor in
+                guard let self, self.sessionID == sid else { return }
+                self.loadedVideoRanges = ranges
             }
         }
 
@@ -867,6 +896,7 @@ final class NativeAVPlayerHost {
                 // seekInFlight suppresses currentTime: AVPlayer still reports pre-seek clock until physical landing (issue #37).
                 guard !self.seekInFlight else { return }
                 self.currentTime = value
+                self.observeVideoPresentation(clock: value)
             }
         }
 
@@ -2209,13 +2239,49 @@ final class NativeAVPlayerHost {
         }
     }
 
+    private func observeVideoPresentation(clock: Double) {
+        var foreground = true
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        foreground = UIApplication.shared.applicationState == .active
+        #endif
+        var eligible = foreground && !pictureInPictureActive && hasPresentedVideo
+            && playerLayer.superlayer != nil && !playerLayer.isHidden && playerLayer.opacity > 0
+            && !playerLayer.bounds.isEmpty && isReady && failure == nil && playIntent
+            && !seekInFlight && !mountSeekPending && avPlayer.timeControlStatus == .playing
+        #if !os(visionOS)
+        eligible = eligible && !avPlayer.isExternalPlaybackActive
+        #endif
+        let ahead = Self.contiguousBufferedEnd(ranges: loadedVideoRanges, now: clock) - clock
+        eligible = eligible && ahead >= 1
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        let duration = detectedVideoFrameRate.flatMap { $0 > 0 ? 1 / $0 : nil }
+        let age = videoFrameProgress.age(at: now)
+        // An output which has never yielded a frame is not evidence of decoder failure.
+        let frozenOutput = videoFrameProgress.samples >= 3
+            && (age ?? 0) >= Swift.max(0.35, 3 * (duration ?? 0))
+        // Diagnostics remain observational: output sampling alone must never trigger a seek.
+        let missing = !isVideoReadyForDisplay
+        let previousAttempts = videoPresentation.attempts
+        let action = videoPresentation.observe(clock: clock, now: now, eligible: eligible,
+            missingVideo: missing, frameDuration: duration)
+        let recovered = previousAttempts > 0 && videoPresentation.attempts == 0
+        let summarize = hasPresentedVideo && playIntent && (missing || frozenOutput)
+            && now - (videoHealthSummaryAt ?? -.infinity) >= 5
+        if action != nil || recovered || summarize {
+            videoHealthSummaryAt = now
+            let phase = action?.rawValue ?? (recovered ? "resumed" : "sample")
+            EngineLog.emit("[NativeVideoHealth] action=\(phase) sid=\(sessionID) clock=\(String(format: "%.3f", clock)) buffer=\(String(format: "%.3f", ahead)) layerReady=\(isVideoReadyForDisplay) frameAge=\(String(format: "%.3f", age ?? -1)) samples=\(videoFrameProgress.samples) attempt=\(videoPresentation.attempts) pip=\(pictureInPictureActive) foreground=\(foreground) eligible=\(eligible)", category: .engine)
+        }
+        if let action { onVideoPresentationRecovery?(action, clock) }
+    }
+
     private func sampleDiagnosticVideo(item: AVPlayerItem, session: Int) -> Bool {
         guard sessionID == session, playerItem === item, avPlayer.currentItem === item else { return false }
         var foreground = true
         #if os(iOS) || os(tvOS) || os(visionOS)
         foreground = UIApplication.shared.applicationState == .active
         #endif
-        var eligible = foreground && detectedVideoFormat == .sdr && isReady
+        var eligible = foreground && !pictureInPictureActive && detectedVideoFormat == .sdr && isReady
             && !seekInFlight && !mountSeekPending
         #if !os(visionOS)
         eligible = eligible && !avPlayer.isExternalPlaybackActive
@@ -2230,6 +2296,7 @@ final class NativeAVPlayerHost {
             return true
         }
         if diagnosticVideoOutput == nil {
+            guard isVideoReadyForDisplay else { return true }
             let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
                 kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
             ])
@@ -2302,6 +2369,11 @@ final class NativeAVPlayerHost {
         waitingReasonObservation = nil
         seekableObservation?.invalidate()
         seekableObservation = nil
+        loadedVideoObservation?.invalidate()
+        loadedVideoObservation = nil
+        loadedVideoRanges = []
+        videoHealthSummaryAt = nil
+        if !inPlaceSwap { videoPresentation = VideoPresentationProgress(); hasPresentedVideo = false }
         layerReadyObservation?.invalidate()
         layerReadyObservation = nil
         for obs in notificationObservers {

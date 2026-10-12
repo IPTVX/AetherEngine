@@ -2,6 +2,58 @@ import Testing
 @testable import AetherEngine
 
 struct VideoProgressTests {
+    @Test("audio progress with a missing video presentation repairs twice, without an endless reload loop")
+    func presentationRecovery() {
+        var monitor = VideoPresentationProgress()
+        var actions: [VideoPresentationProgress.Action] = []
+        for tick in 0..<200 {
+            let t = Double(tick) / 10
+            if let action = monitor.observe(clock: 400 + t, now: t, eligible: true,
+                missingVideo: true, frameDuration: 0.04) { actions.append(action) }
+        }
+        #expect(actions == [.nudge, .reload])
+        // Only a sustained healthy presentation rearms repairs; an item swap's short rise doesn't.
+        for tick in 200..<260 {
+            let t = Double(tick) / 10
+            #expect(monitor.observe(clock: 400 + t, now: t, eligible: true,
+                missingVideo: false, frameDuration: 0.04) == nil)
+        }
+        #expect(monitor.attempts == 0)
+    }
+
+    @Test("short video glitches, a stopped clock and ineligible presentation do not seek")
+    func presentationExclusions() {
+        for mode in 0..<3 {
+            var monitor = VideoPresentationProgress()
+            for tick in 0..<100 {
+                let t = Double(tick) / 10
+                #expect(monitor.observe(clock: mode == 0 ? 100 : 100 + t, now: t,
+                    eligible: mode != 1, missingVideo: mode != 2 || tick.isMultiple(of: 10),
+                    frameDuration: 0.04) == nil)
+            }
+        }
+    }
+
+    @Test("seeks, delayed observations and low frame rates restart the video repair grace")
+    func presentationDiscontinuities() {
+        var monitor = VideoPresentationProgress()
+        for tick in 0..<20 {
+            let t = Double(tick) / 10
+            #expect(monitor.observe(clock: t, now: t, eligible: true,
+                missingVideo: true, frameDuration: 0.04) == nil)
+        }
+        #expect(monitor.observe(clock: 100, now: 5, eligible: true,
+            missingVideo: true, frameDuration: 0.04) == nil)
+        #expect(monitor.observe(clock: 100.1, now: 5.1, eligible: true,
+            missingVideo: true, frameDuration: 0.04) == nil)
+        monitor = VideoPresentationProgress()
+        for tick in 0..<50 {
+            let t = Double(tick) / 10
+            #expect(monitor.observe(clock: t, now: t, eligible: true,
+                missingVideo: true, frameDuration: 1) == nil)
+        }
+    }
+
     private func warmed() -> VideoFrameProgress {
         var monitor = VideoFrameProgress()
         for time in [0.0, 0.1, 0.2] {

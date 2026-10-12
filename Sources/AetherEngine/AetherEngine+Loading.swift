@@ -323,11 +323,28 @@ extension AetherEngine {
     /// which is the point, since re-creating it is what breaks AVKit's MediaRemote registration.
     func makeNativeHost() -> NativeAVPlayerHost {
         #if os(tvOS) || os(iOS)
-        return NativeAVPlayerHost(ownsNowPlayingSession: Self.ownsNowPlaying(
+        let host = NativeAVPlayerHost(ownsNowPlayingSession: Self.ownsNowPlaying(
             hostOptIn: ownsVideoNowPlayingSession, role: loadedOptions.sharedOutputRole))
         #else
-        return NativeAVPlayerHost()
+        let host = NativeAVPlayerHost()
         #endif
+        host.pictureInPictureActive = pictureInPictureActive
+        host.onVideoPresentationRecovery = { [weak self, weak host] action, position in
+            guard let self, let host, self.nativeHost === host,
+                  self.state == .playing, !self.pictureInPictureActive,
+                  self.pendingRecoverySeekClockTarget == nil,
+                  !self.liveItemPlacementPending else { return }
+            switch action {
+            case .nudge:
+                self.reengageStalledConsumer(position: position, trigger: "video presentation")
+            case .reload:
+                // A live native URL with no retained session cannot promise this placement.
+                guard !self.isLive || self.nativeVideoSession != nil else { return }
+                self.reloadStalledConsumerItem(position: position,
+                    preserveLivePosition: self.isLive ? self.currentTime : nil)
+            }
+        }
+        return host
     }
 
     /// Replay the staged Now-Playing identity onto a host, and re-assert session ownership. The

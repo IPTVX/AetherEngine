@@ -1,5 +1,47 @@
 import Foundation
 
+/// A progressing audio/item clock is not proof of a progressing video presentation.
+/// The caller excludes PiP (its inline layer may legitimately be unready), external
+/// playback, seeks, hidden surfaces and source starvation before offering an observation.
+struct VideoPresentationProgress {
+    enum Action: String { case nudge, reload }
+    private var suspectClock: Double?
+    private var suspectAt: Double?
+    private var healthyAt: Double?
+    private var lastClock: Double?
+    private var lastObservation: Double?
+    private(set) var attempts = 0
+
+    mutating func observe(clock: Double, now: Double, eligible: Bool,
+                          missingVideo: Bool, frameDuration: Double?) -> Action? {
+        defer { lastClock = clock; lastObservation = now }
+        guard eligible, clock.isFinite, now.isFinite else {
+            suspectClock = nil; suspectAt = nil; healthyAt = nil
+            return nil
+        }
+        if let lastClock, let lastObservation,
+           clock < lastClock || clock - lastClock > 1 || now - lastObservation > 1 {
+            suspectClock = nil; suspectAt = nil; healthyAt = nil
+        }
+        guard missingVideo else {
+            suspectClock = nil; suspectAt = nil
+            if healthyAt == nil { healthyAt = now }
+            // A momentary ready flag after a seek does not buy unlimited repair attempts.
+            if now - (healthyAt ?? now) >= 5 { attempts = 0 }
+            return nil
+        }
+        healthyAt = nil
+        if suspectAt == nil { suspectAt = now; suspectClock = clock }
+        let duration = frameDuration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0
+        let threshold = Swift.max(3, 6 * duration)
+        guard attempts < 2, now - (suspectAt ?? now) >= threshold,
+              clock - (suspectClock ?? clock) >= threshold * 0.8 else { return nil }
+        attempts += 1
+        suspectAt = nil; suspectClock = nil
+        return attempts == 1 ? .nudge : .reload
+    }
+}
+
 /// Decoded-output observations, not a count of frames physically displayed by AVPlayerLayer.
 struct VideoFrameProgress {
     enum Event: Equatable {

@@ -183,6 +183,13 @@ The optional output observer belongs to one item/session, stops on teardown, exc
 ineligible playback modes and discards its state through positioning or inactive rendering.
 It emits bounded progress summaries and gap episodes, without retaining pictures or making
 recovery decisions. Hosts control whether to enable it and where to send its measurements.
+The output is detached before a host-announced PiP transition and only reattached to a ready
+inline layer after PiP ends. Native presentation repair uses layer readiness independently of
+this optional output. Its bounded nudge/item-replacement sequence requires advancing playback,
+resident buffer and an attached foreground surface; it does not reset source history or move a
+DVR viewer to the live edge. In-place item replacement preserves the repair budget, which only
+rearms after sustained healthy presentation. Encoded long-GOP H.264/AAC replay tests decode both
+admitted software packets and remuxed fragments and compare every picture with the original.
 
 ## Software VOD compressed packet cache
 

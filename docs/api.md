@@ -1114,11 +1114,22 @@ as well.
 
 `LoadOptions.nativeVideoFrameDiagnostics` opts into decoded-frame observation on SDR native
 loopback playback. It defaults to `false`; remote bypass, HDR, external playback, mobile
-background activity, pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
+background activity, PiP (including its foreground transition), pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
 samples frame timestamps without suppressing the player layer or retaining pixel buffers.
 `EngineLog` reports output progress, gaps/resumption and observation-task delays. A decoded
 output gap is not proof of a physical screen freeze; unavailable output is reported explicitly,
 and the observation never seeks, retries, changes decoder routing or publishes a playback error.
+
+Native presentation recovery separately watches the player layer's readiness. If a previously
+visible, attached video layer stays unready while foreground playback has both clock progress
+and buffered media, the engine first seeks to its current position and can then replace the
+consumer item in place. It preserves the live source, retained DVR and current position; a live
+replacement is deferred when that position cannot be placed in retained media. Recovery is
+bounded until a sustained healthy presentation rearms it. PiP, external playback, user pauses,
+seeks, hidden surfaces and buffering are excluded. `pictureInPictureActive` must be set before
+the PiP transition starts and cleared when it ends (also on a failed start), so a legitimately
+unready inline layer is never treated as missing video. `EngineLog` reports readiness, buffer,
+PiP/foreground eligibility and repair/resumption separately from optional decoded-output samples.
 
 | Symbol | Notes |
 | --- | --- |
