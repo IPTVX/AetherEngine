@@ -970,6 +970,10 @@ final class MP4SegmentMuxer {
             return nil
         }
 
+        // Drain first, as the cut does. A fragment flush with packets still in the interleaver takes the
+        // first queued packet's DTS as the track end, and when check_pkt had clamped the written samples
+        // above it, movenc's get_cluster_duration aborts the process (StreamX crash 2026-10-10).
+        _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
         _ = av_write_trailer(ctx)
 
