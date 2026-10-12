@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A seek lands on a Blu-ray title whose clips run their clocks over the same range.** A seek over a
+  disc title was a timestamp binary search across the concatenated clips, and when the clips each start
+  their clock at the same value (two clips both from 11.6 s, or the 600 s origin many discs use) the
+  search cannot tell them apart. On *Kotonoha no Niwa* (two clips) the first seek ended the session with
+  `Demuxer: read failed`; on *Himalaya* and *The Road* (three clips) every seek stalled and the playhead
+  stood still. Recognition now also reads each clip's `BDMV/CLIPINF/*.clpi`, and a seek takes the
+  folded title time to its clip, the clip's `in_time` to the clip's own clock, and the EP map to the
+  keyframe's byte: one byte reposition. All three discs then landed every seek (1500, 3000 and 200 s)
+  and played on. A single-clip title seeks the same way, with fewer requests (125 instead of 173 for a
+  start and three seeks on a remote ISO). A title with any clip lacking a readable EP map seeks by
+  timestamp as before.
 
 ## [7.35.0] - 2026-10-12
 

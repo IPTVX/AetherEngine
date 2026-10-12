@@ -78,13 +78,17 @@ struct DiscTitle: Sendable, Equatable {
     /// happens to reach it (#651). Empty when the IFO declares none, nil when it is unreadable: only a
     /// title whose IFO was read gets the short probe, since only then is nothing left to discover.
     let dvdSubpictureStreamIDs: [Int]?
+    /// Blu-ray: each play item's `in_time` (45 kHz, on its clip's own clock), parallel to `bdClipIDs`.
+    /// A seek by the clips' EP maps turns title time back into clip time with it (`DiscSeekTable`).
+    let bdClipInTimes: [UInt64]?
 
     init(id: Int, durationTicks: UInt64, chapters: [DiscChapter] = [],
          bdClipIDs: [String]? = nil, bdClipSubtractTicks: [Int64]? = nil,
          bdClipCumulativeBeforeTicks: [UInt64]? = nil,
          dvdVTSN: Int? = nil, dvdTitleNumber: Int? = nil,
          streamLanguages: [Int: String] = [:],
-         dvdSubpictureStreamIDs: [Int]? = nil) {
+         dvdSubpictureStreamIDs: [Int]? = nil,
+         bdClipInTimes: [UInt64]? = nil) {
         self.id = id
         self.durationTicks = durationTicks
         self.chapters = chapters
@@ -95,6 +99,7 @@ struct DiscTitle: Sendable, Equatable {
         self.dvdTitleNumber = dvdTitleNumber
         self.streamLanguages = streamLanguages
         self.dvdSubpictureStreamIDs = dvdSubpictureStreamIDs
+        self.bdClipInTimes = bdClipInTimes
     }
 }
 
@@ -177,9 +182,13 @@ struct DiscInfo: Sendable {
     /// Per-clip presentation-offset spans for the SELECTED multi-clip Blu-ray title, sorted by
     /// `concatByteStart`. Empty for single-clip / DVD / non-disc sources (Demuxer normalization no-ops).
     let clipTimeline: [ClipSpan]
+    /// The selected Blu-ray title's seek table from its clips' EP maps; nil for DVD, or when a clip has
+    /// no readable CLPI (seeks then search by timestamp).
+    let seekTable: DiscSeekTable?
 
     init(reader: IOReader, formatHint: String, titles: [DiscTitle], selectedTitleIndex: Int,
-         clipTimeline: [ClipSpan] = []) {
+         clipTimeline: [ClipSpan] = [], seekTable: DiscSeekTable? = nil) {
+        self.seekTable = seekTable
         self.reader = reader
         self.formatHint = formatHint
         self.titles = titles

@@ -80,12 +80,18 @@ enum DiscReader {
         }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
         EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) stnLanguages=\(selected.streamLanguages.count)", category: .demux)
+        let clipInfoDir = (try? udf.list(path: ["BDMV", "CLIPINF"])) ?? []
+        let seekTable = buildSeekTable(title: selected, resolved: assembled.resolved) { clip in
+            guard let entry = clipInfoDir.first(where: { $0.name.caseInsensitiveCompare("\(clip).clpi") == .orderedSame }),
+                  let extents = try? udf.extents(of: entry), !extents.isEmpty else { return nil }
+            return readAll(reader, extents)
+        }
         storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
                          formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex,
-                         extents: allExtents, clipTimeline: clipTimeline)
+                         extents: allExtents, clipTimeline: clipTimeline, seekTable: seekTable)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: allExtents),
                         formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex,
-                        clipTimeline: clipTimeline)
+                        clipTimeline: clipTimeline, seekTable: seekTable)
     }
 
     // MARK: - Bounds on what a disc image can make recognition do (audit NET-103)
@@ -167,15 +173,17 @@ enum DiscReader {
     /// Resolves a title's clips into the concatenated extent list plus one `ClipSpan` per resolved clip
     /// (byte start in the concat stream, and how far to pull its timestamps back so it continues
     /// contiguously from clip 0, AE#105). Each distinct clip is looked up once, a repeated clip reuses its
-    /// extents, and the title ends at the clip that would pass `maxTitleExtents`.
+    /// extents, and the title ends at the clip that would pass `maxTitleExtents`. `resolved` names each
+    /// clip that made it in, by play item index, parallel to `clipTimeline`.
     static func assembleBluRayTitle(
         clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
         extentsOfClip: (String) -> [(offset: Int64, length: Int64)]?
-    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan]) {
+    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan],
+          resolved: [(item: Int, clip: String, byteStart: Int64)]) {
         let assembled = assembleBluRayTitle(clipIDs: clipIDs, subtractTicks: subtractTicks,
                                             cumulativeBeforeTicks: cumulativeBeforeTicks,
                                             piecesOfClip: extentsOfClip, length: \.length)
-        return (assembled.pieces, assembled.clipTimeline)
+        return (assembled.pieces, assembled.clipTimeline, assembled.resolved)
     }
 
     /// The same assembly over any byte source of a clip: the extents of an image, or the one file a clip is
@@ -183,9 +191,10 @@ enum DiscReader {
     static func assembleBluRayTitle<Piece>(
         clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
         piecesOfClip: (String) -> [Piece]?, length: (Piece) -> Int64
-    ) -> (pieces: [Piece], clipTimeline: [ClipSpan]) {
+    ) -> (pieces: [Piece], clipTimeline: [ClipSpan], resolved: [(item: Int, clip: String, byteStart: Int64)]) {
         var allExtents: [Piece] = []
         var clipTimeline: [ClipSpan] = []
+        var resolvedClips: [(item: Int, clip: String, byteStart: Int64)] = []
         var resolved: [String: [Piece]?] = [:]
         var byteStart: Int64 = 0
         for (k, clip) in clipIDs.enumerated() {
@@ -203,6 +212,7 @@ enum DiscReader {
             }
             let predictedShift = k < subtractTicks.count ? Double(subtractTicks[k]) / discTickRate : 0
             let cumBeforeSec = k < cumulativeBeforeTicks.count ? Double(cumulativeBeforeTicks[k]) / discTickRate : 0
+            resolvedClips.append((k, clip, byteStart))
             clipTimeline.append(ClipSpan(concatByteStart: byteStart,
                                          cumulativeBeforeSec: cumBeforeSec,
                                          predictedShiftSec: predictedShift))
@@ -210,7 +220,7 @@ enum DiscReader {
             allExtents += exts
             byteStart += exts.reduce(Int64(0)) { $0 + max(0, length($1)) }
         }
-        return (allExtents, clipTimeline)
+        return (allExtents, clipTimeline, resolvedClips)
     }
 
     /// Memoize a successful recognition so a re-open of the same source (track switch on a remote ISO)
@@ -218,12 +228,13 @@ enum DiscReader {
     private static func storeRecognition(
         cacheKey: String?, selectTitleID: Int?,
         formatHint: String, titles: [DiscTitle], selectedIndex: Int,
-        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = []
+        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = [],
+        seekTable: DiscSeekTable? = nil
     ) {
         guard let cacheKey else { return }
         let recognition = DiscRecognition(formatHint: formatHint, titles: titles,
                                           selectedTitleIndex: selectedIndex, extents: extents,
-                                          clipTimeline: clipTimeline)
+                                          clipTimeline: clipTimeline, seekTable: seekTable)
         DiscRecognitionCache.store(key: cacheKey, selectTitleID: selectTitleID, recognition)
         // The probe opens with selectTitleID == nil (default title), but the rest of the engine
         // references that same title by its resolved id (== selectedIndex): reloads and the subtitle
@@ -269,7 +280,7 @@ enum DiscReader {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,
                             selectedTitleIndex: cached.selectedTitleIndex,
-                            clipTimeline: cached.clipTimeline)
+                            clipTimeline: cached.clipTimeline, seekTable: cached.seekTable)
         }
         guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
         let iso: ISO9660Reader

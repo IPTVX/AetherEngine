@@ -84,7 +84,11 @@ enum UDFFixture {
     /// the physical partition AFTER the metadata region.
     /// `m2tsViaAED`: place the m2ts EFE's second extent behind a type-3 allocation-extent
     /// continuation (an AED at vblock 13) instead of inline, to exercise AED chaining.
-    static func make(mplsBytes: [UInt8], m2tsBytes: [UInt8], m2tsViaAED: Bool = false) -> Data {
+    /// `clpiBytes`: add `BDMV/CLIPINF/00001.clpi` (vblocks 14-17, one sector of data). A CLPI fixture
+    /// carries a real stream whose EP map points into it, so the m2ts is then written whole rather than
+    /// a sector per extent; each half has to fit the 10 blocks between the two extents.
+    static func make(mplsBytes: [UInt8], m2tsBytes: [UInt8], m2tsViaAED: Bool = false,
+                     clpiBytes: [UInt8]? = nil) -> Data {
         let partStart = 270
         // metadata partition extent = physical blocks 2.. of partition 0.
         // virtual block V -> physical sector partStart + 2 + V.
@@ -104,8 +108,14 @@ enum UDFFixture {
         let half = m2tsBytes.count / 2
         let m2tsExt1 = Array(m2tsBytes[0..<half])
         let m2tsExt2 = Array(m2tsBytes[half...])
-        put(padTo(m2tsExt1, ss * 4), atSector: partStart + frag1Block)
-        put(padTo(m2tsExt2, ss * 4), atSector: partStart + frag2Block)
+        if clpiBytes != nil {
+            precondition(m2tsExt2.count <= 10 * ss, "a whole-stream fixture half must fit 10 blocks")
+            for (i, v) in m2tsExt1.enumerated() { image[(partStart + frag1Block) * ss + i] = v }
+            for (i, v) in m2tsExt2.enumerated() { image[(partStart + frag2Block) * ss + i] = v }
+        } else {
+            put(padTo(m2tsExt1, ss * 4), atSector: partStart + frag1Block)
+            put(padTo(m2tsExt2, ss * 4), atSector: partStart + frag2Block)
+        }
 
         // mpls data (virtual block 11)
         putV(padTo(mplsBytes, ss), vblock: 11)
@@ -145,10 +155,25 @@ enum UDFFixture {
         putV(efe(location: 6, fileType: 4, partRefOfSelf: 1, adType: 1, infoLen: plData.count,
                  ads: longAD(lenBytes: ss, block: 7, partRef: 1)), vblock: 6)
 
-        // BDMV dir data (vblock 5): FIDs PLAYLIST (vblock 6) and STREAM (vblock 8)
-        let bdmvData = fid(location: 5, name: "", isDir: true, childBlock: 2, childPartRef: 1)
+        // CLIPINF dir (vblocks 14-15) and its one clpi (EFE 16, data 17), when asked for.
+        if let clpiBytes {
+            putV(padTo(clpiBytes, ss), vblock: 17)
+            putV(efe(location: 16, fileType: 5, partRefOfSelf: 1, adType: 1, infoLen: clpiBytes.count,
+                     ads: longAD(lenBytes: clpiBytes.count, block: 17, partRef: 1)), vblock: 16)
+            let clipInfoData = fid(location: 15, name: "", isDir: true, childBlock: 4, childPartRef: 1)
+                             + fid(location: 15, name: "00001.clpi", isDir: false, childBlock: 16, childPartRef: 1)
+            putV(padTo(clipInfoData, ss), vblock: 15)
+            putV(efe(location: 14, fileType: 4, partRefOfSelf: 1, adType: 1, infoLen: clipInfoData.count,
+                     ads: longAD(lenBytes: ss, block: 15, partRef: 1)), vblock: 14)
+        }
+
+        // BDMV dir data (vblock 5): FIDs PLAYLIST (vblock 6) and STREAM (vblock 8), and CLIPINF (14)
+        var bdmvData = fid(location: 5, name: "", isDir: true, childBlock: 2, childPartRef: 1)
                      + fid(location: 5, name: "PLAYLIST", isDir: true, childBlock: 6, childPartRef: 1)
                      + fid(location: 5, name: "STREAM", isDir: true, childBlock: 8, childPartRef: 1)
+        if clpiBytes != nil {
+            bdmvData += fid(location: 5, name: "CLIPINF", isDir: true, childBlock: 14, childPartRef: 1)
+        }
         putV(padTo(bdmvData, ss), vblock: 5)
         putV(efe(location: 4, fileType: 4, partRefOfSelf: 1, adType: 1, infoLen: bdmvData.count,
                  ads: longAD(lenBytes: ss, block: 5, partRef: 1)), vblock: 4)
