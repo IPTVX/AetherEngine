@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.35.1] - 2026-10-12
+
 ### Fixed
 
 - **A seek lands on a Blu-ray title whose clips run their clocks over the same range.** A seek over a
@@ -23,6 +27,17 @@ the public-API contract.
   and played on. A single-clip title seeks the same way, with fewer requests (125 instead of 173 for a
   start and three seeks on a remote ISO). A title with any clip lacking a readable EP map seeks by
   timestamp as before.
+
+- **A live session no longer crashes the app when its segment muxer is torn down.** The teardown flush
+  of the fMP4 segment muxer ran while packets were still queued in libavformat's interleaver. movenc
+  takes the first queued packet as the track's end, and when `check_pkt` had clamped the written samples
+  past it (a sample declaring a duration beyond its successor), `get_cluster_duration` hit
+  `av_assert0(next_dts >= 0)` and aborted the whole process on the `HLSSegmentProducer.pump` thread
+  (reported from an IPTV app, `Assertion next_dts >= 0 failed at libavformat/movenc.c:1247`). The
+  teardown now drains the interleaver first, as the segment cut already did, and FFmpegBuild 3.7.1
+  patches movenc to skip such a packet instead of aborting, which also covers a drain cut short by a
+  write error. `MovencFragmentEndTests` reproduces the abort in a child process; each half alone keeps
+  it from happening.
 
 ## [7.35.0] - 2026-10-12
 
