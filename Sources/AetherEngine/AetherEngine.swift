@@ -4676,8 +4676,8 @@ public final class AetherEngine: ObservableObject {
             override: audioSourceStreamIndex,
             preferredLanguages: options.preferredAudioLanguages,
             // Only where the spatial bridge can run: the loopback route of a VOD video session. Live,
-            // audio-only and the software path would decode TrueHD for its 7.1 bed and no heights.
-            prefersTrueHDAtmos: options.objectAudioRendering != .off && !options.isLive && !options.audioOnly
+            // audio-only and the software path would decode TrueHD or DTS for its 7.1 bed and no heights.
+            prefersObjectAudio: options.objectAudioRendering != .off && !options.isLive && !options.audioOnly
                 && !VideoRoutingPolicy.requiresSoftwarePath(
                     codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
                     av1Available: VTCapabilityProbe.av1Available),
