@@ -20,6 +20,13 @@ public enum ObjectAudioRendering: Equatable, Sendable {
     /// The only rate object audio is rendered at. TrueHD Atmos and DTS:X are authored at 48 kHz.
     static let sampleRate = 48_000
 
+    /// Whether this OS has the APAC encoder API the route needs. Below it, `.apac` changes nothing:
+    /// the track plays through `audioBridgeMode` as if rendering were off.
+    static var isAvailable: Bool {
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) { return true }
+        return false
+    }
+
     var layout: SpatialSpeakerLayout? {
         if case .apac(let layout) = self { return layout }
         return nil
