@@ -550,6 +550,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// off the HDMI route has to know that, or it reads the carrier as a downmix.
     public internal(set) var audioIsAtmosStreamCopy = false
 
+    /// The audio is TrueHD Atmos rendered to APAC (`objectAudioRendering`), which on tvOS needs
+    /// `AtmosOutputActivator` beside the player to reach the receiver as Atmos.
+    var audioIsAPAC = false
+
     /// Producer's `videoShiftPts` in seconds, updated on every gate open. AVPlayer clock =
     /// `source_pts - playlistShiftSeconds`. Lock-guarded: written on pump thread, read on others.
     public var playlistShiftSeconds: Double {

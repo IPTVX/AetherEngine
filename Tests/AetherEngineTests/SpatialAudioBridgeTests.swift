@@ -383,6 +383,21 @@ struct SpatialAudioBridgeTests {
         return (try #require(initBytes), segment, sessionDir)
     }
 
+    @Test("the Atmos output activator's bundled stream reads as E-AC-3 with the Atmos extension")
+    @MainActor
+    func silentAtmosStreamIsAtmos() async throws {
+        let asset = AVURLAsset(url: AtmosOutputActivator.silentAtmosStream)
+        let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let format = try #require(try await track.load(.formatDescriptions).first)
+        // AVFoundation lists an E-AC-3 track whose dec3 box states the Atmos extension as 'ec+3'
+        // layers (objects first) over its 'ec-3' core.
+        var size = 0
+        let list = try #require(CMAudioFormatDescriptionGetFormatList(format, sizeOut: &size))
+        #expect(size >= MemoryLayout<AudioFormatListItem>.size)
+        #expect(list[0].mASBD.mFormatID == 0x6563_2B33)
+        #expect(CMFormatDescriptionGetMediaSubType(format) == kAudioFormatEnhancedAC3)
+    }
+
     @Test("movenc muxes the stand-in and the init segment carries the real apac entry")
     func muxedInitCarriesAPAC() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
