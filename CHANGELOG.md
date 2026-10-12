@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **The surround-downmix warning no longer fires on 5.1 inside a Dolby MAT carrier.** After an APAC
+  session tvOS keeps the HDMI output in the 2-channel MAT carrier it negotiated, so a 5.1 `ec-3` track
+  played next read `output=2` and the log claimed a downmix while the sink played the 5.1 intact (Apple
+  TV 4K into a Sonos, `max=32`). The warning now reads the sink's advertised maximum, and fires only
+  when that is below the track's channel count.
+
 - **TrueHD Atmos rendered to APAC lights Atmos on sinks that need a nudge.** Some sinks show
   Dolby Atmos for APAC on their own; a Samsung HW-Q990C fed by an Apple TV 4K (tvOS 27.2) never
   did. While an APAC session plays on tvOS, the engine now loops a silent E-AC-3 stream signalled
