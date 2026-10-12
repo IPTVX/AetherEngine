@@ -36,7 +36,6 @@ the public-API contract.
   source that is no disc costs the same probe reads as before. `aetherctl disc-inspect` reports such an
   image as `dvdVideo`.
 
-
 - **A seek lands on a DVD title, and the playhead holds across cells that restart their timestamps.**
   A title's VOBs are read as one MPEG-PS, and many discs restart the presentation timestamps at a cell
   boundary: *The Little Chinese Seamstress* puts its cell 7, at 3569 s of title time, at about 147 s. A
@@ -48,6 +47,18 @@ the public-API contract.
   seek (2000, 3560, 4500 and 300 s; 2000, 4000 and 500 s) and played on, across cell 7 without a jump
   in the playhead. A title whose cells do not follow each other, that starts past its first sector, or
   that has an angle block, or a disc without a time map, reads and seeks as before.
+
+- **Dolby Vision Profile 7 keeps its RPU on a display without Dolby Vision.** The P7 -> 8.1 conversion
+  ran only when the display claimed Dolby Vision; everywhere else the container record was stripped and
+  the HDR10 base layer played on its static metadata alone, with the enhancement-layer NAL units still in
+  every segment. That covered every HDR10 and SDR panel and every Mac, where Dolby Vision is never
+  observed and only a host assertion claims it. It was the Profile 8.1 non-DV route of tvOS 26.0, which
+  Profile 8.1 left behind once its `-11868` stopped reproducing (AE#493). Profile 7 is now converted on
+  every display and served exactly as Profile 8.1 is: `hvc1` + `dvvC` + `SUPPLEMENTAL-CODECS`, so where
+  AVPlayer maps the picture itself (an SDR panel, a Mac) it maps from the RPU, the segments no longer
+  carry an enhancement layer nothing decodes, and `forceDolbyVisionOnNonDVDisplay` applies to Profile 7
+  too. `dolbyVisionConversion` reads `.profile7ToProfile81` on every such session.
+  `dolbyVisionHandling = .baseLayerOnly` is unchanged. Found by dotModded.
 
 ## [7.35.1] - 2026-10-12
 
