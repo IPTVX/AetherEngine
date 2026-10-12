@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.35.0] - 2026-10-12
+
 ### Added
 
 - **A Blu-ray ripped as a `BDMV` folder plays over HTTP.** A host hands the folder to `load(source: .custom(reader))`
@@ -40,6 +44,12 @@ the public-API contract.
   over its playlist duration (66.9 Mbit/s for that title, which then started playing). A title
   libavformat gives no rate for, which is what a remote ISO opened by URL gets, keeps the over-declared
   fallback as before.
+- **The first readyToPlay after launch no longer freezes the host's main thread for seconds.** Since the
+  26 SDKs `AVAsset.load` runs on the caller's actor, and the native host read every track's format
+  descriptions on the main actor. The first audio format description a process builds loads the audio
+  DSP stack through dyld, measured at 3.8 s on an Apple TV 4K, so the host UI stalled while the video
+  kept playing. Those reads now run off the main actor; the logged and published values are unchanged
+  (#735).
 
 ## [7.34.1] - 2026-10-11
 
