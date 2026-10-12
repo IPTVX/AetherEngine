@@ -109,4 +109,11 @@ extension AetherEngine {
         activator.attach(to: player) { [weak self] _ in self?.nativeVideoSession?.audioIsAPAC == true }
         #endif
     }
+
+    /// #597: a media services reset invalidates the activator's own `AVQueuePlayer` along with the engine's,
+    /// and the engine only rebuilds its own. Dropped here, the next `currentAVPlayer` builds a fresh one.
+    func dropAtmosOutputActivator() {
+        atmosOutputActivator?.detach()
+        atmosOutputActivator = nil
+    }
 }

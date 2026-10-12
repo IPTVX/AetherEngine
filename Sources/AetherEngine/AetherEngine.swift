@@ -1079,6 +1079,7 @@ public final class AetherEngine: ObservableObject {
 
     func noteMediaServicesReset(lost: Bool) {
         mediaServicesResetPending = true
+        dropAtmosOutputActivator()
         EngineLog.emit(
             "[AetherEngine] #597 media services were \(lost ? "lost" : "reset"): every audio and "
             + "video object this process holds is invalid, so the next load builds fresh native and "

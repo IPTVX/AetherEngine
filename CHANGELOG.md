@@ -17,7 +17,8 @@ the public-API contract.
   did. While an APAC session plays on tvOS, the engine now loops a silent E-AC-3 stream signalled
   as Dolby Atmos beside its player (`AtmosOutputActivator`), which brought that soundbar to Atmos
   before the first frame and kept it there across a seek. The 2 s stream is digital silence
-  written from the specifications by `Scripts/make-silent-atmos.swift`.
+  written from the specifications by `Scripts/make-silent-atmos.swift`. A media services reset (#597)
+  drops the activator's player along with the engine's, so the next session builds a fresh one.
 
 - **A DVD-Video image without an ISO9660 bridge volume plays its film, not its menu.** DVD recognition
   only looked for `VIDEO_TS` through ISO9660, so an image that is UDF only (sector 16 starts UDF's BEA01
