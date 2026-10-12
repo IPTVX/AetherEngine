@@ -3,6 +3,47 @@ import XCTest
 @testable import AetherEngine
 
 final class LivePacketReplayGuardTests: XCTestCase {
+    func testVerifiedReturningPictureReplacesUnflaggedTruncatedOutgoingCopy() {
+        let damaged = packet(.video, 10, payload: 0xFF)
+        let intact = packet(.video, 10)
+        let audio = packet(.audio, 10)
+        let next = packet(.video, 11)
+        let signatures = [damaged, audio, next, intact, next]
+        let order = LivePacketReplayGuard.verifiedPacketOrder(signatures)
+        XCTAssertEqual(order.map { signatures[$0] }.filter { $0.stream == .video }, [intact, next])
+        XCTAssertEqual(order.map { signatures[$0] }.filter { $0.stream == .audio }, [audio])
+        let summary = LivePacketReplayGuard.videoBoundarySummary([
+            (damaged, false, false, false), (intact, false, false, false)
+        ])
+        XCTAssertEqual(summary.superseded, 1)
+    }
+
+    func testVerifiedBatchDoesNotCollapseDifferentPresentationTimesOrAudioPayloads() {
+        let first = packet(.video, 10)
+        let otherPTS = LivePacketReplayGuard.Signature(stream: .video, dts: first.dts,
+            pts: first.pts + 1, payload: Data([0xFF]))
+        let audioA = packet(.audio, 10), audioB = packet(.audio, 10, payload: 0xFF)
+        let values = [first, audioA, otherPTS, audioB]
+        XCTAssertEqual(LivePacketReplayGuard.verifiedPacketOrder(values), [0, 1, 2, 3])
+    }
+
+    func testBoundaryEvidenceRequiresAnIntactRetainedReplacement() {
+        let summary = LivePacketReplayGuard.videoBoundarySummary([
+            (packet(.video, 10), true, false, false),
+            (packet(.video, 10, payload: 0xFF), false, false, false),
+            (packet(.video, 11), true, false, false),
+            (packet(.video, 11), false, true, false), // a discarded copy cannot repair a picture
+            (packet(.audio, 12), true, false, false),
+            (packet(.video, 12), false, false, true),
+            (packet(.video, 12), false, false, true)
+        ])
+        XCTAssertEqual(summary.damaged, 2)
+        XCTAssertEqual(summary.replaced, 1)
+        XCTAssertEqual(summary.unreplaced, 1)
+        XCTAssertEqual(summary.retained, 2)
+        XCTAssertEqual(summary.keyframes, 1)
+    }
+
     func testUntimedDamageCannotCompleteReplayUsingOneMatchPerTrack() {
         var guard_ = LivePacketReplayGuard()
         for stream in [LivePacketReplayGuard.Stream.video, .audio] {

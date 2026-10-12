@@ -451,6 +451,7 @@ final class NativeAVPlayerHost {
         var audioIsAtmosStreamCopy: Bool = false
         /// Preserve opt-in decoded-output sampling across same-session playlist/item swaps.
         var nativeVideoFrameDiagnostics: Bool = false
+        var nativeVideoFrameRecovery: Bool = false
         /// Read the item's audio tracks back into `detectedAudioTracks`. Only the remote-HLS bypass needs
         /// them; the loopback's probe already listed its audio, and the reads are XPC round trips.
         var readsBackAudioTracks: Bool = false
@@ -901,7 +902,9 @@ final class NativeAVPlayerHost {
         }
 
         avPlayer.replaceCurrentItem(with: item)
-        if contract.nativeVideoFrameDiagnostics { startVideoFrameDiagnostics(item: item, session: sid) }
+        if contract.nativeVideoFrameDiagnostics || contract.nativeVideoFrameRecovery {
+            startVideoFrameDiagnostics(item: item, session: sid)
+        }
         // Fold cached counters without a native read. The final reconciliation is requested only
         // after detach, and never holds up the handover.
         if let outgoingDiagnostics {
@@ -2259,20 +2262,29 @@ final class NativeAVPlayerHost {
         // An output which has never yielded a frame is not evidence of decoder failure.
         let frozenOutput = videoFrameProgress.samples >= 3
             && (age ?? 0) >= Swift.max(0.35, 3 * (duration ?? 0))
-        // Diagnostics remain observational: output sampling alone must never trigger a seek.
-        let missing = !isVideoReadyForDisplay
+        // Diagnostics alone remain observational. Ready means the FIRST frame was ready,
+        // so only the separately opted-in recovery policy can act on stalled decoded output.
+        let stalled = sessionContract.nativeVideoFrameRecovery
+            && videoFrameProgress.isStalled(at: now, lastSampleAt: videoFrameSampleAt, frameDuration: duration)
+        let missing = !isVideoReadyForDisplay || stalled
+        let healthy = !sessionContract.nativeVideoFrameRecovery
+            || (videoFrameProgress.samples >= 3 && (age ?? .infinity) < Swift.max(0.35, 3 * (duration ?? 0)))
         let previousAttempts = videoPresentation.attempts
         let action = videoPresentation.observe(clock: clock, now: now, eligible: eligible,
-            missingVideo: missing, frameDuration: duration)
+            missingVideo: missing, frameDuration: duration, hasHealthyVideo: healthy)
         let recovered = previousAttempts > 0 && videoPresentation.attempts == 0
         let summarize = hasPresentedVideo && playIntent && (missing || frozenOutput)
             && now - (videoHealthSummaryAt ?? -.infinity) >= 5
         if action != nil || recovered || summarize {
             videoHealthSummaryAt = now
             let phase = action?.rawValue ?? (recovered ? "resumed" : "sample")
-            EngineLog.emit("[NativeVideoHealth] action=\(phase) sid=\(sessionID) clock=\(String(format: "%.3f", clock)) buffer=\(String(format: "%.3f", ahead)) layerReady=\(isVideoReadyForDisplay) frameAge=\(String(format: "%.3f", age ?? -1)) samples=\(videoFrameProgress.samples) attempt=\(videoPresentation.attempts) pip=\(pictureInPictureActive) foreground=\(foreground) eligible=\(eligible)", category: .engine)
+            let reason = !isVideoReadyForDisplay ? "layer_unready" : (frozenOutput || stalled ? "output_stalled" : "none")
+            EngineLog.emit("[NativeVideoHealth] action=\(phase) sid=\(sessionID) clock=\(String(format: "%.3f", clock)) buffer=\(String(format: "%.3f", ahead)) layerReady=\(isVideoReadyForDisplay) frameAge=\(String(format: "%.3f", age ?? -1)) samples=\(videoFrameProgress.samples) attempt=\(videoPresentation.attempts) pip=\(pictureInPictureActive) foreground=\(foreground) eligible=\(eligible) reason=\(reason) repairEnabled=\(sessionContract.nativeVideoFrameRecovery)", category: .engine)
         }
-        if let action { onVideoPresentationRecovery?(action, clock) }
+        if let action {
+            if stalled { videoFrameProgress.beginRecovery() }
+            onVideoPresentationRecovery?(action, clock)
+        }
     }
 
     private func sampleDiagnosticVideo(item: AVPlayerItem, session: Int) -> Bool {
@@ -2286,9 +2298,10 @@ final class NativeAVPlayerHost {
         #if !os(visionOS)
         eligible = eligible && !avPlayer.isExternalPlaybackActive
         #endif
+        let mayContinueRepair = eligible && playIntent
         eligible = eligible && avPlayer.timeControlStatus == .playing && avPlayer.rate > 0
         guard eligible else {
-            videoFrameProgress.reset()
+            videoFrameProgress.reset(preservingRecovery: mayContinueRepair)
             videoFrameSampleAt = nil
             videoFrameSummaryAt = nil
             // Do not keep an extra video consumer attached across HDR/external/background modes.
@@ -2345,7 +2358,7 @@ final class NativeAVPlayerHost {
         videoFrameTask?.cancel(); videoFrameTask = nil
         if let output = diagnosticVideoOutput { playerItem?.remove(output) }
         diagnosticVideoOutput = nil
-        videoFrameProgress.reset()
+        videoFrameProgress.reset(preservingRecovery: inPlaceSwap)
         videoFrameSampleAt = nil
         videoFrameSummaryAt = nil
         // Invalidating KVO does not cancel callbacks already queued onto the main actor. Retire

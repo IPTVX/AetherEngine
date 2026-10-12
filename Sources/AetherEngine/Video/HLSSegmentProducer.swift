@@ -2814,6 +2814,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let origin: PacketOrigin
         let sample: LiveReplaySample?
         let isDuplicate: Bool
+        var untimedBoundaryVideo = false
     }
 
     private struct InterruptedSourceReplay: Error {}
@@ -2954,16 +2955,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     continue
                 }
             }
-            if !replayPending.isEmpty, !liveReplayGuard.isHoldingDamagedBoundary {
+            // A truncated outgoing PES can also release an unflagged, untimed fragment.
+            // Do not synthesize a clock for it before the pending boundary is resolved.
+            let untimedBoundaryVideo = liveReplayGuard.isHoldingDamagedBoundary && sample == nil
+                && read.origin == .main && read.packet.pointee.stream_index == videoStreamIndex
+            if !replayPending.isEmpty, !liveReplayGuard.isHoldingDamagedBoundary || untimedBoundaryVideo {
                 noCutWatchdog?.noteReplayPacketRead(at: Date())
                 if damagedLivePacketStream(read.packet, origin: read.origin) != nil {
                     liveReplayGuard.noteDamagedPacket()
                 }
                 logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
-                // Keep unclassified packets in source order until the paired decision;
-                // only packets explicitly marked corrupt can be discarded without a signature.
+                // Untimed fragments of this damaged boundary are provisional too;
+                // only verified replay permits discarding them without a signature.
                 replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
-                                                           sample: sample, isDuplicate: false))
+                    sample: sample, isDuplicate: false, untimedBoundaryVideo: untimedBoundaryVideo))
                 replayPendingBytes += max(0, Int(read.packet.pointee.size))
                 if replayPendingBytes > Self.maximumReplayPendingBytes
                     || replayPending.count > Self.maximumReplayPendingPackets {
@@ -3010,11 +3015,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     private func commitReplayCandidate() {
+        let boundary = LivePacketReplayGuard.videoBoundarySummary(replayPending.map {
+            (signature: $0.sample?.signature, corrupt: damagedLivePacketStream($0.packet, origin: $0.origin) != nil,
+             duplicate: $0.isDuplicate, keyframe: ($0.packet.pointee.flags & AV_PKT_FLAG_KEY) != 0)
+        })
+        EngineLog.emit("[ReplayVideoBoundary] route=native damaged=\(boundary.damaged) replaced=\(boundary.replaced) unreplaced=\(boundary.unreplaced) retained=\(boundary.retained) keyframes=\(boundary.keyframes) superseded=\(boundary.superseded) untimed=\(replayPending.filter { $0.untimedBoundaryVideo }.count)", category: .session)
         for entry in replayPending {
             // Once both tracks prove the overlap, discard its damaged boundary packets too.
             // A truncated PES can carry valid timestamps beyond the retained audio frontier.
             let damaged = damagedLivePacketStream(entry.packet, origin: entry.origin) != nil
-            if entry.isDuplicate || damaged {
+            if entry.isDuplicate || damaged || entry.untimedBoundaryVideo {
                 if damaged { logDamagedLivePacket(entry.packet, origin: entry.origin, action: "discarded") }
                 var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
                 trackedPacketFree(&packet)

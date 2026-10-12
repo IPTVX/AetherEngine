@@ -292,6 +292,9 @@ AVPlayer asks and the two runs look the same.
 observer from `LoadOptions.nativeVideoFrameDiagnostics`. It logs progress, output gaps and
 observation delays without suppressing the player layer or claiming physical display proof.
 
+`play --native-video-frame-recovery` separately enables bounded SDR native decoded-output repair;
+it is off by default and does not follow from enabling diagnostics. See [diagnostics](api.md#diagnostics).
+
 `--picture-probe` attaches an `AVPlayerItemVideoOutput` to the running item and decodes the source
 time out of the picture itself, which is the one axis question nothing else here can answer: every
 other observable (`#260` frame times, `prodShift` / `hostShift`) describes what the engine WROTE, not

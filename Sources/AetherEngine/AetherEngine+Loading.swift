@@ -1846,7 +1846,8 @@ extension AetherEngine {
                       // the HDMI route cannot, because Atmos passthrough and a stereo LPCM route
                       // report the same two channels.
                       audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true,
-                      nativeVideoFrameDiagnostics: loadedOptions.nativeVideoFrameDiagnostics))
+                      nativeVideoFrameDiagnostics: loadedOptions.nativeVideoFrameDiagnostics,
+                      nativeVideoFrameRecovery: loadedOptions.nativeVideoFrameRecovery))
         forceNativeLegibleDeselectedUntilHostSelects()
         // Sodalite#175: from the session's own pick, since a track-switch reload has no active index yet.
         let sessionAudioPick = nativeVideoSession.map(\.activeAudioSourceStreamIndex).flatMap { $0 >= 0 ? Int($0) : nil }

@@ -373,12 +373,62 @@ struct LivePacketReplayGuard {
         }
     }
 
+    private struct PictureTime: Hashable { let dts: Int64; let pts: Int64 }
+
+    struct VideoBoundarySummary {
+        let damaged: Int
+        let replaced: Int
+        let unreplaced: Int
+        let retained: Int
+        let keyframes: Int
+        let superseded: Int
+    }
+
+    /// Numeric seam evidence, without source URLs or packet payloads. A flagged outgoing
+    /// picture is repaired only by an admitted intact picture at BOTH original timestamps.
+    static func videoBoundarySummary(_ packets: [(signature: Signature?, corrupt: Bool,
+                                                   duplicate: Bool, keyframe: Bool)]) -> VideoBoundarySummary {
+        var damaged: Set<PictureTime> = [], intact: Set<PictureTime> = []
+        var copies: [PictureTime: Signature] = [:]
+        var superseded = 0
+        var keyframes: [PictureTime: Bool] = [:]
+        for packet in packets {
+            guard !packet.duplicate, let signature = packet.signature, signature.stream == .video else { continue }
+            let picture = PictureTime(dts: signature.dts, pts: signature.pts)
+            if packet.corrupt { damaged.insert(picture) }
+            else {
+                if let previous = copies[picture], previous != signature { superseded += 1 }
+                copies[picture] = signature
+                intact.insert(picture)
+                keyframes[picture] = packet.keyframe
+            }
+        }
+        let replaced = damaged.intersection(intact).count
+        return VideoBoundarySummary(damaged: damaged.count, replaced: replaced,
+            unreplaced: damaged.count - replaced, retained: intact.count, keyframes: keyframes.values.filter { $0 }.count, superseded: superseded)
+    }
+
     /// Verified replay can interleave an outgoing good picture with its returning copy.
-    /// Preserve audio ordering, emit each exact packet once, and restore video decode order.
+    /// Preserve audio ordering, prefer the returning copy of a video picture, and restore decode order.
     static func verifiedPacketOrder(_ signatures: [Signature?]) -> [Int] {
+        // A truncated PES can lose its CORRUPT flag when the TS parser assembles its
+        // last access unit. Once BOTH tracks prove replay, the returning picture at
+        // the same DTS/PTS supersedes that provisional outgoing copy. Publishing both
+        // and bumping the second DTS poisons Apple's reference chain until the next IDR.
+        // This is deliberately confined to a verified pending batch, never source history.
+        var video: [PictureTime: Int] = [:]
+        for index in signatures.indices {
+            guard let signature = signatures[index], signature.stream == .video else { continue }
+            let time = PictureTime(dts: signature.dts, pts: signature.pts)
+            if let previous = video[time], signatures[previous] == signature { continue }
+            video[time] = index
+        }
         var seen: Set<Signature> = []
         var indices = signatures.indices.filter { index in
             guard let signature = signatures[index] else { return true }
+            if signature.stream == .video {
+                return video[PictureTime(dts: signature.dts, pts: signature.pts)] == index
+            }
             return seen.insert(signature).inserted
         }
         let locations = indices.indices.filter { signatures[indices[$0]]?.stream == .video }

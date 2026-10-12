@@ -415,6 +415,11 @@ public struct LoadOptions: Sendable, Equatable {
     /// freezes. Disabled during seek/pause, external playback and mobile background activity.
     public var nativeVideoFrameDiagnostics: Bool = false
 
+    /// Opt-in bounded repair of stalled SDR decoded output on native loopback playback.
+    /// Enables frame observation independently of diagnostics. Default off; short gaps,
+    /// unavailable output, PiP, background, external playback, pause and seeks never repair.
+    public var nativeVideoFrameRecovery: Bool = false
+
     /// Diagnostic lever: force dvh1 codec tags + master playlist regardless of display capability. OFF by default: non-DV displays route DV through the media playlist (no master) so AVPlayer auto-tonemaps the HEVC base layer (only path that avoids AVFoundationErrorDomain -11868 on tvOS 26). AetherEngine#4.
     public var keepDvh1TagWithoutDV: Bool
 
@@ -978,7 +983,8 @@ public struct LoadOptions: Sendable, Equatable {
         preferredDecodePath: DecodePath = .automatic,
         escalatesToSoftwarePath: Bool = true,
         sharedOutputRole: SharedOutputRole = .primary,
-        nativeVideoFrameDiagnostics: Bool = false
+        nativeVideoFrameDiagnostics: Bool = false,
+        nativeVideoFrameRecovery: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -1029,6 +1035,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredDecodePath = preferredDecodePath
         self.escalatesToSoftwarePath = escalatesToSoftwarePath
         self.sharedOutputRole = sharedOutputRole
+        self.nativeVideoFrameRecovery = nativeVideoFrameRecovery
         self.nativeVideoFrameDiagnostics = nativeVideoFrameDiagnostics
     }
 }

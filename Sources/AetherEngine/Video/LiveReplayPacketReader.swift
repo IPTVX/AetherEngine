@@ -15,6 +15,7 @@ final class LiveReplayPacketReader {
         let signature: LivePacketReplayGuard.Signature?
         let seconds: Double
         let duplicate: Bool
+        var untimedBoundaryVideo = false
     }
     private var guardState = LivePacketReplayGuard()
     private var pending: [Pending] = []
@@ -62,9 +63,16 @@ final class LiveReplayPacketReader {
             free(pending); pending.removeAll(); pendingBytes = 0
             throw Failure.interruptedReplay
         }
+        if verified {
+            let boundary = LivePacketReplayGuard.videoBoundarySummary(pending.map {
+                (signature: $0.signature, corrupt: ($0.packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0,
+                 duplicate: $0.duplicate, keyframe: ($0.packet.pointee.flags & AV_PKT_FLAG_KEY) != 0)
+            })
+            EngineLog.emit("[ReplayVideoBoundary] route=software damaged=\(boundary.damaged) replaced=\(boundary.replaced) unreplaced=\(boundary.unreplaced) retained=\(boundary.retained) keyframes=\(boundary.keyframes) superseded=\(boundary.superseded) untimed=\(pending.filter { $0.untimedBoundaryVideo }.count)", category: .swPlayback)
+        }
         for entry in pending {
             let corrupt = (entry.packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0
-            if verified && (entry.duplicate || corrupt) { free([entry]) }
+            if verified && (entry.duplicate || corrupt || entry.untimedBoundaryVideo) { free([entry]) }
             else { ready.append(entry) }
         }
         if verified {
@@ -122,7 +130,7 @@ final class LiveReplayPacketReader {
             let timeBase = stream == .video ? videoTimeBase : audioTimeBase
             var signature: LivePacketReplayGuard.Signature?
             let seconds = Double(packet.pointee.dts) * timeBase
-            if let stream, timeBase > 0, packet.pointee.dts != Int64.min,
+            if let stream, timeBase > 0, packet.pointee.dts != Int64.min, packet.pointee.pts != Int64.min,
                let data = packet.pointee.data, packet.pointee.size > 0 {
                 signature = .init(stream: stream, dts: packet.pointee.dts, pts: packet.pointee.pts,
                     payload: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
@@ -137,10 +145,11 @@ final class LiveReplayPacketReader {
                 av_packet_free(&duplicate)
                 continue
             }
+            let untimedBoundaryVideo = guardState.isHoldingDamagedBoundary && signature == nil && index == videoIndex
             let entry = Pending(packet: packet, signature: signature, seconds: seconds,
-                                duplicate: decision?.drop ?? false)
+                                duplicate: decision?.drop ?? false, untimedBoundaryVideo: untimedBoundaryVideo)
             if guardState.isDroppingReplay || decision?.holdDamagedBoundary == true || decision?.event != nil
-                || (!pending.isEmpty && !guardState.isHoldingDamagedBoundary) {
+                || (!pending.isEmpty && (!guardState.isHoldingDamagedBoundary || untimedBoundaryVideo)) {
                 if signature == nil, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 {
                     guardState.noteDamagedPacket()
                 }

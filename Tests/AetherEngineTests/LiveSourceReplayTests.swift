@@ -1,5 +1,7 @@
 import Foundation
 import CryptoKit
+import AVFoundation
+import VideoToolbox
 import Testing
 import AetherLibavutil
 import AetherLibavcodec
@@ -455,6 +457,137 @@ struct LiveSourceReplayTests {
             remuxed.append(try #require(cache.fetch(index: index, timeout: 0)))
         }
         #expect(try decodedPictures(remuxed, format: "mov", filterReplay: false) == expected)
+    }
+
+    /// Exercise Apple's decoder as well as FFmpeg: the native consumer can reject a
+    /// reference chain which FFmpeg conceals. Compare every pixel and presentation time.
+    @Test("native decoding preserves long-GOP pictures through flagged and truncated replay seams", arguments: [0, 1, 2, 3, 4])
+    func nativeLongGOPContinuity(seam: Int) async throws {
+        let bytes = try LongGOPTransportStreamFixture.data()
+        let clip = try fixture(data: bytes, headFrames: (seam == 2 || seam == 4) ? 501 : 620, replayStartFrame: 120)
+        var head = clip.head
+        let aud = Data([0, 0, 0, 1, 9])
+        let last = try #require(head.range(of: aud, options: .backwards))
+        if seam == 0 {
+            let previous = try #require(head.range(of: aud, options: .backwards, in: 0..<last.lowerBound))
+            head[previous.lowerBound / 188 * 188 + 1] |= 0x80
+        } else {
+            // Real transport loss inside the outgoing access unit, not just a flag on intact bytes.
+            head = Data(head.prefix(last.lowerBound + (seam >= 3 ? 80 : 10)))
+        }
+        let expected = try decodedPictures(bytes, format: "mpegts", filterReplay: false)
+        #expect(expected.count == 800)
+        #expect(try decodedPictures(head + clip.replay + clip.tail, format: "mpegts", filterReplay: true) == expected)
+        var decoded: [[NativePicture]] = []
+        for input in [bytes, head + clip.replay + clip.tail] {
+            let cache = SegmentCache(forwardWindow: 32, backwardWindow: 32)
+            defer { cache.close() }
+            _ = try await run(input, expected: "eof", expectedRebases: 0, retainedCache: cache)
+            var remuxed = try #require(cache.initData(versionID: 0))
+            for index in 0..<cache.count { remuxed.append(try #require(cache.fetch(index: index, timeout: 0))) }
+            decoded.append(try await nativePictures(remuxed))
+        }
+        #expect(decoded[0].count == 800)
+        #expect(decoded[1] == decoded[0])
+    }
+
+    private struct NativePicture: Equatable, Sendable {
+        let ticks: Int64
+        let digest: SHA256.Digest
+    }
+
+    private final class NativePictures: @unchecked Sendable {
+        private let lock = NSLock()
+        private var pictures: [NativePicture] = []
+        private var failure: OSStatus = noErr
+        func record(_ status: OSStatus, _ pixel: CVPixelBuffer?, _ pts: CMTime) {
+            guard status == noErr, let pixel else { lock.withLock { failure = status }; return }
+            CVPixelBufferLockBaseAddress(pixel, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pixel, .readOnly) }
+            guard let base = CVPixelBufferGetBaseAddress(pixel) else { return }
+            var hasher = SHA256()
+            for row in 0..<CVPixelBufferGetHeight(pixel) {
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(
+                    start: base + row * CVPixelBufferGetBytesPerRow(pixel), count: CVPixelBufferGetWidth(pixel) * 4))
+            }
+            let picture = NativePicture(ticks: CMTimeConvertScale(pts, timescale: 90_000,
+                method: .roundHalfAwayFromZero).value, digest: hasher.finalize())
+            lock.withLock { pictures.append(picture) }
+        }
+        func result() throws -> [NativePicture] {
+            try lock.withLock {
+                guard failure == noErr else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(failure)) }
+                return pictures.sorted { $0.ticks < $1.ticks }
+            }
+        }
+    }
+
+    /// Decode the remuxed packet stream with Apple's VideoToolbox, not FFmpeg's decoder.
+    /// AVAssetReader treats a concatenated, unindexed HLS fragment file as its first fragment;
+    /// extracting compressed packets here avoids mistaking that file-container limit for lost video.
+    private func nativePictures(_ data: Data) async throws -> [NativePicture] {
+        let cancelled = ProbeTestBox(false)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                Thread.detachNewThread {
+                    continuation.resume(with: Swift.Result { try Self.decodeNative(data, cancelled: cancelled) })
+                }
+            }
+        } onCancel: { cancelled.update { $0 = true } }
+    }
+
+    private static func decodeNative(_ data: Data, cancelled: ProbeTestBox<Bool>) throws -> [NativePicture] {
+        func check(_ status: OSStatus) throws {
+            guard status == noErr else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        }
+        let demuxer = Demuxer()
+        try demuxer.open(reader: ProbeRecordingReader(data: data), formatHint: "mov")
+        defer { demuxer.close() }
+        let stream = try #require(demuxer.stream(at: demuxer.videoStreamIndex))
+        let codec = try #require(stream.pointee.codecpar).pointee
+        let extra = try #require(codec.extradata)
+        let extensions: NSDictionary = [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms:
+            ["avcC": Data(bytes: extra, count: Int(codec.extradata_size))]]
+        var description: CMVideoFormatDescription?
+        try check(CMVideoFormatDescriptionCreate(allocator: nil, codecType: kCMVideoCodecType_H264,
+            width: codec.width, height: codec.height, extensions: extensions, formatDescriptionOut: &description))
+        let pictures = NativePictures()
+        var callback = VTDecompressionOutputCallbackRecord(decompressionOutputCallback: { context, _, status, _, pixel, pts, _ in
+            guard let context else { return }
+            Unmanaged<NativePictures>.fromOpaque(context).takeUnretainedValue().record(status, pixel, pts)
+        }, decompressionOutputRefCon: Unmanaged.passUnretained(pictures).toOpaque())
+        var decoder: VTDecompressionSession?
+        try check(VTDecompressionSessionCreate(allocator: nil, formatDescription: try #require(description),
+            decoderSpecification: nil, imageBufferAttributes: [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA] as CFDictionary,
+            outputCallback: &callback, decompressionSessionOut: &decoder))
+        let session = try #require(decoder)
+        defer { VTDecompressionSessionInvalidate(session) }
+        while let packet = try demuxer.readPacket() {
+            defer { var owned: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&owned) }
+            if cancelled.value { throw CancellationError() }
+            guard packet.pointee.stream_index == demuxer.videoStreamIndex else { continue }
+            let size = Int(packet.pointee.size)
+            var block: CMBlockBuffer?
+            try check(CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: size,
+                blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: size, flags: 0, blockBufferOut: &block))
+            let buffer = try #require(block)
+            try check(CMBlockBufferReplaceDataBytes(with: try #require(packet.pointee.data), blockBuffer: buffer,
+                offsetIntoDestination: 0, dataLength: size))
+            let tb = stream.pointee.time_base
+            var timing = CMSampleTimingInfo(duration: SourceTimestampBounds.cmTime(ticks: packet.pointee.duration, timeBase: tb),
+                presentationTimeStamp: SourceTimestampBounds.cmTime(ticks: packet.pointee.pts, timeBase: tb),
+                decodeTimeStamp: SourceTimestampBounds.cmTime(ticks: packet.pointee.dts, timeBase: tb))
+            var sampleSize = size
+            var sample: CMSampleBuffer?
+            try check(CMSampleBufferCreateReady(allocator: nil, dataBuffer: buffer, formatDescription: description,
+                sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize, sampleBufferOut: &sample))
+            try check(VTDecompressionSessionDecodeFrame(session, sampleBuffer: try #require(sample), flags: [],
+                frameRefcon: nil, infoFlagsOut: nil))
+        }
+        try check(VTDecompressionSessionFinishDelayedFrames(session))
+        try check(VTDecompressionSessionWaitForAsynchronousFrames(session))
+        return try pictures.result()
     }
 
     /// 8 s, 16x16 H.264 Baseline at 2 fps + AAC-LC stereo at 48 kHz, no B-frames.

@@ -25,6 +25,22 @@ the public-API contract.
   before the first frame and kept it there across a seek. The 2 s stream is digital silence
   written from the specifications by `Scripts/make-silent-atmos.swift`. A media services reset (#597)
   drops the activator's player along with the engine's, so the next session builds a fresh one.
+
+- **Unflagged truncated replay pictures:** once both tracks confirm replay, retain one returning
+  video access unit for each DTS/PTS pair in the held batch. A partial outgoing PES can lose its
+  corrupt flag; previously it and its intact replacement were both muxed, poisoning native
+  decoding until a later IDR. Native and software admission now share this correction, with
+  real byte-truncation regressions and numeric replacement/conflict diagnostics. Hold untimed
+  fragments at the same damaged boundary so synthetic timestamps cannot hide an intact replacement;
+  preserve those fragments when replay is unproven.
+
+- **Ready but frozen native video:** separately opt into bounded decoded-output recovery with
+  `nativeVideoFrameRecovery`. Require prior pictures, fresh observation and progressing playback;
+  exclude short gaps, PiP, seek, pause, hidden surfaces and starvation. Rearm only after healthy
+  pictures, preserve source/DVR/position, and report the reason for each recovery.
+- **Native decoder replay coverage:** compare all pixels and timestamps through Apple's decoder
+  after long-GOP H.264/AAC replay, in addition to existing FFmpeg decoding regressions.
+
 - **Audio progressing without video:** recover a previously visible native layer that remains
   unready despite buffered, advancing foreground playback. Bound consumer repairs and preserve
   the current live position, source and DVR; exclude PiP, seeks, hidden surfaces and starvation.

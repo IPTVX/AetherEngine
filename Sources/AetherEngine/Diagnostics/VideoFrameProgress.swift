@@ -13,7 +13,8 @@ struct VideoPresentationProgress {
     private(set) var attempts = 0
 
     mutating func observe(clock: Double, now: Double, eligible: Bool,
-                          missingVideo: Bool, frameDuration: Double?) -> Action? {
+                          missingVideo: Bool, frameDuration: Double?,
+                          hasHealthyVideo: Bool = true) -> Action? {
         defer { lastClock = clock; lastObservation = now }
         guard eligible, clock.isFinite, now.isFinite else {
             suspectClock = nil; suspectAt = nil; healthyAt = nil
@@ -25,6 +26,7 @@ struct VideoPresentationProgress {
         }
         guard missingVideo else {
             suspectClock = nil; suspectAt = nil
+            guard hasHealthyVideo else { healthyAt = nil; return nil }
             if healthyAt == nil { healthyAt = now }
             // A momentary ready flag after a seek does not buy unlimited repair attempts.
             if now - (healthyAt ?? now) >= 5 { attempts = 0 }
@@ -54,10 +56,27 @@ struct VideoFrameProgress {
     private var clockAtChange: Double?
     private var lastClock: Double?
     private var gapReported = false
+    private(set) var recoveryPending = false
 
-    mutating func reset() { self = Self() }
+    mutating func beginRecovery() { recoveryPending = samples >= 3 || recoveryPending }
+
+    mutating func reset(preservingRecovery: Bool = false) {
+        let pending = preservingRecovery && recoveryPending
+        self = Self()
+        recoveryPending = pending
+    }
 
     func age(at now: Double) -> Double? { changedAt.map { Swift.max(0, now - $0) } }
+
+    /// Require both a progressing clock and fresh observations. A suspended sampler
+    /// or an output which never produced pictures cannot diagnose a stalled decoder.
+    func isStalled(at now: Double, lastSampleAt: Double?, frameDuration: Double?) -> Bool {
+        guard samples >= 3 || recoveryPending, let lastSampleAt, now >= lastSampleAt,
+              now - lastSampleAt <= 0.25, let changedAt, let clockAtChange, let lastClock else { return false }
+        let duration = frameDuration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0
+        let threshold = Swift.max(0.35, 3 * duration)
+        return now - changedAt >= threshold && lastClock - clockAtChange >= threshold * 0.8
+    }
 
     mutating func observe(frame: Double?, clock: Double, now: Double,
                           eligible: Bool, frameDuration: Double?) -> Event? {
@@ -69,11 +88,15 @@ struct VideoFrameProgress {
         if let frame, frame.isFinite, frame != frameTime {
             let age = changedAt.map { Swift.max(0, now - $0) }
             let recovered = gapReported
+            recoveryPending = false
             samples += 1; frameTime = frame; changedAt = now; clockAtChange = clock
             gapReported = false
             return recovered ? .ended(age: age ?? 0) : nil
         }
-        guard samples >= 3, let changedAt, let clockAtChange else { return nil }
+        // An internal repair can briefly pause/detach the output. Preserve its verified
+        // stall, but start a fresh grace period on resumed observation, never while waiting.
+        if recoveryPending, changedAt == nil { changedAt = now; clockAtChange = clock }
+        guard samples >= 3 || recoveryPending, let changedAt, let clockAtChange else { return nil }
         let age = Swift.max(0, now - changedAt)
         let advance = clock - clockAtChange
         let duration = frameDuration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0

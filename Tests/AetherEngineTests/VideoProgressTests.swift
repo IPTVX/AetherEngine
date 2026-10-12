@@ -54,6 +54,61 @@ struct VideoProgressTests {
         }
     }
 
+    @Test("ready layers with sustained decoded-output stalls repair; short device gaps do not")
+    func readyButStalled() {
+        // Durations observed on the four-device run: only sustained gaps warrant disruption.
+        for gap in [0.53, 0.69, 1.0, 1.18, 4.28, 5.17, 9.55] {
+            var frames = warmed()
+            var presentation = VideoPresentationProgress()
+            var actions: [VideoPresentationProgress.Action] = []
+            for tick in 5...Int((gap + 0.2) * 20) {
+                let t = Double(tick) / 20
+                _ = frames.observe(frame: nil, clock: t, now: t, eligible: true, frameDuration: 0.04)
+                let stalled = frames.isStalled(at: t, lastSampleAt: t, frameDuration: 0.04)
+                if let action = presentation.observe(clock: t, now: t, eligible: true,
+                    missingVideo: stalled, frameDuration: 0.04, hasHealthyVideo: !stalled) {
+                    actions.append(action)
+                }
+            }
+            #expect(actions == (gap < 3 ? [] : gap < 7 ? [.nudge] : [.nudge, .reload]))
+        }
+    }
+
+    @Test("unavailable or delayed video output cannot trigger repair or rearm spent attempts")
+    func staleOutputAndUnknownHealth() {
+        var frames = warmed()
+        _ = frames.observe(frame: nil, clock: 0.8, now: 0.8, eligible: true, frameDuration: 0.04)
+        #expect(frames.isStalled(at: 0.8, lastSampleAt: 0.8, frameDuration: 0.04))
+        #expect(!frames.isStalled(at: 1.2, lastSampleAt: 0.8, frameDuration: 0.04))
+        #expect(!frames.isStalled(at: 0.8, lastSampleAt: nil, frameDuration: 0.04))
+        frames.reset()
+        #expect(!frames.isStalled(at: 20, lastSampleAt: 20, frameDuration: 0.04))
+        var monitor = VideoPresentationProgress()
+        for tick in 0..<200 {
+            let t = Double(tick) / 10
+            _ = monitor.observe(clock: t, now: t, eligible: true,
+                missingVideo: tick < 80, frameDuration: 0.04, hasHealthyVideo: false)
+        }
+        #expect(monitor.attempts == 2, "a ready flag or detached output alone never rearms repairs")
+    }
+
+    @Test("an unsuccessful internal repair keeps evidence through its temporary transport wait")
+    func pendingRepairSurvivesWaitingButNotUserTransitions() {
+        var frames = warmed()
+        frames.beginRecovery()
+        frames.reset(preservingRecovery: true)
+        #expect(frames.recoveryPending)
+        #expect(!frames.isStalled(at: 10, lastSampleAt: nil, frameDuration: 0.04))
+        _ = frames.observe(frame: nil, clock: 1, now: 10, eligible: true, frameDuration: 0.04)
+        #expect(!frames.isStalled(at: 10, lastSampleAt: 10, frameDuration: 0.04))
+        _ = frames.observe(frame: nil, clock: 1.5, now: 10.5, eligible: true, frameDuration: 0.04)
+        #expect(frames.isStalled(at: 10.5, lastSampleAt: 10.5, frameDuration: 0.04))
+        _ = frames.observe(frame: 1.6, clock: 1.6, now: 10.6, eligible: true, frameDuration: 0.04)
+        #expect(!frames.recoveryPending)
+        frames = warmed(); frames.beginRecovery(); frames.reset()
+        #expect(!frames.recoveryPending, "PiP, pause, seek and a new session discard stale repair evidence")
+    }
+
     private func warmed() -> VideoFrameProgress {
         var monitor = VideoFrameProgress()
         for time in [0.0, 0.1, 0.2] {

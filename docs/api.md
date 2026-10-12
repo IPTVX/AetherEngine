@@ -1120,6 +1120,20 @@ samples frame timestamps without suppressing the player layer or retaining pixel
 output gap is not proof of a physical screen freeze; unavailable output is reported explicitly,
 and the observation never seeks, retries, changes decoder routing or publishes a playback error.
 
+`LoadOptions.nativeVideoFrameRecovery` separately opts into bounded recovery when an SDR
+native-loopback output that previously yielded pictures stops advancing while the item clock
+continues. It defaults to `false`; enabling diagnostics alone does not enable this policy.
+Recovery enables the same sampling, excludes unavailable/stale observations and the modes above,
+and uses the same bounded, current-position repair as missing-layer recovery. Short gaps are
+observed without intervention; recovery does not promise to reconstruct source pictures that
+never arrived. Healthy decoded progress, not a transient readiness flag after a swap, rearms it.
+The `aetherctl play --native-video-frame-recovery` flag exercises the same policy.
+`ReplayVideoBoundary` logs numeric counts of damaged, replaced and unreplaced pictures at
+confirmed seams, separately from the number of duplicates removed. `superseded` counts
+conflicting unflagged copies resolved within the verified pending batch; `untimed` counts
+unpositioned fragments discarded from the held damaged boundary. Unrelated source
+timestamp resets do not grant this authority.
+
 Native presentation recovery separately watches the player layer's readiness. If a previously
 visible, attached video layer stays unready while foreground playback has both clock progress
 and buffered media, the engine first seeks to its current position and can then replace the

@@ -96,6 +96,24 @@ struct LiveReplayPacketReaderTests {
         }
     }
 
+    @Test("untimed fragments stay behind the damaged boundary until replay is proven", arguments: [false, true])
+    func untimedOutgoingFragment(verified: Bool) throws {
+        let damaged = [Sample(stream: 0, time: 40, byte: 9, corrupt: true),
+                       Sample(stream: 0, time: .min, byte: 8)]
+        let input = packets(0..<40) + damaged + packets(verified ? 0..<50 : 41..<50)
+        let output = try read(input, reader: reader())
+        if verified {
+            #expect(output.map(\.time) == packets(0..<50).map(\.time))
+            #expect(output.map(\.stream) == packets(0..<50).map(\.stream))
+            #expect(output.allSatisfy { $0.byte == 1 })
+        } else {
+            // No rollback proof: preserve every packet, including the untimed one.
+            #expect(output.count == input.count)
+            #expect(output.filter { $0.stream == 0 }.map(\.time)
+                == input.filter { $0.stream == 0 }.map(\.time))
+        }
+    }
+
     @Test("an outgoing good picture arriving after audio rollback is kept once in decode order")
     func outgoingPictureDuringDamagedBoundary() throws {
         let input = packets(0..<40)
