@@ -22,6 +22,19 @@ the public-API contract.
   source that is no disc costs the same probe reads as before. `aetherctl disc-inspect` reports such an
   image as `dvdVideo`.
 
+
+- **A seek lands on a DVD title, and the playhead holds across cells that restart their timestamps.**
+  A title's VOBs are read as one MPEG-PS, and many discs restart the presentation timestamps at a cell
+  boundary: *The Little Chinese Seamstress* puts its cell 7, at 3569 s of title time, at about 147 s. A
+  seek was a timestamp search over the whole title, which on such discs, and on *He's a Woman, She's a
+  Man* as well, read straight to the end of the title: a 2000 s seek ended the session. The main PGC's
+  cells are now folded onto the title timeline with the clip fold Blu-ray uses (AE#105), each cell's
+  timestamp base measured from its navigation packs (the VOBU start PTS less the cell's elapsed time),
+  and a seek goes to the VOBU's byte through the title's VTS time map. Both discs then landed every
+  seek (2000, 3560, 4500 and 300 s; 2000, 4000 and 500 s) and played on, across cell 7 without a jump
+  in the playhead. A title whose cells do not follow each other, that starts past its first sector, or
+  that has an angle block, or a disc without a time map, reads and seeks as before.
+
 ## [7.35.1] - 2026-10-12
 
 ### Fixed

@@ -14,11 +14,14 @@ struct DiscRecognition: Sendable {
     let clipTimeline: [ClipSpan]
     /// The selected title's EP-map seek table, cached with it so a re-open seeks the same way.
     let seekTable: DiscSeekTable?
+    /// The selected DVD title's time map, cached so a re-open seeks the same way.
+    let dvdTimeMap: DVDTimeMap?
 
     init(formatHint: String, titles: [DiscTitle], selectedTitleIndex: Int,
          extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = [],
-         seekTable: DiscSeekTable? = nil) {
+         seekTable: DiscSeekTable? = nil, dvdTimeMap: DVDTimeMap? = nil) {
         self.seekTable = seekTable
+        self.dvdTimeMap = dvdTimeMap
         self.formatHint = formatHint
         self.titles = titles
         self.selectedTitleIndex = selectedTitleIndex

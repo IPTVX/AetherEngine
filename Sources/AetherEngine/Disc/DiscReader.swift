@@ -231,12 +231,12 @@ enum DiscReader {
         cacheKey: String?, selectTitleID: Int?,
         formatHint: String, titles: [DiscTitle], selectedIndex: Int,
         extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = [],
-        seekTable: DiscSeekTable? = nil
+        seekTable: DiscSeekTable? = nil, dvdTimeMap: DVDTimeMap? = nil
     ) {
         guard let cacheKey else { return }
         let recognition = DiscRecognition(formatHint: formatHint, titles: titles,
                                           selectedTitleIndex: selectedIndex, extents: extents,
-                                          clipTimeline: clipTimeline, seekTable: seekTable)
+                                          clipTimeline: clipTimeline, seekTable: seekTable, dvdTimeMap: dvdTimeMap)
         DiscRecognitionCache.store(key: cacheKey, selectTitleID: selectTitleID, recognition)
         // The probe opens with selectTitleID == nil (default title), but the rest of the engine
         // references that same title by its resolved id (== selectedIndex): reloads and the subtitle
@@ -282,7 +282,8 @@ enum DiscReader {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,
                             selectedTitleIndex: cached.selectedTitleIndex,
-                            clipTimeline: cached.clipTimeline, seekTable: cached.seekTable)
+                            clipTimeline: cached.clipTimeline, seekTable: cached.seekTable,
+                            dvdTimeMap: cached.dvdTimeMap)
         }
         guard looksLikeISO9660(reader) else {
             // The anchor is read once: a probe's input budget counts every read recognition makes.
@@ -365,6 +366,7 @@ enum DiscReader {
         // Whole-VTS titles. Each VTS_NN_0.IFO's main PGC gives the title duration and chapter starts; a disc
         // with an unreadable VTS IFO keeps duration 0 / no chapters but still plays. dvdVTSN keeps the
         // title -> title-set mapping.
+        var selectedIFO: [UInt8]?  // the cell table and time map come from the selected title's VTS IFO
         let titles = orderedGroups.enumerated().map { idx, g -> DiscTitle in
             var durationTicks: UInt64 = 0
             var chapters: [DiscChapter] = []
@@ -376,6 +378,7 @@ enum DiscReader {
             if let vtsIFO = filesByName[ifoName] {
                 let bytes = readAll(reader, [(offset: Int64(vtsIFO.startSector * sectorSize),
                                              length: Int64(vtsIFO.length))])
+                if idx == selectedIndex { selectedIFO = bytes }
                 if let detail = DVDIFOParser.parseTitleDetail(bytes) {
                     durationTicks = detail.durationTicks
                     chapters = detail.chapterStartTicks.enumerated().map { i, start in
@@ -389,9 +392,42 @@ enum DiscReader {
                              streamLanguages: streamLanguages,
                              dvdSubpictureStreamIDs: subpictureStreamIDs)
         }
+        let (cellTimeline, timeMap) = selectedIFO.map(dvdCellTimeline) ?? ([], nil)
         storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
-                         formatHint: "mpeg", titles: titles, selectedIndex: selectedIndex, extents: extents)
+                         formatHint: "mpeg", titles: titles, selectedIndex: selectedIndex, extents: extents,
+                         clipTimeline: cellTimeline, dvdTimeMap: timeMap)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: extents),
-                        formatHint: "mpeg", titles: titles, selectedTitleIndex: selectedIndex)
+                        formatHint: "mpeg", titles: titles, selectedTitleIndex: selectedIndex,
+                        clipTimeline: cellTimeline, dvdTimeMap: timeMap)
+    }
+
+    /// The selected DVD title's cells as AE#105 clip spans, and its time map.
+    ///
+    /// A title's VOBs are read as one MPEG-PS, but many discs restart the presentation timestamps at each
+    /// cell: one title's 14 cells put cell 7, at 3569 s of title time, at 147.9 s. Past such a cell the
+    /// playhead and every timestamp search over the title go wrong. Each cell is handed to the Blu-ray
+    /// clip fold as a clip (its first byte in the concatenation, its start on the title timeline); its
+    /// actual timestamp base is measured from the navigation packs as they are read (`Demuxer.adoptDVDNav`).
+    /// The time map turns title time into a VOBU's byte, so a seek is one byte reposition.
+    /// Only the common shape is folded: the main PGC starts at the first title sector, its cells follow each
+    /// other sector by sector, and none is in an angle block. Anything else gets neither, and reads as before.
+    static func dvdCellTimeline(_ ifo: [UInt8]) -> ([ClipSpan], DVDTimeMap?) {
+        guard let cells = DVDIFOParser.parseMainPGCCells(ifo), cells.count >= 2, cells[0].firstSector == 0,
+              !cells.contains(where: \.inAngleBlock),
+              zip(cells, cells.dropFirst()).allSatisfy({ $1.firstSector == $0.lastSector + 1 }) else { return ([], nil) }
+        let sector: Int64 = 2048
+        var spans: [ClipSpan] = []
+        var cumulative = 0.0
+        for cell in cells {
+            // Predicted as if every cell restarts from cell 0's base; the navigation pack replaces it.
+            spans.append(ClipSpan(concatByteStart: Int64(cell.firstSector) * sector,
+                                  cumulativeBeforeSec: cumulative, predictedShiftSec: -cumulative))
+            cumulative += cell.durationSec
+        }
+        let timeMap = DVDIFOParser.parseMainTimeMap(ifo).map {
+            DVDTimeMap(unitSec: $0.unitSec, titleStartByte: 0, byteOffsets: $0.sectors.map { Int64($0) * sector })
+        }
+        EngineLog.emit("[disc] DVD title: \(cells.count) cells, time map \(timeMap.map { "\($0.byteOffsets.count) x \(Int($0.unitSec))s" } ?? "none")", category: .demux)
+        return (spans, timeMap)
     }
 }
