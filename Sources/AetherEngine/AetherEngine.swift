@@ -2731,12 +2731,17 @@ public final class AetherEngine: ObservableObject {
         }
         masterFallbackUsed = true
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
-        // AE#535: and only while the display is eligible for HDR, or the answer is about the window.
+        // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
         if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
             let eligibleNow = AVPlayer.eligibleForHDRPlayback
             let switching = displayCriteria.displayModeSwitchInProgress
-            if MasterFallbackDecision.shouldLatchPanelRefusal(
-                code: rejection.code, displayEligibleForHDRNow: eligibleNow,
+            if !session.servedSourceIsHDR {
+                EngineLog.emit(
+                    "[DisplayCriteria] SDR master refused (code=\(rejection.code)); this item falls back, "
+                    + "an SDR refusal does not latch the HDR route (#535)",
+                    category: .engine)
+            } else if MasterFallbackDecision.shouldLatchPanelRefusal(
+                code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
                 displaySwitchInProgress: switching) {
                 Self.panelRefusedHDRMaster = true
                 EngineLog.emit(
