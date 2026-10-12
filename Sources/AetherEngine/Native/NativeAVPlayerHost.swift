@@ -2295,7 +2295,7 @@ final class NativeAVPlayerHost {
         for track in tracks {
             let fourcc: String
             var extra = ""
-            if let cm = (try? await track.load(.formatDescriptions))?.first {
+            if let cm = await Self.formatDescriptions(of: track).first {
                 fourcc = fourccString(CMFormatDescriptionGetMediaSubType(cm))
                 if track.mediaType == .audio {
                     extra = " " + audioFormatDescription(cm)
@@ -2320,7 +2320,7 @@ final class NativeAVPlayerHost {
             guard let assetTrack = itemTrack.assetTrack else { continue }
             let fourcc: String
             var extra = ""
-            if let cm = (try? await assetTrack.load(.formatDescriptions))?.first {
+            if let cm = await Self.formatDescriptions(of: assetTrack).first {
                 fourcc = fourccString(CMFormatDescriptionGetMediaSubType(cm))
                 if assetTrack.mediaType == .audio {
                     extra = " " + audioFormatDescription(cm)
@@ -2584,7 +2584,7 @@ final class NativeAVPlayerHost {
         guard sid != 0, playerItem === item else { return }
         for itemTrack in item.tracks {
             guard let assetTrack = itemTrack.assetTrack, assetTrack.mediaType == .video else { continue }
-            guard let cm = try? await assetTrack.load(.formatDescriptions).first else { continue }
+            guard let cm = await Self.formatDescriptions(of: assetTrack).first else { continue }
             let rate = (try? await assetTrack.load(.nominalFrameRate)).map(Double.init)
             guard sessionID == sid, playerItem === item else { return }
             let subType = CMFormatDescriptionGetMediaSubType(cm)
@@ -2623,7 +2623,7 @@ final class NativeAVPlayerHost {
         var readings: [RemoteHLSStreamDescription.AudioReading] = []
         for itemTrack in item.tracks {
             guard let assetTrack = itemTrack.assetTrack, assetTrack.mediaType == .audio else { continue }
-            guard let cm = try? await assetTrack.load(.formatDescriptions).first else { continue }
+            guard let cm = await Self.formatDescriptions(of: assetTrack).first else { continue }
             let extendedTag = try? await assetTrack.load(.extendedLanguageTag)
             let languageCode = try? await assetTrack.load(.languageCode)
             let language = [extendedTag ?? nil, languageCode ?? nil, selectedOptionLanguage]
@@ -2647,7 +2647,7 @@ final class NativeAVPlayerHost {
             let mediaType = assetTrack?.mediaType.rawValue ?? "?"
             var fdesc: CMFormatDescription?
             if let assetTrack {
-                fdesc = (try? await assetTrack.load(.formatDescriptions))?.first
+                fdesc = await Self.formatDescriptions(of: assetTrack).first
             }
             let fourCC: String
             if let cm = fdesc {
@@ -2664,6 +2664,24 @@ final class NativeAVPlayerHost {
             }
             EngineLog.emit("[NativeAVPlayerHost] #\(sid)   item.tracks[\(idx)] mediaType=\(mediaType) fourCC=\(fourCC) enabled=\(itrack.isEnabled)", category: .engine)
         }
+    }
+
+    /// AE#735: the first audio format description a process builds loads the audio DSP stack through
+    /// dyld, measured at 3.8 s on an Apple TV 4K. Since the 26 SDKs `load` takes `isolation: = #isolation`
+    /// and runs on the caller's actor, every caller here is the main actor, so the first readyToPlay of a
+    /// launch froze the host's UI while the video kept playing. Off the main actor, on a thread that may block.
+    static func formatDescriptions(of track: AVAssetTrack) async -> [CMFormatDescription] {
+        let track = UncheckedAssetTrack(value: track)
+        return await loadOffMainActor { try await track.value.load(.formatDescriptions) } ?? []
+    }
+
+    /// The async `load` is AVFoundation's any-thread API; the SDK just does not mark the track Sendable.
+    private struct UncheckedAssetTrack: @unchecked Sendable { let value: AVAssetTrack }
+
+    nonisolated static func loadOffMainActor<Value: Sendable>(
+        _ load: @escaping @Sendable () async throws -> Value
+    ) async -> Value? {
+        await BlockingWork.detached(priority: .userInitiated) { try? await load() }.value
     }
 
     nonisolated private static func videoFormatDescription(_ fmt: CMFormatDescription) -> String {
@@ -2694,7 +2712,7 @@ final class NativeAVPlayerHost {
         for itemTrack in item.tracks {
             guard let assetTrack = itemTrack.assetTrack else { continue }
             guard assetTrack.mediaType == .audio else { continue }
-            guard let cm = try? await assetTrack.load(.formatDescriptions).first else { continue }
+            guard let cm = await Self.formatDescriptions(of: assetTrack).first else { continue }
             let codec = fourccString(CMFormatDescriptionGetMediaSubType(cm))
             if codec.lowercased() == "flac" {
                 isFLAC = true
@@ -2744,7 +2762,7 @@ final class NativeAVPlayerHost {
         for itemTrack in item.tracks {
             guard let assetTrack = itemTrack.assetTrack else { continue }
             guard assetTrack.mediaType == .audio else { continue }
-            guard let cm = try? await assetTrack.load(.formatDescriptions).first else { continue }
+            guard let cm = await Self.formatDescriptions(of: assetTrack).first else { continue }
             let codec = fourccString(CMFormatDescriptionGetMediaSubType(cm))
             let lower = codec.lowercased()
             if lower == "ec-3" || lower == "ac-3" {
