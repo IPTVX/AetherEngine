@@ -197,6 +197,24 @@ struct BluRayEPMapSeekTests {
         #expect(try DiscReader.wrap(DataIOReader(data: image))?.seekTable == nil)
     }
 
+    static func folder(withCLPI: Bool) -> BluRayFolderTests.MemoryFolder {
+        var files: [(String, Data)] = [
+            ("BDMV/index.bdmv", Data([0x49, 0x4E, 0x44, 0x58])),
+            ("BDMV/PLAYLIST/00800.mpls", Data(mpls([(id: "00001", inT: 63_000, outT: 63_000 + 8 * 45_000)]))),
+            ("BDMV/STREAM/00001.m2ts", Data(tinyM2TS)),
+        ]
+        if withCLPI { files.append(("BDMV/CLIPINF/00001.clpi", Data(clpi([(pid: 0x1011, entries: tinyEntries)])))) }
+        return BluRayFolderTests.MemoryFolder(files)
+    }
+
+    @Test("a Blu-ray folder reads its clips' CLPI into the seek table too")
+    func folderBuildsTheTable() throws {
+        let info = try #require(DiscReader.wrapBluRayFolder(Self.folder(withCLPI: true), selectTitleID: nil))
+        let table = try #require(info.seekTable)
+        #expect(table.clips.map(\.entries) == [Self.tinyEntries])
+        #expect(DiscReader.wrapBluRayFolder(Self.folder(withCLPI: false), selectTitleID: nil)?.seekTable == nil)
+    }
+
     @Test("a seek goes to the keyframe's byte, and the first picture read is that keyframe", arguments: [
         (target: 5.0, keyframe: 4.4), (target: 2.4, keyframe: 2.4), (target: 8.9, keyframe: 8.4), (target: 1.0, keyframe: 1.4),
     ])

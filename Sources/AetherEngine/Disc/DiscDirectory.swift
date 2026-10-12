@@ -291,8 +291,14 @@ extension DiscReader {
         }
         let totalBytes = segments.reduce(Int64(0)) { $0 + $1.size }
         EngineLog.emit("[disc] Blu-ray folder recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) files=\(segments.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) preferred=\(folder.preferredPlaylist ?? "-")", category: .demux)
+        let seekTable = buildSeekTable(title: selected, resolved: assembled.resolved) { clip in
+            guard let info = file("BDMV/CLIPINF/\(clip).clpi"), info.size > 0,
+                  let reader = folder.openDiscFile(info.path) else { return nil }
+            defer { reader.close() }
+            return readAll(reader, [(offset: 0, length: info.size)])
+        }
         return DiscInfo(reader: MultiFileConcatIOReader(segments: segments, opener: { folder.openDiscFile($0) }),
                         formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex,
-                        clipTimeline: clipTimeline)
+                        clipTimeline: clipTimeline, seekTable: seekTable)
     }
 }
