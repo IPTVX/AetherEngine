@@ -18,6 +18,7 @@ struct LoadOptionsTests {
         // Default panelIsInHDRMode MUST be false (conservative branch).
         #expect(opts.panelIsInHDRMode == false)
         #expect(opts.audioBridgeMode == .surroundCompat)
+        #expect(opts.objectAudioRendering == .off)
         #expect(opts.isLive == false)
         #expect(opts.audioOnly == false)
         // #68: probe-budget overrides default to nil so the engine keeps the

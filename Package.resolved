@@ -1,13 +1,13 @@
 {
-  "originHash" : "aaad2851e63fbb5d8035f6ae9c6abb71e8e010beeeb30d2f9dbbe60ccd7022f6",
+  "originHash" : "96c481f928bc7cb65d49a156d54e08be0a6c67e822713ed6a3b07088dcafaae8",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/IPTVX/FFmpegBuild",
       "state" : {
-        "revision" : "b9e9a498c1ddc54aa8620f83a0cf63f49c100a64",
-        "version" : "3.6.0-iptvx"
+        "revision" : "edbf711a6a4f4e7a12ee6e418f73b7ec3fed7107",
+        "version" : "3.7.0-iptvx"
       }
     },
     {
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "631c9d2c112dfcdd962a0c2909b6f0aa8a01cdd1",
         "version" : "2.1.0-iptvx"
+      }
+    },
+    {
+      "identity" : "libtruehd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/IPTVX/LibTrueHD",
+      "state" : {
+        "revision" : "7e8e2a19bd52eb6be16111959693994f46802b30",
+        "version" : "2.2.0-iptvx"
       }
     },
     {

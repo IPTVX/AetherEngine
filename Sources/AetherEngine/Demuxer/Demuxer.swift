@@ -1231,9 +1231,23 @@ public final class Demuxer: @unchecked Sendable {
 
     /// AVFormatContext.bit_rate in bps, or 0 if unknown. Used by
     /// HLSVideoEngine.masterBandwidth to populate HLS BANDWIDTH attributes.
+    ///
+    /// A disc title takes its rate from its own size over its playlist duration instead, whenever
+    /// libavformat produced one. libavformat divides the source size by the duration it read off the
+    /// timestamps, and that duration is as unreliable over a multi-clip title whose clips restart their
+    /// clock as it is for `duration` (AE#105): a 6537 s title whose two clips both start at 11.6 s probed
+    /// as 388 s, and its 54.6 GB declared 1.1 Gbit/s on average and 2.25 Gbit/s at peak, a variant no
+    /// AVPlayer ever chose (it waited with no item to play). A title libavformat gives no rate for keeps
+    /// the 0 and the caller's over-declared fallback.
     var bitRate: Int64 {
         guard let ctx = formatContext else { return 0 }
-        return ctx.pointee.bit_rate
+        let declared = ctx.pointee.bit_rate
+        guard declared > 0, let titleSeconds = selectedDiscTitleDurationSeconds, let pb = ctx.pointee.pb else {
+            return declared
+        }
+        let size = avio_size(pb)
+        guard size > 0 else { return declared }
+        return Int64((Double(size) * 8 / titleSeconds).rounded())
     }
 
     /// AVFormatContext.start_time in AV_TIME_BASE units. Non-zero on re-muxed

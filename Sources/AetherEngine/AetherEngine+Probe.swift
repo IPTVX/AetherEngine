@@ -635,22 +635,58 @@ extension AetherEngine {
     nonisolated static func selectAudioIndex(
         tracks: [TrackInfo],
         override: Int32?,
-        preferredLanguages: [String]
+        preferredLanguages: [String],
+        prefersTrueHDAtmos: Bool = false,
+        defaultIndex: Int32 = -1
     ) -> Int32? {
         // Explicit host override wins, but only when it names a real audio track (else fall through).
         if let override, tracks.contains(where: { $0.id == Int(override) }) {
             return override
         }
+        // #731: with object rendering on, TrueHD Atmos keeps its heights, which no other track of the
+        // same language does better, so it wins ties within a language. Never across one.
+        let atmosRank: ((Int) -> Int)? = prefersTrueHDAtmos
+            ? { isRenderableTrueHDAtmos(tracks[$0]) ? 0 : 1 }
+            : nil
         // Each preference is scanned across all tracks in order, so an earlier preference on a later
         // track still beats a later preference on an earlier track. Within one preference the most
         // specific tag wins, so an "en-GB" preference takes en-GB over eng over en-US (#590).
-        guard let index = bestLanguageMatchIndex(
+        if let index = bestLanguageMatchIndex(
             languages: tracks.map(\.language),
             preferredLanguages: preferredLanguages,
-            kind: .audio
-        ) else { return nil }
-        return Int32(tracks[index].id)
+            kind: .audio,
+            secondaryRank: atmosRank
+        ) {
+            return Int32(tracks[index].id)
+        }
+        // No language preference decided it: the session would take its default track, so a TrueHD
+        // Atmos track in that track's language replaces it.
+        // Same dub only: a script or region both tags state and disagree on (es-ES against es-419) is
+        // another dub, not another format of this one.
+        guard prefersTrueHDAtmos,
+              let fallback = tracks.first(where: { $0.id == Int(defaultIndex) }),
+              !isRenderableTrueHDAtmos(fallback),
+              let language = fallback.language
+        else { return nil }
+        let candidates = tracks.compactMap { track -> (track: TrackInfo, rank: Int)? in
+            guard isRenderableTrueHDAtmos(track),
+                  let rank = languageMatchRank(track.language, language, kind: .audio),
+                  rank / 3 < 2, rank % 3 < 2 else { return nil }
+            return (track, rank)
+        }
+        guard let atmos = candidates.min(by: { $0.rank < $1.rank })?.track else { return nil }
+        return Int32(atmos.id)
     }
+
+    /// TrueHD that FFmpeg marked Atmos while probing (mlpdec sets the profile from the major sync), and
+    /// not a commentary. `TrackInfo.isAtmos` stays the E-AC-3 JOC answer it is documented as.
+    nonisolated static func isRenderableTrueHDAtmos(_ track: TrackInfo) -> Bool {
+        track.codec.lowercased() == "truehd" && !track.isCommentary && !track.isExternal
+            && track.profile == trueHDAtmosProfileName
+    }
+
+    nonisolated private static let trueHDAtmosProfileName =
+        VideoStreamFormat.profileName(codecID: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS)
 
     /// Resolve the subtitle track to auto-activate from `LoadOptions.preferredSubtitleLanguages`: within the
     /// first preference (scanned in order) that has any language match, the best track by language

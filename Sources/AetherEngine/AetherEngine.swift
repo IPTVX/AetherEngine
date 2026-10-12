@@ -3884,7 +3884,8 @@ public final class AetherEngine: ObservableObject {
     ) async throws -> HLSVODIngestReroute {
         guard let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: playlistURL,
-            httpHeaders: options.httpHeaders
+            httpHeaders: options.httpHeaders,
+            persistentHTTP1: options.heldSourceConnection
         ) else { return .notTaken }
         try checkLoadCurrent(generation)
         EngineLog.emit(
@@ -4661,7 +4662,14 @@ public final class AetherEngine: ObservableObject {
         let selectedAudio = Self.selectAudioIndex(
             tracks: probedAudioTracks,
             override: audioSourceStreamIndex,
-            preferredLanguages: options.preferredAudioLanguages
+            preferredLanguages: options.preferredAudioLanguages,
+            // Only where the spatial bridge can run: the loopback route of a VOD video session. Live,
+            // audio-only and the software path would decode TrueHD for its 7.1 bed and no heights.
+            prefersTrueHDAtmos: options.objectAudioRendering != .off && !options.isLive && !options.audioOnly
+                && !VideoRoutingPolicy.requiresSoftwarePath(
+                    codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
+                    av1Available: VTCapabilityProbe.av1Available),
+            defaultIndex: probedDefaultAudioIndex
         ) ?? (probeOpened ? nil : audioSourceStreamIndex)
         let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
         activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
@@ -7049,7 +7057,8 @@ public final class AetherEngine: ObservableObject {
         (audioAVPlayerActive || audioHost != nil) ? 3.0 : 2.0
     }
 
-    /// Set playback speed. Clamped to `maxSupportedRate` (AetherEngine#39). 0 pauses.
+    /// Set playback speed. Clamped to `maxSupportedRate` (AetherEngine#39). 0 pauses. While paused a
+    /// non-zero rate is kept for the next `play()` instead of resuming (#730).
     /// Both paths are pitch-preserving: the engine pins `audioTimePitchAlgorithm` to TimeDomain on the
     /// native `AVPlayerItem` and on the software path's audio renderer, so speed never depends on which
     /// decode route a title took (#434).
@@ -7061,6 +7070,13 @@ public final class AetherEngine: ObservableObject {
         }
         // Zero is a pause, not a speed: it must not become what a later resume comes back at (#436).
         if clamped != 0 { desiredRate = clamped }
+        // #730: while paused a speed is a speed, not a play press. Handing it to the host would play
+        // (`avPlayer.rate = x`) behind a state that still says paused; seeding the resume rate is what
+        // the next play() reads on every host.
+        if state == .paused && clamped != 0 {
+            activeTransportHost?.setResumeRate(clamped)
+            return
+        }
         activeTransportHost?.setRate(clamped)
     }
 

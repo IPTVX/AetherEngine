@@ -11,7 +11,8 @@ struct Issue694AudioHostEndOfMediaParkTests {
     /// IPTVX reapplies the requested speed before Play. Once the source ended, that transport
     /// sequence and a later Pause/Play must keep the clock parked until an explicit seek or reload.
     @MainActor
-    @Test("after end of media the clock stays on the last sample through late park, speed and play requests")
+    @Test("after end of media the clock stays on the last sample through late park, speed and play requests",
+          .timeLimit(.minutes(2)))
     func clockParksOnTheLastSample() async throws {
         let host = AudioPlaybackHost()
         let demuxer = Demuxer()
@@ -20,19 +21,13 @@ struct Issue694AudioHostEndOfMediaParkTests {
         defer { host.stop() }
         host.play()
 
-        let deadline = Date().addingTimeInterval(8)
-        while !host.didReachEnd, Date() < deadline {
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
+        try await waitFor { host.didReachEnd }
         #expect(host.didReachEnd)
         // What a loaded runner does to the deferred park (CI: parked at 1.149 s): hold the main actor
         // past the queued tail, so the park runs after the clock has walked on.
         usleep(500_000)
 
-        let parkDeadline = Date().addingTimeInterval(2)
-        while host.clockRateForTesting != 0, Date() < parkDeadline {
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
+        try await waitFor { host.clockRateForTesting == 0 }
         #expect(host.clockRateForTesting == 0)
         #expect(host.rate == 0)
 
