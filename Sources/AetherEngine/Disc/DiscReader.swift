@@ -33,8 +33,10 @@ enum DiscReader {
     /// Emits `.demux` diagnostics once the UDF anchor is confirmed so a disc image
     /// that fails recognition is debuggable (it would otherwise fall back to a raw
     /// FFmpeg open that reports a bare INVALIDDATA). Non-disc sources stay silent.
-    static func wrapBluRay(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
-        guard looksLikeUDF(reader) else { return nil }
+    /// `udfAnchorChecked`: the caller has already found the UDF anchor, so it is not read again.
+    static func wrapBluRay(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil,
+                           udfAnchorChecked: Bool = false) throws -> DiscInfo? {
+        guard udfAnchorChecked || looksLikeUDF(reader) else { return nil }
         EngineLog.emit("[disc] UDF anchor present; attempting Blu-ray BDMV", category: .demux)
         let udf: UDFReader
         do { udf = try UDFReader(reader: reader) }
@@ -282,7 +284,15 @@ enum DiscReader {
                             selectedTitleIndex: cached.selectedTitleIndex,
                             clipTimeline: cached.clipTimeline, seekTable: cached.seekTable)
         }
-        guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
+        guard looksLikeISO9660(reader) else {
+            // The anchor is read once: a probe's input budget counts every read recognition makes.
+            guard looksLikeUDF(reader) else { return nil }
+            if let bluRay = try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey,
+                                           udfAnchorChecked: true) {
+                return bluRay
+            }
+            return wrapUDFDVD(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)
+        }
         let iso: ISO9660Reader
         do {
             iso = try ISO9660Reader(reader: reader)
@@ -295,15 +305,52 @@ enum DiscReader {
         } catch DiscError.directoryNotFound {
             return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)  // ISO9660 but not a DVD-Video disc (Blu-ray / data disc)
         }
+        if let dvd = wrapDVD(reader, files: files, sectorSize: iso.sectorSize, selectTitleID: selectTitleID,
+                             cacheKey: cacheKey) {
+            return dvd
+        }
+        return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)
+    }
+
+    /// A DVD-Video image with no ISO9660 bridge volume: sector 16 starts UDF's BEA01 directly, so the image
+    /// used to go down the Blu-ray branch, find no BDMV, and play as a raw file, which is the first VOB's
+    /// menu (8 s of a 6364 s film). `VIDEO_TS` is listed through UDF instead, and the title is built the
+    /// same way as from ISO9660. DVD files are one contiguous run on disc; a file recorded as runs that do
+    /// not continue each other is left out. The caller has found the UDF anchor.
+    static func wrapUDFDVD(_ reader: IOReader, selectTitleID: Int?, cacheKey: String?) -> DiscInfo? {
+        guard let udf = try? UDFReader(reader: reader),
+              let root = try? udf.list(path: []),
+              let dir = root.first(where: { $0.isDir && $0.name.uppercased() == "VIDEO_TS" }),
+              let entries = try? udf.list(path: [dir.name]) else { return nil }
+        let sectorSize = 2048
+        let files: [DiscFile] = entries.compactMap { entry in
+            guard !entry.isDir, let extents = try? udf.extents(of: entry), let first = extents.first,
+                  first.offset % Int64(sectorSize) == 0 else { return nil }
+            var end = first.offset
+            for extent in extents {
+                guard extent.offset == end else { return nil }
+                end += extent.length
+            }
+            return DiscFile(name: entry.name, startSector: Int(first.offset / Int64(sectorSize)),
+                            length: Int(end - first.offset))
+        }
+        EngineLog.emit("[disc] UDF-only image with VIDEO_TS (\(files.count) files); attempting DVD-Video", category: .demux)
+        return wrapDVD(reader, files: files, sectorSize: sectorSize, selectTitleID: selectTitleID, cacheKey: cacheKey)
+    }
+
+    /// A DVD-Video title set from a `VIDEO_TS` listing, whichever filesystem it came from; nil when the
+    /// listing holds no title VOBs.
+    private static func wrapDVD(_ reader: IOReader, files: [DiscFile], sectorSize: Int, selectTitleID: Int?,
+                                cacheKey: String?) -> DiscInfo? {
         let groups = DVDTitleSelector.enumerateTitleVOBGroups(files)
-        guard !groups.isEmpty else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
+        guard !groups.isEmpty else { return nil }
         // VIDEO_TS.IFO's TT_SRPT names which title sets are real titles; filter the VOB groups to those so
         // incidental content VTS are excluded. Any parse failure (or a filter that would empty the list)
         // falls back to the full VOB-grouped set, so a disc with an unreadable VMGI still plays multi-title.
         var orderedGroups = groups
         let filesByName = Dictionary(files.map { ($0.name.uppercased(), $0) }, uniquingKeysWith: { first, _ in first })
         if let ifoFile = filesByName["VIDEO_TS.IFO"] {
-            let ifoBytes = readAll(reader, [(offset: Int64(ifoFile.startSector * iso.sectorSize),
+            let ifoBytes = readAll(reader, [(offset: Int64(ifoFile.startSector * sectorSize),
                                              length: Int64(ifoFile.length))])
             if let ifoTitles = DVDIFOParser.parseTitles(ifoBytes) {
                 let titleVTSNs = Set(ifoTitles.map(\.vtsn))
@@ -313,7 +360,7 @@ enum DiscReader {
         }
         let selectedIndex = selectTitleID.flatMap { orderedGroups.indices.contains($0) ? $0 : nil } ?? 0
         let extents = orderedGroups[selectedIndex].vobs.map {
-            (offset: Int64($0.startSector * iso.sectorSize), length: Int64($0.length))
+            (offset: Int64($0.startSector * sectorSize), length: Int64($0.length))
         }
         // Whole-VTS titles. Each VTS_NN_0.IFO's main PGC gives the title duration and chapter starts; a disc
         // with an unreadable VTS IFO keeps duration 0 / no chapters but still plays. dvdVTSN keeps the
@@ -327,7 +374,7 @@ enum DiscReader {
             let nn = g.vtsn < 10 ? "0\(g.vtsn)" : "\(g.vtsn)"
             let ifoName = "VTS_\(nn)_0.IFO"
             if let vtsIFO = filesByName[ifoName] {
-                let bytes = readAll(reader, [(offset: Int64(vtsIFO.startSector * iso.sectorSize),
+                let bytes = readAll(reader, [(offset: Int64(vtsIFO.startSector * sectorSize),
                                              length: Int64(vtsIFO.length))])
                 if let detail = DVDIFOParser.parseTitleDetail(bytes) {
                     durationTicks = detail.durationTicks

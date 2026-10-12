@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A DVD-Video image without an ISO9660 bridge volume plays its film, not its menu.** DVD recognition
+  only looked for `VIDEO_TS` through ISO9660, so an image that is UDF only (sector 16 starts UDF's BEA01
+  directly) went down the Blu-ray branch, found no `BDMV`, and was opened raw: the session played the
+  first VOB, which is the menu. *The Little Chinese Seamstress* reported 7.9 s and played only its menu;
+  it now reports 6364 s, as its IFO declares, and plays the title set. Such an image now has `VIDEO_TS`
+  listed through UDF once no `BDMV` is found, and the title is built as from ISO9660. A file recorded as
+  runs that do not continue each other is left out of the title. The UDF anchor is still read once, so a
+  source that is no disc costs the same probe reads as before. `aetherctl disc-inspect` reports such an
+  image as `dvdVideo`.
 
 ## [7.35.1] - 2026-10-12
 
