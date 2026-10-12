@@ -107,3 +107,17 @@ The final native decoder comparison uses the complete demuxed packet sequence.
 VideoToolbox comparison verifies native decoding; live AVPlayer smoke tests separately
 exercise the actual HLS consumer. Neither substitutes for a subsequent run on the
 reporter's four physical devices after this correction.
+
+## CI and strict-pool reproducibility
+
+The standalone PR's first run at `48c6aafd` passed the complete normal macOS suite,
+the new five-seam native-decoder cases in both normal and strict-pool runs, iOS
+Simulator plus release CLI, tvOS/visionOS Simulator, and documentation checks.
+Its strict-pool run reported one failure in the unchanged
+`SourcePrewarmAdoptionTests.fullyWarmedSourceOpensWithNoConnection`: two requests
+were observed where one was expected. That test and prewarm implementation have no
+changes in this PR. A complete local rerun using
+`LIBDISPATCH_COOPERATIVE_POOL_STRICT=1 swift test --skip-build --disable-xctest`
+passed all 4,376 Swift Testing tests in 603 suites. No prewarm code or assertion was
+changed or disabled. The subsequent documentation-only commit requests another CI
+run; a later green run does not erase the original intermittent result.
