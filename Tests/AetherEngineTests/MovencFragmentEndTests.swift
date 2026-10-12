@@ -16,13 +16,15 @@ import AetherLibavutil
 struct MovencFragmentEndTests {
 
     /// Runs the shape in a child process: before the fix it is a SIGABRT, which would take the whole
-    /// test runner down with it.
+    /// test runner down with it. Exit tests exist on macOS only, not in the tvOS/iOS/visionOS simulators.
+    #if os(macOS)
     @Test("finalize with a queued packet behind a clamped written sample")
     func finalizeWithQueuedPacketBehindClampedSample() async {
         await #expect(processExitsWith: .success) {
             try MovencFragmentEndTests.runOvershootThenFinalize()
         }
     }
+    #endif
 
     // MARK: - Scenario
 
