@@ -21,6 +21,12 @@ the public-API contract.
 
 ### Fixed
 
+- **H.264 MP4s with missing composition offsets keep display order across cadence changes and
+  hierarchical B pictures.** A corroborated missing-offset head with a changing decode cadence now
+  reuses the existing timestamp slots. Later zero-offset regions can prove a forward-coded anchor
+  farther ahead than the declared backward reorder delay, using a bounded complete-prefix check.
+  Original DTS, audio, payload and index remain unchanged; unsupported sequences still pass through.
+
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
   `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
