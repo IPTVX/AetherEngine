@@ -80,6 +80,13 @@ the public-API contract.
   direction error, +3.2° → +0.4° elevation bias, +4.1 → +0.6 points top-share; a single overhead
   helicopter 6.3° → 0.2°; Dolby's Amaze 4.7° → 3.3°.
 
+- **A 5.1 bed's surrounds sit where TS 103 448 puts them.** The object renderer placed the 5.1.2 and
+  5.1.4 surrounds in the rear corners; table A.3 puts them halfway down the side walls, where a 7.1 bed
+  has its sides. An object on the side wall halfway back now plays from the surround alone instead of
+  half from the front, and one a quarter of the way back puts 50% of its power in the surround
+  instead of 15%. The no-back and no-sides zone masks no longer take a 5.1 layout's surrounds away,
+  which table 4 does not do on a 3/2 floor; screen-only still does. 7.1 and 9.1 layouts are unchanged.
+
 ## [7.35.1] - 2026-10-12
 
 ### Fixed

@@ -211,8 +211,9 @@ final class ObjectAudioRenderer {
 
     /// Where a speaker-anchored bed channel the layout lacks goes when panning it would be wrong. A
     /// 7.1 bed's side and rear surrounds both belong on a 5.1 layout's surround pair, the way a 7.1 to
-    /// 5.1 downmix folds them; panned by position, a side surround halfway down the wall would put
-    /// half its power in the front speakers.
+    /// 5.1 downmix folds them, and a 5.1 bed's surrounds on a 7.1 layout's sides, which sit where
+    /// TS 103 448 puts the 5.1 surrounds. Panned by position, a 5.1 surround would split between a
+    /// 7.1 layout's sides and rears.
     static func downmixTarget(_ speaker: SpatialSpeaker, in layout: SpatialSpeakerLayout) -> Int? {
         let speakers = layout.speakers
         switch speaker {

@@ -198,9 +198,11 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
 
     /// Built once: they run per changed element on every metadata update.
     private static let heights = Set(SpatialSpeaker.allCases.filter(\.isHeight))
-    private static let noBack: Set<SpatialSpeaker> = [.rearLeft, .rearRight, .surroundLeft, .surroundRight]
+    /// A 5.1 layout's surrounds are in neither zone: TS 103 448 table 4 excludes nothing for those
+    /// two masks on a 3/2 floor, and only screen-only takes the surrounds away.
+    private static let noBack: Set<SpatialSpeaker> = [.rearLeft, .rearRight]
     private static let noSides: Set<SpatialSpeaker> = [.sideLeft, .sideRight, .wideLeft, .wideRight]
-    private static let screenOnly = noSides.union(noBack)
+    private static let screenOnly = noSides.union(noBack).union([.surroundLeft, .surroundRight])
     private static let surroundOnly: Set<SpatialSpeaker> = [.left, .right, .center, .wideLeft, .wideRight]
     /// Centre and back zones only: off the front pair, the wides and the sides.
     private static let centerBack: Set<SpatialSpeaker> = [.left, .right, .wideLeft, .wideRight, .sideLeft, .sideRight]
