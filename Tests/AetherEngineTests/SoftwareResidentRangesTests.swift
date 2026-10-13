@@ -160,6 +160,25 @@ struct SoftwareResidentRangesTests {
 @MainActor
 @Suite("Software resident range publication", .timeLimit(.minutes(2)))
 struct SoftwareResidentRangePublicationTests {
+    private nonisolated static func isMainThread() -> Bool {
+        Thread.isMainThread
+    }
+
+    @Test("Residency sampling leaves both main and the cooperative executor")
+    @available(visionOS 2, *)
+    func samplingExecutor() async {
+        let publisher = SoftwareResidentRangePublication()
+        var received: [ClosedRange<Double>] = []
+        let work = publisher.sample {
+            let label = String(cString: __dispatch_queue_get_label(nil))
+            #expect(!Self.isMainThread())
+            #expect(!label.contains("cooperative"), "residency read ran on \(label)")
+            return [1...2]
+        } publish: { received = $0 }
+        await work?.value
+        #expect(received == [1...2])
+    }
+
     private actor Gate {
         private(set) var entered = false
         private var waiter: CheckedContinuation<Void, Never>?
