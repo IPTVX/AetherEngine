@@ -10,6 +10,8 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [7.36.0] - 2026-10-13
+
 ### Added
 
 - **DTS:X keeps its heights too.** Apple TV cannot bitstream DTS-HD either, so the bridge decoded a
@@ -72,6 +74,20 @@ the public-API contract.
 - **A custom source that fails its probe says why (#745, thanks @yucelokan).** `.customSourceProbeFailed` now carries
   the probe error's `underlyingDomain` and `underlyingCode` in `errorInfo`, set before the terminal
   `.error` state, where it used to arrive with nothing but the generic message.
+- **Video comes back after a screen lock on the software path (#739, thanks @ijuniorfu).** On iOS a
+  screen lock invalidates the VideoToolbox session, and the decoder only logged the resulting
+  `kVTInvalidSessionErr` (-12903) and kept feeding the dead session, so the picture never returned. A
+  source without audio raced to EOF in the background, since audio-only mode had nothing to pace it.
+  The lost session is now rebuilt from its stored format description and resumes at the next
+  keyframe, repositioned to the playhead in the foreground and owed to the foreground return in the
+  background. A software session that renders no audio is released like a paused one instead of
+  entering audio-only mode. `aetherctl bgaudio --lose-session` reproduces both cases.
+- **A playlist served without a length plays (#733).** A playlist endpoint answering 200 with no
+  Content-Length (chunked, typical for a dynamic `/api/playlist?id=` handler) goes forward-only at the
+  open, and the `#EXTM3U` check only read the window that path leaves empty, so FFmpeg got the m3u8
+  and the load ended in "Invalid data found when processing input". The same classification now runs
+  on the forward-only stream's first bytes, and the playlist reaches the HLS ingest.
+
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
   `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
