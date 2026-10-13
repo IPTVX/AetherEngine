@@ -50,6 +50,9 @@ the public-API contract.
 
 ### Fixed
 
+- **A custom source that fails its probe says why (#745, thanks @yucelokan).** `.customSourceProbeFailed` now carries
+  the probe error's `underlyingDomain` and `underlyingCode` in `errorInfo`, set before the terminal
+  `.error` state, where it used to arrive with nothing but the generic message.
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
   `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
@@ -176,7 +179,6 @@ the public-API contract.
 
 ### Fixed
 
-- Preserve the underlying probe error in `PlaybackErrorInfo` when a custom source fails to open, before publishing the terminal player state.
 - **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
   divides the source size by the duration it reads off the timestamps, which over such a title is as
   wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
