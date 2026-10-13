@@ -119,6 +119,7 @@ extension HLSVideoEngine {
             // Short on purpose: hosts append it to a track title in one-line stats rows.
             audioPipelineDescription = "\(sourceCodecLabel) Atmos → APAC \(layout.rawValue)"
             audioDelivery = .bridged
+            audioIsAPAC = true
             EngineLog.emit(
                 "[HLSVideoEngine] TrueHD Atmos: objects rendered into \(layout.rawValue), delivered as "
                 + "\(bridge.hlsCodecs) (lossy; the lossless 7.1 channel presentation is not used)",
