@@ -21,6 +21,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A 25 fps H.264 Matroska file with forward-clamped B-picture timestamps plays at a steady
+  cadence.** Its packet timestamps repeated display slots and left the preceding slots empty, so
+  decoded output alternated 0 ms and 80 ms frame intervals instead of 40 ms. The demuxer now
+  recognizes that shape only from an exact CFR lattice, complete picture-order ranks and two
+  corroborating clamps, then reconstructs PTS and DTS from the IDR anchor, picture order and decode
+  order. A seek starts from a new IDR, and overflow or any later timestamp outside the proven shape
+  disables the repair and leaves that packet untouched.
+
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
   `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
