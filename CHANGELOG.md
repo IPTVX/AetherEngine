@@ -179,6 +179,7 @@ the public-API contract.
 
 ### Fixed
 
+- Run AVIO, held-transport and prewarm callbacks at playback priority, and release finite-request origin slots in the completion callback. This avoids foreground demux waiting on implicit lower-priority callbacks while preserving request limits, pacing and cancellation. Slow-serve regression coverage now allows a cached response to cross its notification threshold when its serving thread is delayed.
 - **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
   divides the source size by the duration it reads off the timestamps, which over such a title is as
   wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
