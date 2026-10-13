@@ -85,6 +85,38 @@ the public-API contract.
   written from the specifications by `Scripts/make-silent-atmos.swift`. A media services reset (#597)
   drops the activator's player along with the engine's, so the next session builds a fresh one.
 
+- **Unflagged truncated replay pictures:** once both tracks confirm replay, retain one returning
+  video access unit for each DTS/PTS pair in the held batch. A partial outgoing PES can lose its
+  corrupt flag; previously it and its intact replacement were both muxed, poisoning native
+  decoding until a later IDR. Native and software admission now share this correction, with
+  real byte-truncation regressions and numeric replacement/conflict diagnostics. Hold untimed
+  fragments at the same damaged boundary so synthetic timestamps cannot hide an intact replacement;
+  preserve those fragments when replay is unproven.
+
+- **Ready but frozen native video:** separately opt into bounded decoded-output recovery with
+  `nativeVideoFrameRecovery`. Require prior pictures, fresh observation and progressing playback;
+  exclude short gaps, PiP, seek, pause, hidden surfaces and starvation. Rearm only after healthy
+  pictures, preserve source/DVR/position, and report the reason for each recovery.
+- **Native decoder replay coverage:** compare all pixels and timestamps through Apple's decoder
+  after long-GOP H.264/AAC replay, in addition to existing FFmpeg decoding regressions.
+
+- **Audio progressing without video:** recover a previously visible native layer that remains
+  unready despite buffered, advancing foreground playback. Bound consumer repairs and preserve
+  the current live position, source and DVR; exclude PiP, seeks, hidden surfaces and starvation.
+  Detach optional frame diagnostics before PiP takes the layer, and log presentation eligibility
+  and repair results separately from decoded-frame sampling. Long-GOP H.264/AAC regressions
+  verify decoded pictures through software admission and native remuxing after damaged replay.
+
+- **Live damaged transport boundaries:** hold a flagged outgoing video packet until returning
+  media proves replay and can replace it intact. Preserve late good pictures once, in decode
+  order, without moving the DVR timeline backwards or dropping ambiguous fresh media.
+- **Video-progress diagnostics:** opt-in SDR native-loopback output sampling distinguishes
+  decoded-frame gaps, observation delays and compressed-packet timestamp gaps. No automatic
+  seek, source retry, decoder fallback or playback error is introduced.
+- **Outgoing PES interleaving:** keep a damaged video boundary quarantined across clean
+  outgoing pictures that precede timestamp rollback, with sparse-video cadence bounds.
+  Preserve its intact replacement and exact-once admission through interrupted recovery.
+
 - **A DVD-Video image without an ISO9660 bridge volume plays its film, not its menu.** DVD recognition
   only looked for `VIDEO_TS` through ISO9660, so an image that is UDF only (sector 16 starts UDF's BEA01
   directly) went down the Blu-ray branch, found no `BDMV`, and was opened raw: the session played the
@@ -184,6 +216,9 @@ the public-API contract.
 
 ### Fixed
 
+- Prevent interrupted or damaged verified live replay from being appended as fresh media. Retain bounded packet identity and the native DVR cache across source renewal; preserve genuine timestamp resets with different media.
+- Add `liveSourceReplayExhausted` and `retryLiveSourceRecovery()` so hosts can back off and resume retained acquisition without discarding replay evidence. Recordings end at source negotiation, and stop/replacement revoke pending retries.
+- Apply replay admission before software timestamp reconciliation, recording and DVR storage; suppress verified late duplicate packets, yield acquisition during cursor recovery and classify live read loss as source failure.
 - **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
   divides the source size by the duration it reads off the timestamps, which over such a title is as
   wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed

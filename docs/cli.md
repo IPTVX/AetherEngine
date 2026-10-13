@@ -288,6 +288,13 @@ AVPlayer asks and the two runs look the same.
 
 `--assert-dv` sets `LoadOptions.panelPresentsDolbyVision` (AE#493), the host's assertion that its display presents Dolby Vision. macOS has no per-mode display capability API, so a Mac run plays a Dolby Vision source as its HDR10 base layer (`effective-format=hdr10`) until the host says otherwise; the flag moves that label and the tvOS criteria request. It does not change the packaging of a Profile 5 / 8.1 / 8.4 source (those carry their `dvcC` and `SUPPLEMENTAL-CODECS` on every display since 6.72.0 / 6.73.0), while Profile 7 and AV1 Dolby Vision are still gated on it. A wrong claim costs one in-place media-playlist fallback, not the item.
 
+`--native-video-frame-diagnostics` enables the opt-in SDR native-loopback decoded-output
+observer from `LoadOptions.nativeVideoFrameDiagnostics`. It logs progress, output gaps and
+observation delays without suppressing the player layer or claiming physical display proof.
+
+`play --native-video-frame-recovery` separately enables bounded SDR native decoded-output repair;
+it is off by default and does not follow from enabling diagnostics. See [diagnostics](api.md#diagnostics).
+
 `--picture-probe` attaches an `AVPlayerItemVideoOutput` to the running item and decodes the source
 time out of the picture itself, which is the one axis question nothing else here can answer: every
 other observable (`#260` frame times, `prodShift` / `hostShift`) describes what the engine WROTE, not

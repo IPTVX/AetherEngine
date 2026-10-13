@@ -18,6 +18,11 @@ import AetherLibavcodec
 /// Adding a number to the docs? Pin it here in the same commit.
 @MainActor
 final class DocumentedConstantsTests: XCTestCase {
+    func testLiveReplayQuarantineBoundsMatchDocumentation() throws {
+        XCTAssertEqual(LivePacketReplayGuard.maximumPendingBytes, 96 * 1_024 * 1_024)
+        XCTAssertEqual(LivePacketReplayGuard.maximumPendingPackets, 10_000)
+        assertDocumented("Quarantine is bounded to 96 MiB and 10,000 packets", try documentation())
+    }
 
     func testItemDiagnosticBoundsMatchDocumentation() throws {
         let docs = try documentation()
