@@ -125,6 +125,14 @@ struct ObjectMetadataHoldTests {
         #expect(out.allSatisfy { $0.updates.isEmpty })
     }
 
+    @Test("a release with nothing held keeps the hold armed for the audio after it")
+    func emptyReleaseKeepsHolding() {
+        let blocks = Blocks(), hold = ObjectMetadataHold()
+        hold.releaseAll()
+        #expect(hold.admit(blocks.block(0), firstStates: nil) == nil, "still held after an empty release")
+        #expect(hold.nextReleased() == nil)
+    }
+
     @Test("a configuration change releases what was held for the old one, unprimed")
     func configurationChangeReleasesHeld() {
         let blocks = Blocks(), hold = ObjectMetadataHold()

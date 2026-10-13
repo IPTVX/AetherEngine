@@ -85,8 +85,11 @@ final class ObjectMetadataHold {
         return nil
     }
 
-    /// End of input: no metadata will come for what is held, so it goes out as it is.
+    /// End of input or a segment cut: what is held goes out as it is, and nothing more is held until
+    /// the next reset. With nothing held it changes nothing, so a cut before the first audio after a
+    /// reset leaves the hold armed.
     func releaseAll() {
+        guard !held.isEmpty else { return }
         armed = false
         releaseHeld()
     }

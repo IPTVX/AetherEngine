@@ -123,7 +123,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         lent = nil
     }
 
-    func finishInput() {
+    func releaseHeldBlocks() {
         hold.releaseAll()
     }
 
