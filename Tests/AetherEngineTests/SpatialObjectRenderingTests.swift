@@ -59,6 +59,22 @@ struct SpatialObjectRenderingTests {
         #expect(abs(front - 0.933) < 0.001)
     }
 
+    @Test("a 5.1 layout's surrounds sit halfway down the side walls, as TS 103 448 places them",
+          arguments: [SpatialSpeakerLayout.l512, .l514])
+    func fiveOneSurroundsOnTheSideWalls(layout: SpatialSpeakerLayout) {
+        let panner = AllocentricPanner(layout: layout)
+        let channel = { (speaker: SpatialSpeaker) in layout.speakers.firstIndex(of: speaker)! }
+        var gains: [Float] = []
+        // Halfway down the left wall, and at the back-left corner beyond it: the surround alone.
+        for y: Float in [0.5, 1] {
+            panner.pointGains(SIMD3(0, y, 0), into: &gains)
+            #expect(abs(gains[channel(.surroundLeft)] - 1) < 1e-5)
+        }
+        // A quarter of the way back: an even split with the front, where corner surrounds gave 15%.
+        panner.pointGains(SIMD3(0, 0.25, 0), into: &gains)
+        #expect(abs(gains[channel(.surroundLeft)] * gains[channel(.surroundLeft)] - 0.5) < 1e-5)
+    }
+
     @Test("height content with no ceiling to go to folds onto the floor")
     func heightFoldsWithoutTops() {
         let layout = SpatialSpeakerLayout.l714

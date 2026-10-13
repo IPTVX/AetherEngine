@@ -68,7 +68,9 @@ public enum SpatialSpeakerLayout: String, Sendable, CaseIterable, Codable {
 /// against Apple's own Atmos render.
 public enum SpatialSpeaker: String, Sendable, CaseIterable {
     case left, right, center, lfe
-    /// 5.1-style surrounds, which a 5.1 bed places in the rear corners.
+    /// 5.1-style surrounds. TS 103 448 table A.3 puts them halfway down the side walls, where a
+    /// 7.1 bed has its sides, not in the rear corners: an object on the side wall plays from them
+    /// alone, and one at the back wall stays on them rather than reaching past them.
     case surroundLeft, surroundRight
     case sideLeft, sideRight
     case rearLeft, rearRight
@@ -84,8 +86,8 @@ public enum SpatialSpeaker: String, Sendable, CaseIterable {
         case .right:          return SIMD3(1, 0, 0)
         case .center:         return SIMD3(0.5, 0, 0)
         case .lfe:            return SIMD3(0.5, 0, 0)
-        case .surroundLeft:   return SIMD3(0, 1, 0)
-        case .surroundRight:  return SIMD3(1, 1, 0)
+        case .surroundLeft:   return SIMD3(0, 0.5, 0)
+        case .surroundRight:  return SIMD3(1, 0.5, 0)
         case .sideLeft:       return SIMD3(0, 0.5, 0)
         case .sideRight:      return SIMD3(1, 0.5, 0)
         case .rearLeft:       return SIMD3(0, 1, 0)

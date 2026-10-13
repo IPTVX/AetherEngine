@@ -102,16 +102,18 @@ struct TrueHDObjectMetadataMappingTests {
     @Test("zone masks keep an object off the speakers they name")
     func zoneMasks() {
         let noBack = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_NO_BACK)
-        #expect(noBack.isSuperset(of: [.rearLeft, .rearRight, .surroundLeft, .surroundRight]))
+        #expect(noBack.isSuperset(of: [.rearLeft, .rearRight]))
         #expect(!noBack.contains(.sideLeft))
+        // TS 103 448 table 4: on a 3/2 floor neither no-back nor no-sides removes the surrounds.
+        #expect(!noBack.contains(.surroundLeft) && !noBack.contains(.surroundRight))
 
         let noSides = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_NO_SIDES)
         #expect(noSides.isSuperset(of: [.sideLeft, .sideRight]))
-        #expect(!noSides.contains(.rearLeft))
+        #expect(!noSides.contains(.rearLeft) && !noSides.contains(.surroundLeft))
 
         let screen = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_SCREEN_ONLY)
         #expect(!screen.contains(.left) && !screen.contains(.center) && !screen.contains(.right))
-        #expect(screen.isSuperset(of: [.sideLeft, .rearRight, .surroundLeft]))
+        #expect(screen.isSuperset(of: [.sideLeft, .rearRight, .surroundLeft, .surroundRight]))
 
         let surround = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_SURROUND_ONLY)
         #expect(surround.isSuperset(of: [.left, .right, .center]))
