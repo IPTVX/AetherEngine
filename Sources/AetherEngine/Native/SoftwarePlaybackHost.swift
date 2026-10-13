@@ -3630,7 +3630,7 @@ final class SoftwareResidentRangePublication {
         guard task == nil else { return nil }
         let token = revision
         task = Task { [weak self] in
-            let ranges = await Task.detached(priority: .utility, operation: read).value
+            let ranges = await BlockingWork.detached(priority: .utility, operation: read).value
             guard let self, !Task.isCancelled, self.revision == token else { return }
             self.task = nil
             publish(ranges)
