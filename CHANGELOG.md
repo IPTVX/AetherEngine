@@ -19,6 +19,14 @@ the public-API contract.
   a fresh seal; the consumer item swaps to it in place, keeping source, cache, position (also behind
   live) and play/pause intent. A media playlist failure no longer counts as evidence against the HDR
   master (#748, thanks @yucelokan).
+- **A refused live join says so, instead of reading as an unreadable source.** When the live HLS
+  ingest's playlist was refused at the join, the probe saw no bytes and the load published
+  `customSourceProbeFailed`, which a host reads as a stream it cannot play: one that falls back to
+  another route on it moved the channel there for the rest of its session over a 509 an IPTV panel
+  gives while another device holds the account's last slot. The load now publishes the origin's
+  answer, as an HTTP reader's failed open does: `sourceRateLimited` (429/503/509) or `sourceRefused`
+  with the status in `underlyingCode`, or `liveSourceUnavailable` when the playlist could not be
+  reached.
 
 ## [7.36.0] - 2026-10-13
 

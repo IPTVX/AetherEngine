@@ -4548,7 +4548,24 @@ public final class AetherEngine: ObservableObject {
         }
 
         // Custom sources have no URL to reopen from: a failed probe is fatal.
-        if case .custom = source, !probeOpened {
+        if case .custom(let reader, _) = source, !probeOpened {
+            // The engine's own live HLS ingest knows why it handed the probe nothing: its playlist
+            // was refused or could not be reached. That is the source's answer, typed as an HTTP
+            // reader's is (`publishLoadFailure`), not a stream the probe could not read: a host that
+            // takes a custom probe failure to mean the format moves the channel to another route for
+            // good, over a 509 an IPTV panel gives while another device holds the account's last slot.
+            if let ingest = reader as? HLSLiveIngestReader,
+               case .playlistUnreachable(let status)? = ingest.terminalError {
+                if status > 0 {
+                    let kind: PlaybackErrorKind = AVIOReader.isRateLimitStatus(status) ? .sourceRateLimited : .sourceRefused
+                    publishError(PlaybackErrorInfo(kind: kind,
+                                                   message: "Failed to load: the live playlist answered HTTP \(status)",
+                                                   underlyingCode: status))
+                } else {
+                    publishError(.liveSourceUnavailable, "Failed to load: the live playlist could not be reached")
+                }
+                throw DemuxerError.openFailed(code: -1)
+            }
             publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed", underlying: probeFailure)
             throw DemuxerError.openFailed(code: -1)
         }
