@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
+  each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
+  `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
+  per image, so `ld` refused the app (Syravo with KSCrash, on every platform). LibTrueHD 2.2.1
+  exports its copy weak, so the linker keeps one. A patch, so 7.34.1 and later pick it up on
+  resolve; 7.34.0 pins LibTrueHD 2.1.x and stays affected.
 - **Objects play from the first frame after a seek in TrueHD Atmos rendered to APAC.** Decoding
   resumes at the next major sync, and the first object metadata follows up to 32 ms later; until it
   arrived, every object rendered silent, so after each seek the APAC carried the LFE alone (21 to
