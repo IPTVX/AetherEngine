@@ -272,6 +272,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     public var initialStartSeconds: Double?
     /// Resolved in start() from `initialStartSeconds` once the segment plan exists.
     private(set) var initialProducerBaseIndex: Int = 0
+    /// Set once the main demuxer sits at the initial producer's start (step 8's seek ran early).
+    var demuxerAtInitialProducerStart = false
 
     /// One cue store per declared text track (#55, all-tracks), ordinal-aligned with
     /// `nativeSubtitleLanguagesForSession`. Re-threaded onto every producer restart so
@@ -550,7 +552,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// off the HDMI route has to know that, or it reads the carrier as a downmix.
     public internal(set) var audioIsAtmosStreamCopy = false
 
-    /// The audio is TrueHD Atmos rendered to APAC (`objectAudioRendering`), which on tvOS needs
+    /// The audio is TrueHD Atmos or DTS:X rendered to APAC (`objectAudioRendering`), which on tvOS needs
     /// `AtmosOutputActivator` beside the player to reach the receiver as Atmos.
     var audioIsAPAC = false
 
@@ -1141,7 +1143,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// EAC3 from MKV without dec3 extradata).
     let audioBridgeMode: AudioBridgeMode
 
-    /// TrueHD Atmos delivery (#731, see `ObjectAudioRendering`); consulted before `audioBridgeMode`.
+    /// TrueHD Atmos and DTS:X delivery (#731, see `ObjectAudioRendering`); consulted before `audioBridgeMode`.
     let objectAudioRendering: ObjectAudioRendering
 
     /// Pre-opened demuxer reused by `start()` to skip `avformat_find_stream_info` (~1-3 s on slow CDN).
@@ -1552,6 +1554,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             if dem.isSourceSeekable { dem.seek(to: 0) }
             dem.endIndexPass()      // AE#585: the next read that lands outside a span is playback's
         }
+        demuxerAtInitialProducerStart = false
 
         // volumeAvailableCapacityForImportantUsage is unavailable on tvOS; the plain capacity key
         // exists on every platform and is close enough for the quarter-of-free-space clamp.
@@ -1864,7 +1867,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
                           + (Self.spatialRenderingLayout(
                                 rendering: objectAudioRendering, codecID: acpForHE.codec_id,
                                 profile: acpForHE.profile, sampleRate: acpForHE.sample_rate)
-                             .map { "Atmos object render into \($0.rawValue), APAC" }
+                             .map { layout in
+                                 Self.objectAudioSource(codecID: acpForHE.codec_id, profile: acpForHE.profile) == .trueHDAtmos
+                                     ? "Atmos object render into \(layout.rawValue), APAC"
+                                     : "DTS:X render into \(layout.rawValue) if LibDTSX confirms DTS:X, APAC"
+                             }
                              ?? Self.encoderLabel(AudioBridge.bridgeEncoder(
                                 for: audioBridgeMode,
                                 sourceChannels: acpForHE.ch_layout.nb_channels)).uppercased())
@@ -1989,6 +1996,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             streamCopyAudio: streamCopyAudio,
             sourceAudioStreamIndex: audioStreamIndex,
             sourceAudioStream: audioStreamIndex >= 0 ? audioDem.stream(at: audioStreamIndex) : nil,
+            audioDemuxer: audioDem,
             sourceCarriesAudio: audioDem.firstAudioStreamIndexByType >= 0,
             audioHLSCodecs: &audioHLSCodecs,
             audioLanguage: audioLanguage
@@ -2119,13 +2127,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // 8. Kick the pump. Seek on the video stream's exact plan timestamp and forbid an earlier
         // landing. A global time seek can choose the previous sync point in a multi-stream MP4,
         // leaving the producer to scan a whole GOP over the origin before writing anything (#191).
-        if initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count {
-            let targetPts = plan[initialProducerBaseIndex].startPts
-            // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
-            if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
-                let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
-                dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
-            }
+        // The DTS:X verdict may already have put the cursor there and peeked from it (#744); a
+        // second seek would drop those packets and read the same bytes again.
+        if !demuxerAtInitialProducerStart {
+            seekToInitialProducerStart(dem)
         }
         // #416: the pump harvests every subtitle packet it demuxes, so where it OPENS is where its
         // coverage of the source begins. The subtitle drain reads "nothing between this set and the
@@ -4424,4 +4429,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
     }
 
+}
+
+extension HLSVideoEngine {
+    /// Puts the demuxer where the first producer starts: no-op at segment 0. Seeks on the video
+    /// stream's exact plan timestamp and forbids an earlier landing. A global time seek can choose
+    /// the previous sync point in a multi-stream MP4, leaving the producer to scan a whole GOP over
+    /// the origin before writing anything (#191).
+    func seekToInitialProducerStart(_ dem: Demuxer) {
+        let plan = segmentPlan
+        guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return }
+        let targetPts = plan[initialProducerBaseIndex].startPts
+        // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
+        if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
+            let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+            dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
+        }
+    }
 }
