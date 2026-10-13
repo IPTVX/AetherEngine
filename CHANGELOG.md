@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Changed
+
+- **LibTrueHD 2.3.0: the TrueHD object decode takes about a third less time again.** The `truehd`
+  crate is pinned to harletty's speed work (blocks decoded in place, table-driven Huffman codes,
+  prediction filters for several channels side by side, whole-block matrices), which includes
+  truehdd#42 from 2.2.0, with byte-identical output. Unfold through the decoder: 0.98 s to 0.60 s
+  (M1). The APAC encoder stays the slower half of the bridge, so the whole decode-and-encode gains
+  about 10% (6.5x to 7.2x real time in a debug build); the rest is a lighter decode thread (#731).
+
 ### Fixed
 
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
