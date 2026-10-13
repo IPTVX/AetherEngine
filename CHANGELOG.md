@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Fixed
 
+- **Objects play from the first frame after a seek in TrueHD Atmos rendered to APAC.** Decoding
+  resumes at the next major sync, and the first object metadata follows up to 32 ms later; until it
+  arrived, every object rendered silent, so after each seek the APAC carried the LFE alone (21 to
+  24 ms on Nature's Fury). The decoder now holds those blocks and releases them with the first
+  metadata's state applied from their first frame (`ObjectMetadataHold`), waiting at most 100 ms.
 - **The surround-downmix warning no longer fires on 5.1 inside a Dolby MAT carrier.** After an APAC
   session tvOS keeps the HDMI output in the 2-channel MAT carrier it negotiated, so a 5.1 `ec-3` track
   played next read `output=2` and the log claimed a downmix while the sink played the 5.1 intact (Apple
