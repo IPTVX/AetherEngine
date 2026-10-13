@@ -73,6 +73,13 @@ the public-API contract.
   too. `dolbyVisionConversion` reads `.profile7ToProfile81` on every such session.
   `dolbyVisionHandling = .baseLayerOnly` is unchanged. Found by dotModded.
 
+- **Ceiling speakers sit where TS 103 448 puts them.** The renderer placed the top speakers in the
+  room's corners, so overhead content near the front leaked backwards and the whole mix sat higher
+  than Apple's own render of the same title. They now sit a quarter of the room in from each wall.
+  Against Apple's render of the matching DD+ Atmos, energy-weighted: Black Hawk Down 3.3° → 0.8°
+  direction error, +3.2° → +0.4° elevation bias, +4.1 → +0.6 points top-share; a single overhead
+  helicopter 6.3° → 0.2°; Dolby's Amaze 4.7° → 3.3°.
+
 ## [7.35.1] - 2026-10-12
 
 ### Fixed

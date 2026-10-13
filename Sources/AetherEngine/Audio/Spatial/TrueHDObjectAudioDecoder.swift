@@ -162,7 +162,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         case TRUEHD_ATMOS_SPEAKER_LSD: return .fixed(SpatialSpeaker.sideLeft.position)
         case TRUEHD_ATMOS_SPEAKER_RSD: return .fixed(SpatialSpeaker.sideRight.position)
         case TRUEHD_ATMOS_SPEAKER_TC: return .fixed(SIMD3(0.5, 0.5, 1))
-        case TRUEHD_ATMOS_SPEAKER_TFC: return .fixed(SIMD3(0.5, 0, 1))
+        case TRUEHD_ATMOS_SPEAKER_TFC: return .fixed(SIMD3(0.5, 0.25, 1))
         default: return .object
         }
     }
