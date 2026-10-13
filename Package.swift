@@ -60,7 +60,7 @@ let package = Package(
         // folds removed from the bed, the fixed heights, and the alternate presentations' objects placed in
         // the same room coordinates as LibTrueHD's. The Rust `dca` crate (Apache-2.0) behind a C API,
         // prebuilt as an xcframework like LibTrueHD. Pinned to the minor for the same reason.
-        .package(url: "https://github.com/kristofferR/LibDTSX", .upToNextMinor(from: "1.0.0")),  // 1.0.0: dca 0.8.0 (harletty-bridge a717bae); the first two frames after a start or seek only prime the decoder
+        .package(url: "https://github.com/superuser404notfound/LibDTSX", .upToNextMinor(from: "1.0.1")),  // 1.0.1: rust_eh_personality weak (#752); dca 0.8.0 (harletty-bridge a717bae); the first two frames after a start or seek only prime the decoder
     ],
     targets: [
         .target(

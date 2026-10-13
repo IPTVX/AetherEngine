@@ -15,7 +15,7 @@ the public-API contract.
 - **DTS:X keeps its heights too.** Apple TV cannot bitstream DTS-HD either, so the bridge decoded a
   DTS:X track's compatible 7.1, where the encoder had folded its four heights (and any objects) into
   the floor channels. `LoadOptions.objectAudioRendering = .apac(layout)` now sends DTS-HD Master Audio
-  through the new [LibDTSX](https://github.com/kristofferR/LibDTSX) dependency (the `dca` crate behind
+  through the new [LibDTSX](https://github.com/superuser404notfound/LibDTSX) dependency (the `dca` crate behind
   a C API, packaged like LibTrueHD), which removes those folds and returns the bed, the fixed heights
   and the objects of the alternate presentations with their positions in LibTrueHD's room
   coordinates; the same renderer, limiter and APAC encoder then deliver it. FFmpeg names only two of
@@ -33,7 +33,8 @@ the public-API contract.
   frames after a start or seek only rebuild the decoder's history, so the audio starts 21 ms later:
   entered mid-stream, the first frame otherwise decodes distorted. With the option
   on, the automatic audio pick also prefers a track FFmpeg labels DTS:X within its language. The
-  alternate presentations are experimental in `dca` and here (#744, #755, thanks @kristofferR).
+  alternate presentations are experimental in `dca` and here (#744, #755, thanks @kristofferR, and
+  @andreencar for the review that caught a timeline drift after repeated damage, fixed in LibDTSX 1.0.1).
 
 ### Changed
 
