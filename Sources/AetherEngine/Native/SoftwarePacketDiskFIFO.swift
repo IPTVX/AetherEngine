@@ -57,6 +57,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     let staleSweepResult: StaleSweepResult
     private let chunkTargetBytes: Int
     private let retainConsumed: Bool
+    var retainsConsumedPackets: Bool { retainConsumed }
     private let lock = NSLock()
     private var writer: FileHandle?
     private var reader: FileHandle?

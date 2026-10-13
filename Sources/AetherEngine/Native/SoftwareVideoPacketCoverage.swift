@@ -48,6 +48,12 @@ struct SoftwareVideoPacketCoverage: Sendable {
     var rangeCount: Int { coverage.rangeCount }
     var isFull: Bool { coverage.isFull }
 
+    var rangesSeconds: [ClosedRange<Double>] {
+        guard !isInvalidated else { return [] }
+        return coverage.rangesSeconds(timeBaseNumerator: timeBaseNumerator,
+                                      timeBaseDenominator: timeBaseDenominator)
+    }
+
     /// Duration/DTS are deliberately not inputs. Duplicate pending PTS do not advance the reorder
     /// watermark. At most depth + 1 timestamps are held transiently, then the minimum is emitted.
     @discardableResult

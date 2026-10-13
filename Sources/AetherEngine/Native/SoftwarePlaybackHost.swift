@@ -138,6 +138,8 @@ final class SoftwarePlaybackHost {
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
     /// #687: this host's entries in the process-wide retention ledger, released on `stop()`.
     private var retentionClaims: [RetentionClaims.Claim] = []
+    @Published private(set) var residentRanges: [ClosedRange<Double>] = []
+    private let residentRangePublication = SoftwareResidentRangePublication()
 
     /// The same public buffered-position axis as the live and native hosts, but backed by
     /// actual compressed A/V packet coverage. nil when no continuous cache span contains the clock.
@@ -1473,6 +1475,7 @@ final class SoftwarePlaybackHost {
         // reposition can tell on `seekQueue` whether a newer seek has already taken over.
         bumpSeekGeneration()
         let generation = seekGeneration
+        residentRangePublication.invalidate()
         didReachEnd = false
         didParkClockAtEnd = false
         didEmitParkedDiag = false
@@ -1538,6 +1541,7 @@ final class SoftwarePlaybackHost {
             switch preparation {
             case .success(let hit):
                 cacheHit = hit
+                if !hit { residentRanges = [] }
                 EngineLog.emit(
                     "[SWHost] packet cache seek generation=\(generation) "
                     + "result=\(hit ? "hit" : "miss") "
@@ -1553,6 +1557,7 @@ final class SoftwarePlaybackHost {
                 // a normal cache miss. Leave playback parked and publish an explicit failure.
                 seekInFlight = false
                 packetSource.close()
+                residentRanges = []
                 noteSeekSettled(generation)
                 EngineLog.emit("[SWHost] packet cache seek generation=\(generation) result=error",
                                category: .swPlayback)
@@ -1842,6 +1847,8 @@ final class SoftwarePlaybackHost {
         noteSeekSettled(seekGeneration)
         timeTimer?.cancel()
         timeTimer = nil
+        residentRangePublication.invalidate()
+        residentRanges = []
         vodPacketReadAhead?.close()
         vodPacketReadAhead = nil
         renderer.subtitleCompositor.reset()
@@ -3285,6 +3292,32 @@ final class SoftwarePlaybackHost {
 
     // MARK: - Time updates
 
+    nonisolated static func displayResidentRanges(_ ranges: [ClosedRange<Double>],
+                                                  sessionZeroSeconds: Double) -> [ClosedRange<Double>] {
+        guard sessionZeroSeconds.isFinite else { return [] }
+        let zero = max(0, sessionZeroSeconds)
+        return ranges.compactMap { range in
+            let start = max(0, range.lowerBound - zero), end = range.upperBound - zero
+            return start.isFinite && end.isFinite && start < end ? start...end : nil
+        }
+    }
+
+    /// Also runs while paused, independently of rendered-time events. At most one bounded
+    /// metadata calculation is pending. Cached seeks keep the last valid spans; a miss clears
+    /// them at the actual discard decision. Seek/stop invalidate any pre-operation result.
+    private func sampleResidentRanges() {
+        guard !isLive, !stopRequested, !seekInFlight,
+              let source = vodPacketReadAhead else { return }
+        let zero = clockSessionZero
+        residentRangePublication.sample {
+            Self.displayResidentRanges(source.residentRanges, sessionZeroSeconds: zero)
+        } publish: { [weak self] ranges in
+            guard let self, self.vodPacketReadAhead === source, !self.stopRequested,
+                  self.clockSessionZero == zero else { return }
+            if self.residentRanges != ranges { self.residentRanges = ranges }
+        }
+    }
+
     private func startTimeUpdates() {
         timeTimer = Timer.publish(every: 0.25, on: .main, in: .common)
             .autoconnect()
@@ -3292,6 +3325,7 @@ final class SoftwarePlaybackHost {
                 guard let self else { return }
                 // Independent of the clock below: a seek in flight must not defer the one check.
                 self.checkSurfaceVisibilityIfDue()
+                self.sampleResidentRanges()
                 guard let aOut = self.audioOutput else { return }
                 // #254: a reposition in flight holds `currentTime` at its target; the synchronizer is
                 // still on the pre-seek anchor and would drag the published position backwards.
@@ -3574,5 +3608,33 @@ extension SoftwarePlaybackHost: LiveRecordingHost {
             duration: packet.pointee.duration,
             isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
         )
+    }
+}
+
+/// A single background snapshot at a time. Invalidating at seek/stop prevents a delayed snapshot
+/// from restoring a discarded range or from clearing a newer request. Main never waits for work.
+@MainActor
+final class SoftwareResidentRangePublication {
+    private var task: Task<Void, Never>?
+    private var revision: UInt64 = 0
+
+    func invalidate() {
+        revision &+= 1
+        task?.cancel()
+        task = nil
+    }
+
+    @discardableResult
+    func sample(_ read: @escaping @Sendable () async -> [ClosedRange<Double>],
+                publish: @escaping @MainActor ([ClosedRange<Double>]) -> Void) -> Task<Void, Never>? {
+        guard task == nil else { return nil }
+        let token = revision
+        task = Task { [weak self] in
+            let ranges = await Task.detached(priority: .utility, operation: read).value
+            guard let self, !Task.isCancelled, self.revision == token else { return }
+            self.task = nil
+            publish(ranges)
+        }
+        return task
     }
 }

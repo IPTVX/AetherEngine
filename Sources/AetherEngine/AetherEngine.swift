@@ -83,7 +83,8 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputePlaybackPhase() }
     }
 
-    /// Where the loopback segment cache holds picture right now, on the same 0-based display axis as
+    /// Where the loopback segment cache or software VOD packet cache holds picture right now,
+    /// with selected audio coverage required for software A/V, on the same 0-based display axis as
     /// `currentTime`, `duration` and `seek(to:)`. An empty array is the nil-equivalent, and live
     /// sessions publish one always: their rewind depth is `clock.seekableLiveRange`, a different
     /// contract. Residency is not a promise that a seek inside a range will be instant; the player may

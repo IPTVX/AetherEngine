@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Software VOD exposes retained cache ranges to host timelines.** `residentRanges` now covers
+  compressed video packets together with the selected audio stream, including retained history,
+  gaps and disk eviction. Cached seeks keep the same spans; cold seeks and teardown clear them.
+  Sampling continues while paused and runs off the main actor, with stale seek/stop results
+  discarded. Hosts no longer need to infer a cache band's start from the moving playhead.
+
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
   `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
