@@ -52,6 +52,11 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         while status == DTSX_OK {
             status = dtsx_decoder_pull(handle, &block)
             if status == DTSX_OK {
+                // The renderer and the APAC encoder run at 48 kHz; the track's label said so, the
+                // stream itself has the last word.
+                guard block.sample_rate == 48000 else {
+                    return .refused("\(block.sample_rate) Hz")
+                }
                 guard block.flags & DTSX_BLOCK_BED_AS_AUTHORED == 0 else {
                     return .refused("its DTS:X extension could not be applied (\(lastError))")
                 }
@@ -163,8 +168,11 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         case DTSX_SPEAKER_LSC: return .fixed(SIMD3(0.25, 0, 0))
         case DTSX_SPEAKER_RSC: return .fixed(SIMD3(0.75, 0, 0))
         case DTSX_SPEAKER_CB: return .fixed(SIMD3(0.5, 1, 0))
+        case DTSX_SPEAKER_LSD: return .fixed(SpatialSpeaker.sideLeft.position)
+        case DTSX_SPEAKER_RSD: return .fixed(SpatialSpeaker.sideRight.position)
         case DTSX_SPEAKER_TC: return .fixed(SIMD3(0.5, 0.5, 1))
-        case DTSX_SPEAKER_TFC: return .fixed(SIMD3(0.5, 0, 1))
+        // On the front-top row, where LibTrueHD's TFC and the ceiling pair since #742 sit.
+        case DTSX_SPEAKER_TFC: return .fixed(SIMD3(0.5, 0.25, 1))
         default: return .object
         }
     }

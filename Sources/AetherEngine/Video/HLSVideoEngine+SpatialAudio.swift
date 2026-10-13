@@ -62,9 +62,13 @@ extension HLSVideoEngine {
     /// track, which a muxed file interleaves within the first few dozen packets; the same budget as
     /// the planner's head scans bounds a file whose audio starts late.
     static let dtsxVerdictPacketBudget = 512
+    /// Bytes the peek may hold. Unlike the planner's scans, peeked packets stay resident until the
+    /// producer reads them, video included, so a late-starting track in a 4K remux must not pin
+    /// hundreds of megabytes; three DTS-HD frames normally sit within the first few of them.
+    static let dtsxVerdictByteBudget = 24 << 20
 
     /// Shows LibDTSX the audio stream's first packets, without consuming them (the producer reads the
-    /// same packets afterwards), until it says whether the track is DTS:X it renders. Nil when the
+    /// same packets afterwards), until it says whether the track is DTS:X it renders. Nil when a
     /// budget ran out or the source could not be read first.
     func dtsxVerdict(
         decoder: DTSXObjectAudioDecoder,
@@ -72,7 +76,10 @@ extension HLSVideoEngine {
         streamIndex: Int32
     ) -> DTSXObjectAudioDecoder.Verdict? {
         var verdict: DTSXObjectAudioDecoder.Verdict?
+        var heldBytes = 0
         try? demuxer.peekPackets(maxPackets: Self.dtsxVerdictPacketBudget) { packet in
+            heldBytes += Int(max(packet.pointee.size, 0))
+            if heldBytes > Self.dtsxVerdictByteBudget { return true }
             guard packet.pointee.stream_index == streamIndex,
                   let data = packet.pointee.data, packet.pointee.size > 0 else { return false }
             verdict = decoder.verdict(feeding: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
@@ -151,6 +158,12 @@ extension HLSVideoEngine {
                 decoder = try TrueHDObjectAudioDecoder()
             case .dtsHDMasterAudio:
                 let dtsx = try DTSXObjectAudioDecoder()
+                // On a resume the verdict reads where the first producer starts, not the file head
+                // that step 8's seek would then drop; LibDTSX decides mid-stream as well.
+                if audioDemuxer === demuxer {
+                    seekToInitialProducerStart(audioDemuxer)
+                    demuxerAtInitialProducerStart = true
+                }
                 let started = DispatchTime.now()
                 let verdict = dtsxVerdict(decoder: dtsx, demuxer: audioDemuxer, streamIndex: sourceAudioStreamIndex)
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1e6
@@ -161,7 +174,7 @@ extension HLSVideoEngine {
                         + "\(String(format: "%.0f", ms)) ms)",
                         category: .session
                     )
-                    // The verdict decoded the head; the bridge starts from the same packets again.
+                    // The verdict decoded the first packets; the bridge starts from the same ones again.
                     dtsx.reset()
                     decoder = dtsx
                 case .refused(let reason):
@@ -173,8 +186,8 @@ extension HLSVideoEngine {
                     return nil
                 case nil:
                     EngineLog.emit(
-                        "[HLSVideoEngine] no DTS:X verdict within \(Self.dtsxVerdictPacketBudget) packets "
-                        + "of the source's head; keeping the channel bridge",
+                        "[HLSVideoEngine] no DTS:X verdict within \(Self.dtsxVerdictPacketBudget) packets or "
+                        + "\(Self.dtsxVerdictByteBudget >> 20) MiB; keeping the channel bridge",
                         category: .session
                     )
                     return nil

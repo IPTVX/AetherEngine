@@ -24,7 +24,9 @@ struct DTSXObjectMetadataMappingTests {
         }
         #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_LW) == .bed(.wideLeft))
         #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_TSR) == .bed(.topMiddleRight))
-        #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_TFC) == .fixed(SIMD3(0.5, 0, 1)))
+        #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_TFC) == .fixed(SIMD3(0.5, 0.25, 1)))
+        #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_LSD) == .fixed(SpatialSpeaker.sideLeft.position))
+        #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_RSD) == .fixed(SpatialSpeaker.sideRight.position))
         #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_OBJECT) == .object)
         #expect(DTSXObjectAudioDecoder.role(forSpeaker: DTSX_SPEAKER_UNKNOWN) == .object)
     }
