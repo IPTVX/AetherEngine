@@ -50,6 +50,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A reader waiting for an origin slot gets it when the request ends, not when its owner wakes (#746,
+  thanks @yucelokan).** Finite requests return their slot from the completion callback, after the
+  refusal (if any) is on the books, and the AVIO, held-transport and prewarm sessions deliver on
+  their own user-initiated queues instead of an implicit one that inherits a utility caller. A size
+  probe answered 429 without `Retry-After` now arms the backoff ladder instead of a zero quiet period.
 - **A custom source that fails its probe says why (#745, thanks @yucelokan).** `.customSourceProbeFailed` now carries
   the probe error's `underlyingDomain` and `underlyingCode` in `errorInfo`, set before the terminal
   `.error` state, where it used to arrive with nothing but the generic message.
@@ -179,7 +184,6 @@ the public-API contract.
 
 ### Fixed
 
-- Run AVIO, held-transport and prewarm callbacks at playback priority, and release finite-request origin slots in the completion callback. This avoids foreground demux waiting on implicit lower-priority callbacks while preserving request limits, pacing and cancellation. Slow-serve regression coverage now allows a cached response to cross its notification threshold when its serving thread is delayed.
 - **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
   divides the source size by the duration it reads off the timestamps, which over such a title is as
   wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
