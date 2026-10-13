@@ -22,6 +22,9 @@ the public-API contract.
 
 ### Fixed
 
+- **`activeVideoDecoder` names the decoder used by the software host (#753).** HEVC decoded by
+  VideoToolbox now reports `VideoToolbox HEVC (HW)` on initial load and reload, instead of
+  `libavcodec HEVC (SW)`. Decoder selection and playback routing are unchanged.
 - **A live GOP longer than the sealed target duration no longer breaks the playlist.** RFC 8216 keeps
   `TARGETDURATION` fixed for a playlist's life, so a later segment above it made the playlist invalid
   for AVPlayer (-12642). The engine now retires that playlist URL with its original target and an
