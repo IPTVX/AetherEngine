@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Fixed
 
+- **Seeks on Matroska TrueHD titles hit the software packet cache again.** TrueHD packets carry no
+  duration and repeat their millisecond timestamps, so the cache never counted the audio as stored,
+  and every seek on the software path, even back to a spot just played, refetched from the source.
+  A duration-less audio packet now covers up to the next one's timestamp (gaps up to 0.5 s).
+
 - **A live GOP longer than the sealed target duration no longer breaks the playlist.** RFC 8216 keeps
   `TARGETDURATION` fixed for a playlist's life, so a later segment above it made the playlist invalid
   for AVPlayer (-12642). The engine now retires that playlist URL with its original target and an
