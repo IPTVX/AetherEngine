@@ -31,10 +31,32 @@ the public-API contract.
   share, since the engine's top speakers sit at the room's corners. The first two DTS-HD frames after a start or seek only rebuild the decoder's
   history (21 ms): entered mid-stream, the first frame otherwise decodes distorted. With the option
   on, the automatic audio pick also prefers a track FFmpeg labels DTS:X within its language. The
-  alternate presentations are experimental in `dca` and here.
+  alternate presentations are experimental in `dca` and here (#744, #755, thanks @kristofferR).
+
+### Changed
+
+- **LibTrueHD 2.3.0: the TrueHD object decode takes about a third less time again.** The `truehd`
+  crate is pinned to harletty's speed work (blocks decoded in place, table-driven Huffman codes,
+  prediction filters for several channels side by side, whole-block matrices), which includes
+  truehdd#42 from 2.2.0, with byte-identical output. Unfold through the decoder: 0.98 s to 0.60 s
+  (M1). The APAC encoder stays the slower half of the bridge, so the whole decode-and-encode gains
+  about 10% (6.5x to 7.2x real time in a debug build); the rest is a lighter decode thread (#731).
 
 ### Fixed
 
+- **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
+  each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and
+  `__gxx_personality_v0` that made four personality routines, one more than compact unwind encodes
+  per image, so `ld` refused the app (Syravo with KSCrash, on every platform). LibTrueHD 2.2.1
+  exports its copy weak, so the linker keeps one. A patch, so 7.34.1 and later pick it up on
+  resolve; 7.34.0 pins LibTrueHD 2.1.x and stays affected.
+- **Objects play from the first frame after a seek in TrueHD Atmos rendered to APAC.** Decoding
+  resumes at the next major sync, and the first object metadata follows up to 32 ms later; until it
+  arrived, every object rendered silent, so after each seek the APAC carried the LFE alone (21 to
+  24 ms on Nature's Fury). The decoder now holds those blocks and releases them with the first
+  metadata's state applied from their first frame (`ObjectMetadataHold`), waiting at most 100 ms.
+  A segment cut releases what is still held as it is, so the hold never moves audio into the next
+  segment.
 - **The surround-downmix warning no longer fires on 5.1 inside a Dolby MAT carrier.** After an APAC
   session tvOS keeps the HDMI output in the 2-channel MAT carrier it negotiated, so a 5.1 `ec-3` track
   played next read `output=2` and the log claimed a downmix while the sink played the 5.1 intact (Apple
@@ -59,7 +81,6 @@ the public-API contract.
   source that is no disc costs the same probe reads as before. `aetherctl disc-inspect` reports such an
   image as `dvdVideo`.
 
-
 - **A seek lands on a DVD title, and the playhead holds across cells that restart their timestamps.**
   A title's VOBs are read as one MPEG-PS, and many discs restart the presentation timestamps at a cell
   boundary: *The Little Chinese Seamstress* puts its cell 7, at 3569 s of title time, at about 147 s. A
@@ -71,6 +92,32 @@ the public-API contract.
   seek (2000, 3560, 4500 and 300 s; 2000, 4000 and 500 s) and played on, across cell 7 without a jump
   in the playhead. A title whose cells do not follow each other, that starts past its first sector, or
   that has an angle block, or a disc without a time map, reads and seeks as before.
+
+- **Dolby Vision Profile 7 keeps its RPU on a display without Dolby Vision.** The P7 -> 8.1 conversion
+  ran only when the display claimed Dolby Vision; everywhere else the container record was stripped and
+  the HDR10 base layer played on its static metadata alone, with the enhancement-layer NAL units still in
+  every segment. That covered every HDR10 and SDR panel and every Mac, where Dolby Vision is never
+  observed and only a host assertion claims it. It was the Profile 8.1 non-DV route of tvOS 26.0, which
+  Profile 8.1 left behind once its `-11868` stopped reproducing (AE#493). Profile 7 is now converted on
+  every display and served exactly as Profile 8.1 is: `hvc1` + `dvvC` + `SUPPLEMENTAL-CODECS`, so where
+  AVPlayer maps the picture itself (an SDR panel, a Mac) it maps from the RPU, the segments no longer
+  carry an enhancement layer nothing decodes, and `forceDolbyVisionOnNonDVDisplay` applies to Profile 7
+  too. `dolbyVisionConversion` reads `.profile7ToProfile81` on every such session.
+  `dolbyVisionHandling = .baseLayerOnly` is unchanged. Found by dotModded.
+
+- **Ceiling speakers sit where TS 103 448 puts them.** The renderer placed the top speakers in the
+  room's corners, so overhead content near the front leaked backwards and the whole mix sat higher
+  than Apple's own render of the same title. They now sit a quarter of the room in from each wall.
+  Against Apple's render of the matching DD+ Atmos, energy-weighted: Black Hawk Down 3.3° → 0.8°
+  direction error, +3.2° → +0.4° elevation bias, +4.1 → +0.6 points top-share; a single overhead
+  helicopter 6.3° → 0.2°; Dolby's Amaze 4.7° → 3.3°.
+
+- **A 5.1 bed's surrounds sit where TS 103 448 puts them.** The object renderer placed the 5.1.2 and
+  5.1.4 surrounds in the rear corners; table A.3 puts them halfway down the side walls, where a 7.1 bed
+  has its sides. An object on the side wall halfway back now plays from the surround alone instead of
+  half from the front, and one a quarter of the way back puts 50% of its power in the surround
+  instead of 15%. The no-back and no-sides zone masks no longer take a 5.1 layout's surrounds away,
+  which table 4 does not do on a 3/2 floor; screen-only still does. 7.1 and 9.1 layouts are unchanged.
 
 ## [7.35.1] - 2026-10-12
 
