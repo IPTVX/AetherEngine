@@ -20,6 +20,14 @@ the public-API contract.
   the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before,
   and one with both trees plays its Blu-ray title, the order an image is recognized in.
 
+- **LibTrueHD and LibDTSX can be left out.** Each object-audio decoder library is now behind a package
+  trait, `TrueHDObjectAudio` and `DTSXObjectAudio`, both on by default, so a host that does nothing
+  keeps today's build. A host that cannot ship one of them turns its trait off
+  (`.package(url:..., traits: [])`, or the package's traits in Xcode): the library is neither linked
+  nor resolved, and its codec keeps the channel bridge whatever `objectAudioRendering` asks, with the
+  reason in the session log. The manifest moves to swift-tools-version 6.1, which traits need. CI also
+  builds with both traits off. See README › Package traits.
+
 ### Fixed
 
 - **`serveIFramePlaylist` shows scrub thumbnails for HDR10, HLG and Dolby Vision titles** (#682). The
