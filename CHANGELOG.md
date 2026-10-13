@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A live GOP longer than the sealed target duration no longer breaks the playlist.** RFC 8216 keeps
+  `TARGETDURATION` fixed for a playlist's life, so a later segment above it made the playlist invalid
+  for AVPlayer (-12642). The engine now retires that playlist URL with its original target and an
+  end index before the long segment, and serves the same cache under a new `live-N/` namespace with
+  a fresh seal; the consumer item swaps to it in place, keeping source, cache, position (also behind
+  live) and play/pause intent. A media playlist failure no longer counts as evidence against the HDR
+  master (#748, thanks @yucelokan).
+
 ## [7.36.0] - 2026-10-13
 
 ### Added

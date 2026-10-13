@@ -3166,9 +3166,9 @@ public final class AetherEngine: ObservableObject {
     ///   would aim at the edge, discarding the rewind the viewer kept through the whole outage.
     func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false,
                                    liveRejoinOverride: Double? = nil,
-                                   preserveLivePosition: Double? = nil) {
+                                   preserveLivePosition: Double? = nil, replacementURL: URL? = nil) {
         guard let host = nativeHost, let player = currentAVPlayer,
-              let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
+              let url = replacementURL ?? (player.currentItem?.asset as? AVURLAsset)?.url else { return }
         // Item death parks tcs at .paused; only that trigger may bypass the user-pause guard.
         guard Self.stalledConsumerRecoveryAllowed(
             consumerIsPaused: player.timeControlStatus == .paused,
@@ -3188,14 +3188,19 @@ public final class AetherEngine: ObservableObject {
             behindWhenLastAdvancing: liveBehindWhenLastAdvancing,
             residentRange: liveWindow?.seekableRange,
             targetDurationSeconds: liveTargetDurationSeconds)
-        let rejoinPosition = preserveLivePosition ?? policyRejoin ?? liveRejoinOverride
+        let rejoinPosition = preserveLivePosition
+            ?? (replacementURL == nil ? (policyRejoin ?? liveRejoinOverride) : liveRejoinOverride)
         // AE#446 round 3: name which of the two decided, because they mean different things and the
         // difference is exactly what a reader of this line is trying to establish. The policy reads
         // how far behind live the item was; a window closed with ENDLIST is a finite asset whose
         // seekable end IS the playhead, so that distance reads zero there and printing it next to a
         // carried position says nothing true about a timeshifted viewer.
         let liveTarget: String = rejoinPosition.map { position in
-            let provenance = preserveLivePosition != nil ? "(video presentation repair at the current playhead)" : policyRejoin != nil
+            let provenance = preserveLivePosition != nil
+                ? "(video presentation repair at the current playhead)"
+                : replacementURL != nil
+                ? "(preserving the current position across playlist renewal)"
+                : policyRejoin != nil
                 ? "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the "
                   + "picture last moved, still resident)"
                 : "(carried across the swap: the window it played out under was closed, so its own "
@@ -3203,12 +3208,14 @@ public final class AetherEngine: ObservableObject {
             return "\(String(format: "%.2f", position))s, the place it held \(provenance)"
         } ?? "the live edge (rejoin)"
         EngineLog.emit(
-            "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
+            (replacementURL == nil
+                ? "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
+                : "[AetherEngine] live playlist timing changed; replacing item at ")
             + (isLive ? liveTarget : "\(String(format: "%.2f", anchor))s")
             + Self.recoveryAnchorLogSuffix(
                 anchor: anchor, position: position,
                 pendingSeekTarget: pendingRecoverySeekClockTarget)
-            + " (same URL, same host)",
+            + (replacementURL == nil ? " (same URL, same host)" : " (new playlist URL, same source and cache)"),
             category: .engine
         )
         // AE#454: the placement, expressed in the playlist the fresh item is about to load. A rejoin

@@ -721,6 +721,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Fires on live program-boundary rebase: `(newShiftSeconds, seamOutputSeconds)`. AetherEngine
     /// defers applying the shift until playback crosses `seamOutputSeconds` so the clock doesn't jump.
     var onPlaylistShiftRebased: (@Sendable (Double, Double) -> Void)?
+    /// Fires when a longer finalized segment requires a new live playlist URL.
+    var onLivePlaylistRenewal: (@Sendable () -> Void)?
+    func renewedLivePlaylistURL(replacing url: URL) -> URL? {
+        server?.renewedLivePlaylistURL(replacing: url)
+    }
     /// Fires when no in-engine source reopen can continue the session.
     var onLiveSourceReset: (@Sendable () -> Void)?
     var onLiveSourceReplayExhausted: (@Sendable () -> Void)?
@@ -2986,6 +2991,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// cuts segments the playlist never lists (audit HLS-101).
     func wireProviderCallbacks(_ prod: HLSSegmentProducer, to prov: VideoSegmentProvider) {
         if isLiveSession {
+            prov.onLivePlaylistRenewal = { [weak self] in self?.onLivePlaylistRenewal?() }
             prod.onLiveSegmentFinalized = { [weak prov] index, durationSeconds, startPtsSeconds, discontinuous in
                 prov?.appendLiveSegment(index: index,
                                         startSeconds: startPtsSeconds,
