@@ -1488,7 +1488,9 @@ public final class AetherEngine: ObservableObject {
     /// Bounded recovery could not find new media after a verified replay. Cached DVR media
     /// remains readable, but automatic `load` would discard its history and permit the same
     /// broadcast to play again. The host can retry with `retryLiveSourceRecovery()` after
-    /// its own backoff; this is not a codec failure. Subscribe per session.
+    /// its own backoff; this is not a codec failure. Fires only under
+    /// `LoadOptions.hostRetriesExhaustedLiveReplay`; otherwise the exhaustion is a `liveSourceReset`.
+    /// Subscribe per session.
     public let liveSourceReplayExhausted = PassthroughSubject<Void, Never>()
 
     /// Resume a parked live source without replacing the consumer item, DVR cache or replay

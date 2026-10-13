@@ -143,6 +143,25 @@ struct SupersededPumpExitTests {
         #expect(resets.failures == 1, "a changed track layout still requests fresh negotiation")
     }
 
+    @Test("without a host that owns the retry, exhausted replay is a source reset")
+    func replayExhaustionFallsBackToSourceReset() throws {
+        var codecpar: UnsafeMutablePointer<AVCodecParameters>? = try #require(avcodec_parameters_alloc())
+        defer { avcodec_parameters_free(&codecpar) }
+        codecpar!.pointee.codec_id = AV_CODEC_ID_H264
+        codecpar!.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+        let resets = Recorder()
+        let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),
+            dvModeAvailable: false, isLiveSession: true, sourceReopenableByURL: false)
+        engine.onLiveSourceReset = { resets.fail() }
+        let producer = try makeProducer(codecpar: codecpar!)
+        engine.producer = producer
+        engine.handlePumpFinished(producer, reason: .sourceReplay)
+        #expect(resets.failures == 1, "a host that only knows liveSourceReset must still be told to retune")
+        engine.liveRecoveryHasVerifiedReplay = true
+        engine.escalateLiveReopenExhaustion(transport: .url)
+        #expect(resets.failures == 2)
+    }
+
     @Test("the same read error from the session's own producer still reaches the recovery arms")
     func currentReadErrorIsHandled() throws {
         var codecpar: UnsafeMutablePointer<AVCodecParameters>? = try #require(avcodec_parameters_alloc())

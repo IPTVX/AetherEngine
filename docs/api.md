@@ -99,8 +99,9 @@ bounded exact-packet history, so media already in the DVR window is not appended
 again even when the viewer is behind live. The failed connection is retired before
 opening the replacement. A changed track layout or ordinary source loss that
 exhausts in-engine recovery requests host negotiation through this subject.
-Verified replay that cannot reach new media uses `liveSourceReplayExhausted`
-below, so an automatic full load cannot bypass the retained evidence.
+Verified replay that cannot reach new media also ends here by default. A host that sets
+`LoadOptions.hostRetriesExhaustedLiveReplay` gets `liveSourceReplayExhausted` below
+instead, so its own retry keeps the retained evidence rather than a full load discarding it.
 A complete overlap continues in place; an ambiguous clock reset retains ordinary
 discontinuity handling. Fresh-source recovery ends an active recording with
 `sourceReset` rather than silently splicing a new source into the old file.
@@ -119,7 +120,9 @@ compatibility failure merely because an origin remains unavailable.
 ### Live: exhausted verified replay
 
 `liveSourceReplayExhausted` is a per-session subject for native HLS recovery that
-cannot reach new media after verifying previously admitted packets. Production
+cannot reach new media after verifying previously admitted packets. It fires only for a
+session loaded with `LoadOptions.hostRetriesExhaustedLiveReplay = true`; without it the same
+exhaustion publishes `liveSourceReset`, so a host that only knows that event still retunes. Production
 parks while cached DVR media and replay history remain available. This is a
 source recovery event, not a codec failure or a requirement to show an error.
 
@@ -1136,7 +1139,7 @@ conflicting unflagged copies resolved within the verified pending batch; `untime
 unpositioned fragments discarded from the held damaged boundary. Unrelated source
 timestamp resets do not grant this authority.
 
-Native presentation recovery separately watches the player layer's readiness. If a previously
+Native presentation recovery, also enabled by `nativeVideoFrameRecovery` and off by default, watches the player layer's readiness. If a previously
 visible, attached video layer stays unready while foreground playback has both clock progress
 and buffered media, the engine first seeks to its current position and can then replace the
 consumer item in place. It preserves the live source, retained DVR and current position; a live
@@ -1205,6 +1208,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `forceDolbyVisionOnNonDVDisplay` | false | **Experimental (AE#455).** On a display with no Dolby Vision of its own, serve an HEVC Profile 8.1 source the way a Profile 5 source is served (`dvh1` sample entry, `dvcC` rewritten to profile 5 / compatibility 0, `CODECS="dvh1.05.LL"`), so AVPlayer composes the RPU itself instead of handing the panel the static-metadata HDR10 base layer. The bitstream is untouched; only the container's claim about it changes. Ignored on a display that does Dolby Vision, and Profile 8.1 only. See [formats.md](formats.md#dolby-vision-signaling) for what it buys and what it risks. |
 | `dolbyVisionHandling` | `.automatic` | A `DolbyVisionHandling`. `.baseLayerOnly` presents the HDR10 / HLG base layer of a Dolby Vision source and leaves the Dolby Vision out of the container on every display: plain `hvc1` / `av01` sample entry, `dvcC` stripped, no `SUPPLEMENTAL-CODECS`, HDR10 / HLG display criteria, `videoFormat` reads the base layer's format while `sourceVideoFormat` and `sourceDVProfile` keep saying what the file carries. The route a host offers as "Dolby Vision: off (HDR10)", for a source whose Dolby Vision is wrong and whose base layer is right: the reported shape is a remux carrying a Profile 7 RPU under a container record claiming Profile 5, where a player that believes the record decodes YCbCr as IPT and the picture comes out green / violet. Applies to HEVC Profile 7 / 8.1 / 8.4, AV1 Profile 10.1 / 10.4, and a Profile 5 (or AV1 10.0) record whose VUI declares a BT.2020 YCbCr PQ or HLG base; a Profile 5 whose VUI is unspecified carries IPT-PQ-c2, has no base layer to present, keeps its route, and the engine says so in the log. Takes precedence over `forceDolbyVisionOnNonDVDisplay`. A tuning field, correctable through `reloadAtCurrentPosition(applying:)`; a Profile 5 record the VUI contradicts also stops refusing the software path under it. See [formats.md](formats.md#dolby-vision-signaling). |
 | `preferredDecodePath` | `.automatic` | A `DecodePath`. `.software` serves this source through `SoftwarePlaybackHost` whatever the routing concluded, scoped to this session and costing the source nothing (seeks, the audio switch and the title switch all keep working). The escape for the formats `VTCapabilityProbe` deliberately cannot classify, and for live H.264 / HEVC, which never reaches that gate at all. One-way: there is no `.native`. See [Overriding the decode path](#overriding-the-decode-path). |
+| `hostRetriesExhaustedLiveReplay` | `false` | The host owns the retry after a verified live replay exhausts the in-engine reopen: the engine publishes `liveSourceReplayExhausted` and holds production until `retryLiveSourceRecovery()`. `false` publishes `liveSourceReset` for the same exhaustion. |
 | `escalatesToSoftwarePath` | `true` | Whether a native session AVPlayer refuses on its merits (`CoreMediaErrorDomain`), or a live join without an entry point the native route can open (`AetherEngine.LiveJoin`, AE#627), may be rebuilt once on the software path (AE#561). `false` surfaces the failure as `.error` instead, for a host with its own fallback ladder (AE#629). Correctable. |
 | `sharedOutputRole` | `.primary` (default) or `.secondary` | A `SharedOutputRole`. A secondary engine never writes display criteria and never owns Now Playing, whatever `suppressDisplayCriteria` and `ownsVideoNowPlayingSession` say, on the audio-only path too. It also skips the play gate's wait for a criteria write and the panel readout (`criteriaPanelReadout` is nil, as for any suppressed load), so its HDR labelling relies on `panelIsInHDRMode`. The role is fixed for a session, but a later `load()` may change it: as an identity field it only blocks corrections (Sodalite#175). A host that opted into `ownsVideoNowPlayingSession` and changes the role without a `stop()` keeps the native host's original Now Playing ownership until the next stop. |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |

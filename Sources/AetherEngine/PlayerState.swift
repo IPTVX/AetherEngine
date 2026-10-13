@@ -420,6 +420,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// unavailable output, PiP, background, external playback, pause and seeks never repair.
     public var nativeVideoFrameRecovery: Bool = false
 
+    /// The host owns the retry after a verified live replay exhausts in-engine recovery: the engine
+    /// publishes `liveSourceReplayExhausted` and waits for `retryLiveSourceRecovery()`. Default off,
+    /// where that exhaustion publishes `liveSourceReset` like any other source loss, so a host that
+    /// only knows that event still retunes instead of holding the last frame.
+    public var hostRetriesExhaustedLiveReplay: Bool = false
+
     /// Diagnostic lever: force dvh1 codec tags + master playlist regardless of display capability. OFF by default: non-DV displays route DV through the media playlist (no master) so AVPlayer auto-tonemaps the HEVC base layer (only path that avoids AVFoundationErrorDomain -11868 on tvOS 26). AetherEngine#4.
     public var keepDvh1TagWithoutDV: Bool
 
@@ -985,7 +991,8 @@ public struct LoadOptions: Sendable, Equatable {
         escalatesToSoftwarePath: Bool = true,
         sharedOutputRole: SharedOutputRole = .primary,
         nativeVideoFrameDiagnostics: Bool = false,
-        nativeVideoFrameRecovery: Bool = false
+        nativeVideoFrameRecovery: Bool = false,
+        hostRetriesExhaustedLiveReplay: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -1038,6 +1045,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.sharedOutputRole = sharedOutputRole
         self.nativeVideoFrameRecovery = nativeVideoFrameRecovery
         self.nativeVideoFrameDiagnostics = nativeVideoFrameDiagnostics
+        self.hostRetriesExhaustedLiveReplay = hostRetriesExhaustedLiveReplay
     }
 }
 

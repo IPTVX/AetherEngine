@@ -2243,6 +2243,9 @@ final class NativeAVPlayerHost {
     }
 
     private func observeVideoPresentation(clock: Double) {
+        // Both halves are opt-in: an unready layer after an in-place swap can be an audio-first
+        // join waiting for its IDR, which no host asked the engine to repair or to log.
+        guard sessionContract.nativeVideoFrameRecovery || sessionContract.nativeVideoFrameDiagnostics else { return }
         var foreground = true
         #if os(iOS) || os(tvOS) || os(visionOS)
         foreground = UIApplication.shared.applicationState == .active
@@ -2281,7 +2284,7 @@ final class NativeAVPlayerHost {
             let reason = !isVideoReadyForDisplay ? "layer_unready" : (frozenOutput || stalled ? "output_stalled" : "none")
             EngineLog.emit("[NativeVideoHealth] action=\(phase) sid=\(sessionID) clock=\(String(format: "%.3f", clock)) buffer=\(String(format: "%.3f", ahead)) layerReady=\(isVideoReadyForDisplay) frameAge=\(String(format: "%.3f", age ?? -1)) samples=\(videoFrameProgress.samples) attempt=\(videoPresentation.attempts) pip=\(pictureInPictureActive) foreground=\(foreground) eligible=\(eligible) reason=\(reason) repairEnabled=\(sessionContract.nativeVideoFrameRecovery)", category: .engine)
         }
-        if let action {
+        if let action, sessionContract.nativeVideoFrameRecovery {
             if stalled { videoFrameProgress.beginRecovery() }
             onVideoPresentationRecovery?(action, clock)
         }

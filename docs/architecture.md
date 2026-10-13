@@ -628,7 +628,8 @@ recognition.
 The cutter watchdog distinguishes a bounded overlap scan from a stuck cut while
 still detecting source starvation. The guard belongs to the producer thread.
 Repeated source loss parks acquisition after the existing bounded reopen budget.
-`liveSourceReplayExhausted` hands the retry timing to the host, which can call
+For a host that opted in with `hostRetriesExhaustedLiveReplay`,
+`liveSourceReplayExhausted` hands the retry timing to it, and it can call
 `retryLiveSourceRecovery()` without replacing the cache or consumer item. Stop or
 replacement revokes the pending retry, duplicate requests coalesce, and resumed
 production restores the provider's blocking-reload capability. Application

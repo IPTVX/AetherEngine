@@ -1057,12 +1057,16 @@ extension AetherEngine {
                 self.endRecordingIfRunning(reason: .sourceReset)
             }
         }
-        session.onLiveSourceReplayExhausted = { [weak self, weak session] in
-            self?.hop(for: generation) { [weak self, weak session] in
-                guard let self, let session, self.nativeVideoSession === session else { return }
-                self.noteLiveSourceGivenUp()
-                self.endRecordingIfRunning(reason: .sourceReset)
-                self.liveSourceReplayExhausted.send()
+        // Unset, the session reports the exhaustion through `onLiveSourceReset`: a host that never
+        // subscribed to `liveSourceReplayExhausted` would otherwise hold the last frame for good.
+        if loadedOptions.hostRetriesExhaustedLiveReplay {
+            session.onLiveSourceReplayExhausted = { [weak self, weak session] in
+                self?.hop(for: generation) { [weak self, weak session] in
+                    guard let self, let session, self.nativeVideoSession === session else { return }
+                    self.noteLiveSourceGivenUp()
+                    self.endRecordingIfRunning(reason: .sourceReset)
+                    self.liveSourceReplayExhausted.send()
+                }
             }
         }
         session.onLiveSourceReset = { [weak self, weak session] in
