@@ -17,6 +17,11 @@ the public-API contract.
   gaps and disk eviction. Cached seeks keep the same spans; cold seeks and teardown clear them.
   Sampling continues while paused and runs off the main actor, with stale seek/stop results
   discarded. Hosts no longer need to infer a cache band's start from the moving playhead.
+  VC-1 uses verified successor timestamps rather than rounded packet-duration islands. Valid
+  committed packets remain seekable after a source read error, which is still reported after drain;
+  storage failures remain unusable. Failed resume/seek positioning can no longer publish a false
+  successful landing. Bounded cold probes avoid speculative detour fetches, and foreground software
+  positioning has a finite 30 s budget for slow multi-probe remote keyframe searches.
 
 - **A host with its own Objective-C and C++ links again (#752).** Since 7.34.0 LibTrueHD and LibDovi
   each brought a `rust_eh_personality`, and with the host's `__objc_personality_v0` and

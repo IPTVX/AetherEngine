@@ -141,6 +141,124 @@ struct SoftwareResidentRangesTests {
         #expect(value.videoFloor == -.infinity)
     }
 
+    private func consume(_ source: SoftwarePacketReadAhead,
+                         expecting packets: [SoftwareStoredPacket], fails: Bool) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                Thread.detachNewThread {
+                    do {
+                        for expected in packets { #expect(try source.read() == expected) }
+                        if fails { #expect(throws: SourceFailure.self) { _ = try source.read() } }
+                        else { #expect(try source.read() == nil) }
+                        continuation.resume()
+                    } catch { continuation.resume(throwing: error) }
+                }
+            }
+        } onCancel: { source.close() }
+    }
+
+    private enum SourceFailure: Error { case unavailable }
+    private final class FailingInput: @unchecked Sendable {
+        private let lock = NSLock()
+        private var packets: [SoftwareStoredPacket]
+        private var index = 0
+        private var failAtEnd = true
+        let reachedEnd = DispatchSemaphore(value: 0)
+        let releaseEnd = DispatchSemaphore(value: 0)
+        init(_ packets: [SoftwareStoredPacket]) { self.packets = packets }
+        func next() throws -> SoftwareStoredPacket? {
+            lock.lock()
+            if index < packets.count {
+                let packet = packets[index]; index += 1
+                lock.unlock(); return packet
+            }
+            let fail = failAtEnd
+            lock.unlock()
+            if fail {
+                reachedEnd.signal(); releaseEnd.wait()
+                throw SourceFailure.unavailable
+            }
+            return nil
+        }
+        func replace(_ packets: [SoftwareStoredPacket]) {
+            lock.lock(); defer { lock.unlock() }
+            self.packets = packets; index = 0; failAtEnd = false
+        }
+    }
+
+    @Test("A source failure preserves committed coverage and cached seeks, but never becomes EOF",
+           arguments: [false, true])
+    func retainedAfterSourceFailure(reordered: Bool) async throws {
+        let packets = (0..<100).map { packet(Int64($0) * 40, key: $0 == 0) }
+        let input = FailingInput(packets)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+        let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
+            audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,
+            fifo: fifo, videoReorderDepth: reordered ? 4 : nil) { _ in try input.next() }
+        defer { input.releaseEnd.signal(); source.close() }
+        source.start()
+        try await waitFor { input.reachedEnd.wait(timeout: .now()) == .success }
+        let before = source.residentRanges
+        #expect(!before.isEmpty)
+        let epoch = source.snapshot.sourceEpoch
+        input.releaseEnd.signal()
+        try await waitFor { source.producerParkedForTesting }
+        #expect(source.producerParkedForTesting)
+        #expect(!source.snapshot.sourceEnded)
+        #expect(source.residentRanges == before)
+        // A failure cannot flush unresolved successor PTS as though it proved a normal EOF.
+        if reordered { #expect((before.last?.upperBound ?? 4) < 3.96) }
+        try await consume(source, expecting: packets, fails: true)
+        for target in [0.5, 2.0, 1.0] {
+            let token = source.beginSeek(to: target)
+            #expect(try source.prepareSeek(token, to: target))
+            source.endSeek(token, sourceClock: target)
+            #expect(source.snapshot.sourceEpoch == epoch)
+            #expect(source.residentRanges == before)
+            try await consume(source, expecting: packets, fails: true)
+            #expect(!source.snapshot.sourceEnded)
+        }
+        // A miss still resets the failed source lifetime and accepts only the new epoch's data.
+        let replacement = (0..<100).map { packet(10_000 + Int64($0) * 40, key: $0 == 0) }
+        let miss = source.beginSeek(to: 10)
+        #expect(try !source.prepareSeek(miss, to: 10))
+        #expect(source.residentRanges.isEmpty)
+        input.replace(replacement)
+        source.endSeek(miss, sourceClock: 10)
+        try await waitFor { source.snapshot.sourceEnded }
+        #expect(source.snapshot.sourceEpoch == epoch + 1)
+        #expect(source.residentRanges.first?.lowerBound == 10)
+        try await consume(source, expecting: replacement, fails: false)
+    }
+
+    @Test("A storage append failure still invalidates retained coverage and cached seeks")
+    func storageFailureRemainsClosed() async throws {
+        let packets = (0..<10).map { packet(Int64($0) * 40) }
+        let input = Input(packets)
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 1024, retainConsumed: true)
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
+            audio: nil, byteBudget: 1_000_000, forwardSeconds: 3600, initialSourceClock: 0,
+            fifo: fifo) { _ in
+                if let packet = input.next() { return packet }
+                reached.signal(); release.wait()
+                return packets[0]
+            }
+        defer { release.signal(); source.close() }
+        source.start()
+        try await waitFor { reached.wait(timeout: .now()) == .success }
+        #expect(source.residentRanges == [0...0.4])
+        try fifo.close()
+        release.signal()
+        try await waitFor { source.producerParkedForTesting }
+        #expect(source.producerParkedForTesting)
+        #expect(!source.snapshot.sourceEnded)
+        #expect(source.residentRanges.isEmpty)
+        let miss = source.beginSeek(to: 0.1)
+        #expect(try !source.prepareSeek(miss, to: 0.1))
+        #expect(source.snapshot.cacheSeekHits == 0)
+    }
+
     @Test("Source origin mapping preserves gaps, clips negatives and rejects unknown origins")
     func displayMapping() {
         let spans = [90.0...105, 110...120]

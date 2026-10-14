@@ -63,6 +63,17 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var started = false
     private var ended = false
     private var failure: Error?
+    private enum FailureOrigin: Int {
+        case none = 0, sourceRead = 1024, storage = 2048, envelope = 4096
+    }
+    private var failureOrigin: FailureOrigin = .none
+    // Called under condition. An upstream read failure says nothing about the integrity of
+    // envelopes already committed to the FIFO. Keep those usable; read() still throws the
+    // original failure after they drain, and the producer stays parked until a cold seek.
+    private var retainedPacketsUsableLocked: Bool {
+        failure == nil || failureOrigin == .sourceRead
+    }
+    private var lastCoverageDiagnosticFlags: Int?
     private var count = 0
     private var bytes = 0
     private var residentBytes = 0
@@ -139,7 +150,28 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// timestamp conversion/intersection and keyframe selection happen after releasing it. No I/O.
     var residentRanges: [ClosedRange<Double>] {
         condition.lock()
-        guard !closed, !sourceRepositioning, !resetPending, failure == nil,
+        // Fixed numeric state only, emitted on edges by this background sampler. No URLs,
+        // error descriptions or packet content. Bits: closed/reposition/reset/failure,
+        // nonretaining/invalid-video/EOF/empty-audio/no-keyframe/unknown-floor,
+        // source-failure/storage-failure/envelope-failure/empty-video.
+        var flags = failureOrigin.rawValue
+        if closed { flags |= 1 }
+        if sourceRepositioning { flags |= 2 }
+        if resetPending { flags |= 4 }
+        if failure != nil { flags |= 8 }
+        if !fifo.retainsConsumedPackets { flags |= 16 }
+        if presentationCoverage?.isInvalidated == true { flags |= 32 }
+        if ended { flags |= 64 }
+        if audio != nil && audioCoverage.rangeCount == 0 { flags |= 128 }
+        if keyframes.isEmpty { flags |= 256 }
+        if residency.videoFloor == .infinity || residency.audioFloor == .infinity { flags |= 512 }
+        if (presentationCoverage?.rangeCount ?? videoCoverage.rangeCount) == 0 { flags |= 8192 }
+        let changed = lastCoverageDiagnosticFlags != flags
+        lastCoverageDiagnosticFlags = flags
+        defer {
+            if changed { EngineLog.emit("[SWCacheCoverage] flags=\(flags)", category: .swPlayback) }
+        }
+        guard !closed, !sourceRepositioning, !resetPending, retainedPacketsUsableLocked,
               fifo.retainsConsumedPackets else { condition.unlock(); return [] }
         let videoCoverage = self.videoCoverage
         let presentationCoverage = self.presentationCoverage
@@ -208,7 +240,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard token == generation, seeking, !closed else {
             condition.unlock(); throw ReadError.interrupted
         }
-        let hasCoverage = !sourceRepositioning && !resetPending && failure == nil
+        let hasCoverage = !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && seconds.isFinite && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let candidates = hasCoverage ? keyframes.filter { $0.seconds <= seconds }
             .sorted { $0.seconds < $1.seconds } : []
@@ -272,7 +304,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard seconds.isFinite, maxPackets > 0, isCancelled?() != true else { return nil }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         condition.lock()
-        let eligible = !closed && !sourceRepositioning && !resetPending && failure == nil
+        let eligible = !closed && !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let anchor = eligible
             ? keyframes.filter { $0.seconds <= seconds }.max { $0.seconds < $1.seconds } : nil
@@ -431,7 +463,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     private func clearSourceMetadataLocked() {
         count = 0; bytes = 0; residentBytes = 0
-        ended = false; failure = nil
+        ended = false; failure = nil; failureOrigin = .none
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
         storedVideoSeconds = nil; consumedVideoSeconds = nil
         keyframes.removeAll(keepingCapacity: true)
@@ -487,7 +519,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     if token == sourceEpoch { resetPending = false }
                     condition.broadcast()
                     condition.unlock()
-                } catch { recordFailure(error, token: token) }
+                } catch { recordFailure(error, token: token, origin: .storage) }
                 operations.unlock()
                 continue
             }
@@ -499,6 +531,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
 
     private func producePacket(token: UInt64) {
+        var failureOrigin: FailureOrigin = .sourceRead
         do {
             let packet = try readSource { [self] in
                 condition.lock(); defer { condition.unlock() }
@@ -514,6 +547,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                 condition.unlock()
                 return
             }
+            failureOrigin = .envelope
             let data = try packet.encoded()
             operations.lock()
             condition.lock()
@@ -563,10 +597,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     }
                     condition.broadcast()
                     condition.unlock()
-                } catch { recordFailure(error, token: token) }
+                } catch { recordFailure(error, token: token, origin: .storage) }
             }
             operations.unlock()
-        } catch { recordFailure(error, token: token) }
+        } catch { recordFailure(error, token: token, origin: failureOrigin) }
     }
 
     private func shouldParkLocked() -> Bool {
@@ -587,10 +621,11 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         return frontierLocked().map { $0 - sourceClock >= forwardSeconds } ?? false
     }
 
-    private func recordFailure(_ error: Error, token: UInt64) {
+    private func recordFailure(_ error: Error, token: UInt64, origin: FailureOrigin) {
         condition.lock(); defer { condition.unlock() }
         guard token == sourceEpoch, !closed else { return }
         failure = error
+        failureOrigin = origin
         resetPending = false
         condition.broadcast()
     }

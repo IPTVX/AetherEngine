@@ -2409,7 +2409,11 @@ public final class Demuxer: @unchecked Sendable {
         // matroska may return success with a partial index after abort; deadline flag
         // is authoritative, not ret.
         let capped = avioProvider?.readDeadlineFired ?? false
-        return ret >= 0 && !capped && probeControl?.isStopped != true
+        let stopped = probeControl?.isStopped == true
+        // Fixed result flags only: FFmpeg refusal, read deadline, cancellation. No source identity.
+        let flags = (ret < 0 ? 1 : 0) | (capped ? 2 : 0) | (stopped ? 4 : 0)
+        EngineLog.emit("[DemuxReposition] flags=\(flags)", category: .swPlayback)
+        return ret >= 0 && !capped && !stopped
     }
 
     /// How an off-actor reposition ended (#254). Named to mirror `SeekEvent.Outcome` so the engine's

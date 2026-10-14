@@ -2731,7 +2731,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let n = detourCache.serveCached(into: dst, maxLen: maxLen, at: offset) {
             return .served(n, fetched: false)
         }
-        guard allowFetch else { return .miss }
+        // A bounded position search may probe several distant offsets. Waiting for a whole
+        // speculative 4 MB block at each offset can spend the seek's entire deadline before
+        // the existing streaming reconnect gets a chance to deliver the requested bytes.
+        // Keep resident hits above, but let a bounded miss re-anchor immediately. Ordinary
+        // parse-time ping-pong still fills the detour cache and preserves its connection.
+        guard allowFetch, readDeadline == .distantFuture else { return .miss }
 
         let blockStart = (offset / Int64(Self.detourBlockSize)) * Int64(Self.detourBlockSize)
         let blockLen = Int(min(Int64(Self.detourBlockSize), fileSize - blockStart))

@@ -590,7 +590,7 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$duration` | seconds; a `LoadOptions.declaredDurationSeconds` outranks the container's |
 
 For software VOD, `residentRanges` intersects video presentation coverage with the selected audio
-stream, even if muted; a video-only source does not require audio. H.264/HEVC use verified
+stream, even if muted; a video-only source does not require audio. H.264/HEVC and VC-1 use verified
 successor-PTS intervals, so the final picture with no known successor does not acquire an invented
 end. Ranges are clipped against retained keyframes and discarded packet timestamps; unknown or
 invalid coverage stays empty. Metadata limits can conservatively omit old spans rather than claim
@@ -602,6 +602,25 @@ the old store is discarded. Seek, replacement and teardown guards reject a late 
 these spans directly on the `currentTime` axis: `bufferedPosition` alone is a forward frontier and
 cannot establish a backward cache start. Live playback continues to expose its separate seekable
 window rather than VOD resident ranges.
+
+
+A source read failure preserves already committed software packets and their verified ranges.
+Cached seeks may replay them, but draining those packets still throws the original read failure;
+the error does not become EOF and does not flush unresolved successor timestamps. Storage or
+packet-envelope failures invalidate usability instead. A cold seek starts a new source lifetime.
+
+Software VOD resume and cache-miss seek positioning run off the main actor with a **30 s positioning
+budget**, measured after acquiring demux access. Waiting for an earlier read can add to the total
+call time. A deadline-bounded cold byte probe uses the existing streaming reconnect immediately;
+already resident detour blocks remain usable, and ordinary unbounded parsing keeps its detour policy.
+This allows multi-probe keyframe searches on slow remote storage to complete while retaining a finite
+I/O deadline. An unavailable source can consequently take longer to report failure.
+
+Failed software resume throws before readiness or a requested clock anchor is published. Failed
+software seek reports `.stalled` and `.softwarePipelineFailed`, clears the in-flight state, and does
+not resume decoding or finalize the target as landed. Unlike an AVPlayer seek that remains pending
+for a late landing, this software failure is terminal for the host. Stop, cancellation and newer
+seeks still prevent stale completions from changing the active session.
 
 
 **`sourceTime` on `nativeRemoteHLS` (AE#616).** The engine sees no segment on that route, so the clock is

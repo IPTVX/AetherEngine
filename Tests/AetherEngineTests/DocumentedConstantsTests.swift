@@ -19,6 +19,11 @@ import AetherLibavcodec
 @MainActor
 final class DocumentedConstantsTests: XCTestCase {
 
+    func testSoftwarePositioningBudgetMatchesDocumentation() throws {
+        XCTAssertEqual(SoftwarePlaybackHost.seekBudgetSeconds, 30)
+        assertDocumented("**30 s positioning\nbudget**", try documentation())
+    }
+
     func testItemDiagnosticBoundsMatchDocumentation() throws {
         let docs = try documentation()
         XCTAssertEqual(ItemDiagnosticReadPool.maximumConcurrentReads, 2)
