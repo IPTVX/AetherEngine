@@ -330,6 +330,26 @@ struct DoviFelRealFileTests {
         #expect(s.sink.pts.count == drained, "the drain left frames for the flush to drop")
     }
 
+    @Test("a session rebuild leaves both layers on the decoder's epoch: packets fed after it still decode",
+          .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[0]), DoviFelRealFileTests.needsClips),
+          .timeLimit(.minutes(2)), arguments: [DoviFelRealFileTests.fixtures[0]])
+    func sessionRebuildKeepsTheEpoch(name: String) async throws {
+        let s = try Self.open(name)
+        defer { s.decoder.close(); s.demuxer.close() }
+        Self.feed(s, count: 30, epoch: s.decoder.feedEpoch)
+        #expect(s.decoder.enhancementFeedEpochForTesting != nil)
+        // The host's return from background audio-only: flush, rebuild, then feed on with no
+        // reposition in between, so nothing else moves the layers' epochs back.
+        s.decoder.flush()
+        #expect(s.decoder.rebuildSession())
+        #expect(s.decoder.enhancementFeedEpochForTesting == s.decoder.feedEpoch)
+        let before = s.sink.pts.count
+        // A rebuilt session resumes at a keyframe: feed again from the head of the clip.
+        s.demuxer.seek(to: 0)
+        Self.feed(s, count: 30, epoch: s.decoder.feedEpoch)
+        try await waitFor { s.sink.pts.count > before }
+    }
+
     @Test("a flush before the first enhancement packet leaves the enhancement decoder in step: its frames still arrive",
           .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[0]), DoviFelRealFileTests.needsClips),
           .timeLimit(.minutes(2)), arguments: [DoviFelRealFileTests.fixtures[0]])
