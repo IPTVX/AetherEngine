@@ -22,6 +22,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A 25 fps H.264 Matroska file with forward-clamped B-picture timestamps plays at a steady
+  cadence.** Its packet timestamps repeated display slots and left the preceding slots empty, so
+  decoded output alternated 0 ms and 80 ms frame intervals instead of 40 ms. The demuxer now
+  recognizes that shape only from an exact CFR lattice, complete picture-order ranks and two
+  corroborating clamps, then reconstructs PTS and DTS from the IDR anchor, picture order and decode
+  order. A seek starts from a new IDR, and overflow or any later timestamp outside the proven shape
+  disables the repair and leaves that packet untouched.
 - **H.264 MP4s with missing composition offsets keep display order across cadence changes and
   hierarchical B pictures.** A corroborated missing-offset head with a changing decode cadence now
   reuses the existing timestamp slots. Later zero-offset regions can prove a forward-coded anchor

@@ -167,6 +167,73 @@ struct Issue511MatroskaCodingOrderTests {
         #expect(Permutation.classify(samples: Array(healthy.prefix(3)), videoDelay: 1) == .healthy)
     }
 
+    @Test("clamped CFR B-picture timestamps are reconstructed from picture order")
+    func reconstructsClampedCFR() throws {
+        let n = Int64.min
+        let samples = [
+            Sample(dts: n, pts: 0, pictureOrderCount: 0, isKeyframe: true),
+            Sample(dts: n, pts: 200, pictureOrderCount: 10, isKeyframe: false),
+            Sample(dts: 0, pts: 80, pictureOrderCount: 4, isKeyframe: false),
+            Sample(dts: 80, pts: 80, pictureOrderCount: 2, isKeyframe: false),
+            Sample(dts: 80, pts: 120, pictureOrderCount: 6, isKeyframe: false),
+            Sample(dts: 120, pts: 160, pictureOrderCount: 8, isKeyframe: false),
+            Sample(dts: 160, pts: 440, pictureOrderCount: 22, isKeyframe: false),
+            Sample(dts: 200, pts: 320, pictureOrderCount: 16, isKeyframe: false),
+            Sample(dts: 280, pts: 280, pictureOrderCount: 12, isKeyframe: false),
+            Sample(dts: 280, pts: 280, pictureOrderCount: 14, isKeyframe: false),
+            Sample(dts: 320, pts: 360, pictureOrderCount: 18, isKeyframe: false),
+            Sample(dts: 360, pts: 400, pictureOrderCount: 20, isKeyframe: false),
+        ]
+        #expect(Permutation.classify(samples: samples, videoDelay: 2, nominalStep: 40)
+            == .reconstruct(step: 40, pocStep: 2))
+
+        let repairedPTS: [Int64] = [0, 200, 80, 40, 120, 160, 440, 320, 240, 280, 360, 400]
+        let repairedDTS: [Int64] = [-80, -40, 0, 40, 80, 120, 160, 200, 240, 280, 320, 360]
+        let healthy = zip(samples.indices, samples).map { index, sample in
+            Sample(
+                dts: repairedDTS[index], pts: repairedPTS[index],
+                pictureOrderCount: sample.pictureOrderCount, isKeyframe: sample.isKeyframe)
+        }
+        #expect(Permutation.classify(samples: healthy, videoDelay: 2, nominalStep: 40) == .healthy)
+        #expect(Permutation.classify(samples: samples, videoDelay: 2, nominalStep: Int64.max)
+            == .healthy)
+        var oneClamp = samples
+        oneClamp[8] = Sample(
+            dts: 240, pts: 240, pictureOrderCount: 12, isKeyframe: false)
+        #expect(Permutation.classify(samples: oneClamp, videoDelay: 2, nominalStep: 40)
+            == .healthy)
+
+        var rewriter = Permutation.CFRRewriter(step: 40, pocStep: 2, videoDelay: 2)
+        let repaired = samples.map {
+            rewriter.rewrite(
+                pts: $0.pts, dts: $0.dts, pictureOrderCount: $0.pictureOrderCount,
+                isKeyframe: $0.isKeyframe)
+        }
+        #expect(try repaired.map { try #require($0).pts } == repairedPTS)
+        #expect(try repaired.map { try #require($0).dts } == repairedDTS)
+
+        #expect(rewriter.rewrite(
+            pts: n, dts: n, pictureOrderCount: 0, isKeyframe: true) == nil)
+        #expect(rewriter.rewrite(
+            pts: 480, dts: 400, pictureOrderCount: 2, isKeyframe: false) == nil)
+        #expect(rewriter.rewrite(
+            pts: 1_000, dts: n, pictureOrderCount: 0, isKeyframe: true)?.pts == 1_000)
+        _ = rewriter.rewrite(
+            pts: 1_200, dts: n, pictureOrderCount: 10, isKeyframe: false)
+        _ = rewriter.rewrite(
+            pts: 1_080, dts: 1_000, pictureOrderCount: 4, isKeyframe: false)
+        #expect(rewriter.rewrite(
+            pts: 1_160, dts: n, pictureOrderCount: 6, isKeyframe: false)?.pts == 1_120)
+        #expect(rewriter.rewrite(
+            pts: 1_200, dts: 1_120, pictureOrderCount: 8, isKeyframe: false)?.dts == 1_080)
+
+        var broken = Permutation.CFRRewriter(step: 40, pocStep: 2, videoDelay: 2)
+        _ = broken.rewrite(pts: 0, dts: n, pictureOrderCount: 0, isKeyframe: true)
+        #expect(broken.rewrite(pts: 200, dts: n, pictureOrderCount: nil, isKeyframe: false) == nil)
+        #expect(broken.brokenReason != nil)
+        #expect(broken.rewrite(pts: 80, dts: 0, pictureOrderCount: 4, isKeyframe: false) == nil)
+    }
+
     @Test("shapes this permutation does not describe are left alone")
     func failsClosed() {
         func verdict(slots: [Int64], pocs: [Int64], videoDelay: Int = 1) -> Permutation.Verdict {
