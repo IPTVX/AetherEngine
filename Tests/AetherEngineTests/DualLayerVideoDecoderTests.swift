@@ -949,6 +949,47 @@ struct DualLayerVideoDecoderTests {
         #expect(deliveries.count == 3)
     }
 
+    // MARK: - Session loss (AE#739)
+
+    @Test("the session-loss handler reaches both layers' decoders, and clearing it clears both")
+    func sessionLostHandlerReachesBothLayers() {
+        let primary = HardwareVideoDecoder()
+        let enhancement = HardwareVideoDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        defer { decoder.close() }
+        let calls = SessionLossCount()
+        decoder.onSessionLost = { calls.bump() }
+        primary.onSessionLost?()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 2)
+        decoder.onSessionLost = nil
+        #expect(primary.onSessionLost == nil)
+        #expect(enhancement.onSessionLost == nil)
+    }
+
+    @Test("a closed decoder refuses a session rebuild")
+    func closedDecoderRefusesRebuild() {
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: FlushEmittingFakeDecoder(),
+            enhancementDecoder: FlushEmittingFakeDecoder()
+        )
+        #expect(decoder.rebuildSession())
+        decoder.close()
+        #expect(!decoder.rebuildSession())
+    }
+
+    private final class SessionLossCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
     // MARK: - Thread safety
 
     /// Synchronous composer so the stress test needs no GPU: every composition
