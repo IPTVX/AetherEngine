@@ -2653,8 +2653,6 @@ struct DualLayerVideoDecoderTests {
 
     @Test("DualLayerVideoDecoder reports streamClassification accurately and balances packets")
     func fel22StreamClassificationAndPacketBalance() throws {
-        let aliveBefore = PacketBalanceTracker.alive
-
         let primary = CountingFakeDecoder()
         let enhancement = CountingFakeDecoder()
         let decoder = DualLayerVideoDecoder(
@@ -2673,20 +2671,27 @@ struct DualLayerVideoDecoderTests {
         let bl = Self.hevcNAL(type: 1, payload: [0x11, 0x22, 0x33, 0x44])
         let melRpu = Self.makeMelRpuBytes()
 
-        guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000) else {
+        // Counted on this test's task only: the process-wide `alive` also moves with every other
+        // suite running in parallel, which failed this check now and then in a full run.
+        var made = true
+        let packets = PacketBalanceTracker.measure {
+            guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000) else {
+                made = false
+                return
+            }
+            decoder.decode(packet: melPkt)
+            var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
+            trackedPacketFree(&optMel)
+        }
+        guard made else {
             Issue.record("Failed to make MEL packet")
             return
         }
 
-        decoder.decode(packet: melPkt)
-
-        var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
-        trackedPacketFree(&optMel)
-
         // Classification must be MEL, not FEL
         #expect(decoder.streamClassification == .mel)
 
-        // PacketBalanceTracker must return to baseline
-        #expect(PacketBalanceTracker.alive == aliveBefore)
+        // Every packet this test and the decoder allocated was freed
+        #expect(packets.alive == 0)
     }
 }
