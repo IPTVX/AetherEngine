@@ -894,6 +894,107 @@ struct DualLayerVideoDecoderTests {
         #expect(CMTimeCompare(deliveries.snapshot.first?.pts ?? .invalid, Self.pts(1)) == 0)
     }
 
+    @Test("the end-of-stream drain delivers the frames the sessions still owe, paired or alone, in order")
+    func endOfStreamDrainDeliversOwedFrames() async throws {
+        let primary = FlushEmittingFakeDecoder()
+        let enhancement = FlushEmittingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        let deliveries = Deliveries()
+        decoder.onFrame = { buffer, pts, hdr10 in deliveries.record(buffer, pts, hdr10) }
+        decoder.primeForTesting(enhancementLayer: true)
+        defer { decoder.close() }
+
+        let bl: [SendableFrameBuffer] = try (0..<3).map { _ in
+            guard let b = Self.baseLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: b)
+        }
+        let el: [SendableFrameBuffer] = try (0..<2).map { _ in
+            guard let e = Self.enhancementLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: e)
+        }
+        for i in 0..<3 {
+            decoder.seedRPUForTesting(pts: Self.pts(Int64(i)), params: Self.params(), displayMetadataNAL: nil)
+        }
+        // The last frames of a stream, still inside the sessions after the last packet was fed: three
+        // base-layer frames, and enhancement-layer frames for the first two only.
+        primary.emitFromInsideFlush = {
+            for i in 0..<3 {
+                decoder.handleBaseLayerFrame(baseBuffer: bl[i].value, pts: Self.pts(Int64(i)), hdr10Data: nil)
+            }
+        }
+        enhancement.emitFromInsideFlush = {
+            for i in 0..<2 {
+                decoder.handleEnhancementLayerFrame(elBuffer: el[i].value, pts: Self.pts(Int64(i)))
+            }
+        }
+
+        decoder.drainForEndOfStream()
+        // No wait: the drain returns once its frames have reached `onFrame`.
+        let frames = deliveries.snapshot
+        #expect(frames.count == 3)
+        #expect(frames.map { ObjectIdentifier($0.buffer) } == bl.map { ObjectIdentifier($0.value) })
+        #expect(Self.isStrictlyIncreasing(frames))
+        #expect(decoder.composedFrameCount == 2, "the two frames with an enhancement layer are composed")
+        #expect(decoder.stateSnapshotForTesting.blQueueCount == 0)
+
+        // The host's flush that follows has nothing left to drop or deliver.
+        primary.emitFromInsideFlush = nil
+        enhancement.emitFromInsideFlush = nil
+        decoder.flush()
+        decoder.quiesceForTesting()
+        #expect(deliveries.count == 3)
+    }
+
+    // MARK: - Session loss (AE#739)
+
+    @Test("the session-loss handler reaches both layers' decoders, once per loss, and clearing it clears both")
+    func sessionLostHandlerReachesBothLayers() {
+        let primary = HardwareVideoDecoder()
+        let enhancement = HardwareVideoDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        defer { decoder.close() }
+        let calls = SessionLossCount()
+        decoder.onSessionLost = { calls.bump() }
+        // A screen lock loses both sessions and each layer reports it: one recovery, not two.
+        primary.onSessionLost?()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 1)
+        // After a rebuild (refused here: neither decoder was opened) the next loss is reported again.
+        _ = decoder.rebuildSession()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 2)
+        decoder.onSessionLost = nil
+        #expect(primary.onSessionLost == nil)
+        #expect(enhancement.onSessionLost == nil)
+    }
+
+    @Test("a closed decoder refuses a session rebuild")
+    func closedDecoderRefusesRebuild() {
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: FlushEmittingFakeDecoder(),
+            enhancementDecoder: FlushEmittingFakeDecoder()
+        )
+        #expect(decoder.rebuildSession())
+        decoder.close()
+        #expect(!decoder.rebuildSession())
+    }
+
+    private final class SessionLossCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
     // MARK: - Thread safety
 
     /// Synchronous composer so the stress test needs no GPU: every composition
@@ -2552,8 +2653,6 @@ struct DualLayerVideoDecoderTests {
 
     @Test("DualLayerVideoDecoder reports streamClassification accurately and balances packets")
     func fel22StreamClassificationAndPacketBalance() throws {
-        let aliveBefore = PacketBalanceTracker.alive
-
         let primary = CountingFakeDecoder()
         let enhancement = CountingFakeDecoder()
         let decoder = DualLayerVideoDecoder(
@@ -2572,20 +2671,27 @@ struct DualLayerVideoDecoderTests {
         let bl = Self.hevcNAL(type: 1, payload: [0x11, 0x22, 0x33, 0x44])
         let melRpu = Self.makeMelRpuBytes()
 
-        guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000) else {
+        // Counted on this test's task only: the process-wide `alive` also moves with every other
+        // suite running in parallel, which failed this check now and then in a full run.
+        var made = true
+        let packets = PacketBalanceTracker.measure {
+            guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000) else {
+                made = false
+                return
+            }
+            decoder.decode(packet: melPkt)
+            var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
+            trackedPacketFree(&optMel)
+        }
+        guard made else {
             Issue.record("Failed to make MEL packet")
             return
         }
 
-        decoder.decode(packet: melPkt)
-
-        var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
-        trackedPacketFree(&optMel)
-
         // Classification must be MEL, not FEL
         #expect(decoder.streamClassification == .mel)
 
-        // PacketBalanceTracker must return to baseline
-        #expect(PacketBalanceTracker.alive == aliveBefore)
+        // Every packet this test and the decoder allocated was freed
+        #expect(packets.alive == 0)
     }
 }

@@ -93,6 +93,16 @@ extension SingleLayerVideoDecoder {
 
 extension HardwareVideoDecoder: SingleLayerVideoDecoder {}
 
+/// AE#739: a decoder whose VideoToolbox sessions the system can invalidate behind its back, and that
+/// can build them again. The host recovers through this rather than through one decoder type.
+protocol VideoSessionRebuilding: AnyObject {
+    var onSessionLost: (@Sendable () -> Void)? { get set }
+    @discardableResult func rebuildSession() -> Bool
+}
+
+extension HardwareVideoDecoder: VideoSessionRebuilding {}
+extension DualLayerVideoDecoder: VideoSessionRebuilding {}
+
 /// Video decoding pipeline that transparently coordinates dual VideoToolbox HEVC decoders
 /// (base layer, typically 4K, plus an enhancement layer, typically 1080p) and reconstructs the 12-bit master on Apple GPU
 /// using `DoviFelComposer`. Falls back smoothly to single-layer BL if no EL is present (MEL / P8.1).
@@ -168,6 +178,41 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
     }
     private var _skipUntilPTS: CMTime?
+
+    /// AE#739: called when the system invalidates either layer's session. Both sub-decoders report
+    /// through `reportSessionLost()` (installed outside `lock`, as `skipUntilPTS` is), the enhancement
+    /// decoder from when it opens.
+    var onSessionLost: (@Sendable () -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onSessionLost }
+        set {
+            lock.lock()
+            _onSessionLost = newValue
+            let primary = primaryDecoder
+            let enhancement = enhancementDecoder
+            lock.unlock()
+            (primary as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(newValue)
+            (enhancement as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(newValue)
+        }
+    }
+    private var _onSessionLost: (@Sendable () -> Void)?
+    /// Guarded by `lock`. A screen lock invalidates both sessions and each sub-decoder reports it;
+    /// the owner hears one loss until `rebuildSession()` has replaced both, not one per layer
+    /// (which rebuilt both sessions twice and repositioned twice).
+    private var sessionLossReported = false
+
+    private func subDecoderLossHandler(_ handler: (@Sendable () -> Void)?) -> (@Sendable () -> Void)? {
+        guard handler != nil else { return nil }
+        return { [weak self] in self?.reportSessionLost() }
+    }
+
+    private func reportSessionLost() {
+        lock.lock()
+        let first = !sessionLossReported
+        sessionLossReported = true
+        let handler = _onSessionLost
+        lock.unlock()
+        if first { handler?() }
+    }
 
     /// The primary decoder's own methods are internally synchronized
     /// (`HardwareVideoDecoder.lock` / `skipLock`); it is safe to call without holding
@@ -341,7 +386,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var summaryComposeFailures: Int = 0
     /// Compositions started, and compositions whose frame (composed or fallback) has been handed to
     /// `orderedDelivery`. Equal when nothing is on the GPU or in a completion handler. Guarded by
-    /// `composeResultLock`; read only by `quiesceForTesting`.
+    /// `composeResultLock`; read by `drainForEndOfStream` and `quiesceForTesting`.
     private var composeRequestsStarted = 0
     private var composeRequestsHandedOff = 0
     private var summaryBypassNoEL: Int = 0
@@ -709,6 +754,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         var s = elSPS
         var p = elPPS
         let skip = _skipUntilPTS
+        let sessionLost = _onSessionLost
         let tb = timeBase
         lock.unlock()
         guard let data = packet.pointee.data, packet.pointee.size > 4 else { return }
@@ -735,6 +781,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         let decoder = makeEnhancementDecoder()
         decoder.skipUntilPTS = skip
+        (decoder as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(sessionLost)
         do {
             try decoder.open(parameterSets: [vv, ss, pp], timeBase: tb) { [weak self] elBuffer, pts, _ in
                 self?.handleEnhancementLayerFrame(elBuffer: elBuffer, pts: pts)
@@ -1370,6 +1417,87 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         composer?.flush()
     }
 
+    /// How long `drainForEndOfStream()` waits for compositions still on the GPU.
+    static let endOfStreamComposeWait: TimeInterval = 0.5
+
+    /// End of stream: delivers the frames still owed, which `flush()` drops. `flush()` cannot tell the
+    /// frames it drains from pre-seek ones, so it drops everything the sessions, the GPU and the pairing
+    /// queues still hold, and at the end of the stream that is the last frames of the title. The host
+    /// calls this once the last packet has been fed, before its end-of-stream `flush()`.
+    ///
+    /// The drained frames pair as usual; a base-layer frame whose enhancement layer never came goes out
+    /// alone, under its own ticket. Returns once everything has reached `onFrame`, or after
+    /// `endOfStreamComposeWait` if a composition is still on the GPU.
+    func drainForEndOfStream() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        lock.lock()
+        guard !isClosed else { lock.unlock(); return }
+        let primary = primaryDecoder
+        let el = enhancementDecoder
+        lock.unlock()
+
+        // Without `draining`, and without moving the epoch: what the sessions still owe arrives through
+        // the normal callbacks while these wait, and pairs with what the other layer already sent.
+        primary.flushKeepingEpoch()
+        el?.flushKeepingEpoch()
+
+        let unpaired: [BypassRequest] = {
+            lock.lock()
+            defer { lock.unlock() }
+            var due: [BypassRequest] = []
+            for k in blFrameQueue.keys.sorted() {
+                guard let entry = blFrameQueue.removeValue(forKey: k) else { continue }
+                summaryBypassNoEL += 1
+                noteSettledBaseLayer(key: k)
+                due.append(BypassRequest(ticket: entry.ticket, epoch: _feedEpoch, buffer: entry.buffer, pts: entry.pts, hdr10Data: entry.side.hdr10Data, dmNAL: entry.side.dmNAL, reason: "end-of-stream"))
+            }
+            return due
+        }()
+        for req in unpaired {
+            fulfilBypass(req)
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + Self.endOfStreamComposeWait
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            composeResultLock.lock()
+            let idle = composeRequestsStarted == composeRequestsHandedOff
+            composeResultLock.unlock()
+            if idle { break }
+            usleep(500)
+        }
+        orderedDelivery.barrier()
+    }
+
+    /// AE#739: rebuilds both layers' sessions after the system invalidated them, the way
+    /// `HardwareVideoDecoder.rebuildSession()` does for one. Each sub-decoder's rebuild moves its own
+    /// feed epoch to retire what was fed to the old session; both are put back on this decoder's epoch,
+    /// which is the one the host's packets carry, or every later packet would be refused. Each layer
+    /// then resumes at its next keyframe. False when VideoToolbox refused either session.
+    @discardableResult
+    func rebuildSession() -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        lock.lock()
+        guard !isClosed else { lock.unlock(); return false }
+        let primary = primaryDecoder
+        let enhancement = enhancementDecoder
+        let primaryOpen = primaryDecoderInitialized
+        let epoch = _feedEpoch
+        lock.unlock()
+        // A primary still waiting for its in-band parameter sets has no session to lose yet.
+        let primaryRebuilt = !primaryOpen || ((primary as? HardwareVideoDecoder)?.rebuildSession() ?? true)
+        let enhancementRebuilt = (enhancement as? HardwareVideoDecoder)?.rebuildSession() ?? true
+        // `flush()` and `close()` wait on `lifecycleLock`, so `epoch` is still this decoder's.
+        primary.adoptFeedEpoch(epoch)
+        enhancement?.adoptFeedEpoch(epoch)
+        // Both sessions are new (or refused, and the host owes another rebuild): the next loss is news.
+        lock.lock()
+        sessionLossReported = false
+        lock.unlock()
+        return primaryRebuilt && enhancementRebuilt
+    }
+
     func close() {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
@@ -1499,6 +1627,17 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             usleep(500)
         }
         orderedDelivery.barrier()
+    }
+
+    /// Invalidates both layers' sessions without forgetting them, as the system does on an iOS screen
+    /// lock (`HardwareVideoDecoder.invalidateSessionForTesting()`). For the aetherctl harness.
+    func invalidateSessionsForTesting() {
+        lock.lock()
+        let primary = primaryDecoder
+        let enhancement = enhancementDecoder
+        lock.unlock()
+        (primary as? HardwareVideoDecoder)?.invalidateSessionForTesting()
+        (enhancement as? HardwareVideoDecoder)?.invalidateSessionForTesting()
     }
 
     /// Issues a ticket the same way `handleBaseLayerFrame` would — under
