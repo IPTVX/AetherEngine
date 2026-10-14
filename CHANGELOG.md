@@ -22,6 +22,19 @@ the public-API contract.
 
 ### Fixed
 
+- **`serveIFramePlaylist` shows scrub thumbnails for HDR10, HLG and Dolby Vision titles** (#682). The
+  stock tvOS scrubber fetched the first keyframe of a PQ rendition and then left the thumbnail box empty,
+  for Dolby Vision profile 5 and 8.1 as much as for plain HDR10, at 4K and at 1080p (measured on an Apple
+  TV 4K, tvOS 27). An HDR or Dolby Vision session now lists a Motion JPEG rendition instead
+  (`CODECS="mjpg"`, `VIDEO-RANGE=SDR`, 640 pixels wide), whose stills come from the engine's own still
+  pipeline: the tone map for PQ and HLG, the RPU reshaping for profile 5. SDR sessions keep serving their
+  own keyframes. The session log names the format: `i-frame rendition: served segments=<n>
+  format=keyframes|jpeg`. Because an SDR rendition is the one thing AVPlayer can still play when it
+  refuses the HDR variant (an SDR panel without dynamic range matching), `iframe.m3u8` is answered only
+  once a media segment has been requested; otherwise it is withheld after 3 s, and the item's 404 counts
+  as the refusal it stands for, so the session still falls back to the media playlist instead of
+  playing the stills as its video.
+
 - **A 25 fps H.264 Matroska file with forward-clamped B-picture timestamps plays at a steady
   cadence.** Its packet timestamps repeated display slots and left the preceding slots empty, so
   decoded output alternated 0 ms and 80 ms frame intervals instead of 40 ms. The demuxer now
