@@ -1101,7 +1101,8 @@ final class SoftwarePlaybackHost {
         videoDecoder.onDecodedFormat = { [weak self] format in
             self?.onDecodedVideoFormat?(format)
         }
-        (videoDecoder as? HardwareVideoDecoder)?.onSessionLost = { [weak self] in
+        // Both VideoToolbox decoders, the dual-layer one included: its two sessions can be lost the same way.
+        (videoDecoder as? any VideoSessionRebuilding)?.onSessionLost = { [weak self] in
             Task { @MainActor [weak self] in self?.handleVideoSessionLost() }
         }
         videoDecoder.onA53Captions = { [weak self] triplets, pts in
@@ -1475,7 +1476,7 @@ final class SoftwarePlaybackHost {
         if backgroundAudioOnly {
             videoDecoder.flush()
             renderer.flush()
-            let rebuilt = (videoDecoder as? HardwareVideoDecoder)?.rebuildSession()
+            let rebuilt = (videoDecoder as? any VideoSessionRebuilding)?.rebuildSession()
             if rebuilt == false { videoSessionRecoveryOwed = true }
             backgroundAudioOnly = false
             EngineLog.emit(
@@ -1512,7 +1513,7 @@ final class SoftwarePlaybackHost {
     /// at instead of freezing until the next keyframe. A live source without a rewind ring cannot go
     /// back and picks up at the next keyframe. A refused rebuild stays owed to the next foreground return.
     private func recoverVideoSession() {
-        guard !stopRequested, let hw = videoDecoder as? HardwareVideoDecoder else {
+        guard !stopRequested, let hw = videoDecoder as? any VideoSessionRebuilding else {
             videoSessionRecoveryOwed = false
             return
         }
