@@ -119,6 +119,8 @@ protocol HLSSegmentProvider: AnyObject {
     /// AE#682: true when this session lists an I-frame rendition in its master. The two calls below
     /// answer `iframe_init.mp4` and `iframe{N}.mp4`; both may block on a source read.
     var iFrameRenditionServed: Bool { get }
+    /// What the rendition carries; nil reads as `.keyframes`.
+    var iFrameRenditionFormat: IFrameRenditionFormat? { get }
     func iFrameInitSegment() -> Data?
     func iFrameSegment(at index: Int) -> Data?
 
@@ -198,6 +200,7 @@ extension HLSSegmentProvider {
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
     var iFrameRenditionServed: Bool { false }
+    var iFrameRenditionFormat: IFrameRenditionFormat? { nil }
     func iFrameInitSegment() -> Data? { nil }
     func iFrameSegment(at index: Int) -> Data? { nil }
     var liveTargetSegmentDuration: Double? { nil }
@@ -1822,7 +1825,14 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         lines.append("#EXT-X-STREAM-INF:\(streamInfAttrs.joined(separator: ","))")
         lines.append("media.m3u8")
-        if provider.iFrameRenditionServed {
+        if provider.iFrameRenditionServed,
+           case .jpeg(let width, let height, let jpegBandwidth) = provider.iFrameRenditionFormat {
+            // AE#682: AVKit shows no scrub thumbnail from a PQ or Dolby Vision keyframe, so an HDR
+            // session lists SDR stills, the shape of Apple's own motion JPEG trick-play tier.
+            let iFrameAttrs = ["BANDWIDTH=\(jpegBandwidth)", "CODECS=\"mjpg\"", "RESOLUTION=\(width)x\(height)",
+                               "VIDEO-RANGE=SDR", "URI=\"iframe.m3u8\""]
+            lines.append("#EXT-X-I-FRAME-STREAM-INF:\(iFrameAttrs.joined(separator: ","))")
+        } else if provider.iFrameRenditionServed {
             // AE#682: BANDWIDTH is the variant's, an honest ceiling (one keyframe cannot outweigh the
             // segment it opens). A value below the real peak logs -12318 on every fetch.
             var iFrameAttrs = ["BANDWIDTH=\(bandwidth)", "CODECS=\"\(videoCodecs(of: codecs))\""]
