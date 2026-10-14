@@ -893,7 +893,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         ) { [weak self] composed in
             self?.recordComposeResult(success: composed != nil)
             if composed == nil {
-                EngineLog.emit("[DualLayer] COMPOSE FAILED (\(arrived)): pts=\(String(format: "%.3f", pts.seconds))", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] compose failed (\(arrived)): pts=\(String(format: "%.3f", pts.seconds))", category: .swPlayback, level: .verbose)
             }
             let buffer = SendableBuffer(value: composed ?? fallback.value)
             delivery.fulfil(ticket: ticket, epoch: epoch, DeliveredFrame(buffer: buffer, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL))
@@ -933,7 +933,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             guard !draining else { return (.queued, []) }
             guard isFEL, !isMEL, enhancementDecoder != nil, composer != nil else {
                 // Not a FEL stream or secondary decoder not engaged (e.g. MEL or P8.1 fallback): emit Base Layer directly
-                EngineLog.emit("[DualLayer] Bypass: isFEL=\(isFEL), isMEL=\(isMEL), enhDecoder=\(enhancementDecoder != nil)", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] bypass, single layer: isFEL=\(isFEL), isMEL=\(isMEL), enhDecoder=\(enhancementDecoder != nil)", category: .swPlayback, level: .verbose)
                 if isFEL && !isMEL && enhancementDecoder == nil {
                     summaryBypassNoEL += 1
                 }
@@ -953,7 +953,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // A frame without a timestamp has nothing to pair on: it goes out as its base layer now, under
             // the ticket it already holds, rather than waiting for a partner that cannot match it.
             guard key != Int64.min else {
-                EngineLog.emit("[DualLayer] Bypass: base-layer frame without a timestamp", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] bypass, no timestamp: base-layer frame has nothing to pair on", category: .swPlayback, level: .verbose)
                 return (.bypass(BypassRequest(ticket: ticket, epoch: epoch, buffer: baseBuffer, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, reason: "no-pts")), collectDueBypasses())
             }
             let mKey: Int64?
@@ -967,8 +967,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             if let mKey, let elBuffer = elFrameQueue.removeValue(forKey: mKey) {
                 // Matching EL frame is already ready: compose on the Metal GPU outside the lock
                 guard let params = takeParams(key: key) else {
-                    // S1: Missing RPU metadata: do NOT synthesize identity NLQ. Emit base layer directly.
-                    EngineLog.emit("[DualLayer] Bypass: missing RPU for key=\(key)", category: .swPlayback, level: .verbose)
+                    // Missing RPU metadata: do NOT synthesize identity NLQ. Emit base layer directly.
+                    EngineLog.emit("[DualLayerVideoDecoder] bypass, missing RPU: key=\(key)", category: .swPlayback, level: .verbose)
                     summaryBypassNoRPU += 1
                     noteSettledBaseLayer(key: key)
                     primary = .bypass(BypassRequest(ticket: ticket, epoch: epoch, buffer: baseBuffer, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, reason: "missing-rpu"))
@@ -976,10 +976,10 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 }
                 frameIndex &+= 1
                 noteSettledBaseLayer(key: key)
-                primary = .compose(ComposeRequest(ticket: ticket, epoch: epoch, base: baseBuffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, arrived: "BL arrived"))
+                primary = .compose(ComposeRequest(ticket: ticket, epoch: epoch, base: baseBuffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, arrived: "base layer arrived last"))
             } else {
                 // EL frame has not arrived yet: queue Base Layer frame under its ticket
-                EngineLog.emit("[DualLayer] QUEUE BL: pts=\(String(format: "%.3f", pts.seconds)) key=\(key), elCount=\(elFrameQueue.count)", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] queued base layer: pts=\(String(format: "%.3f", pts.seconds)) key=\(key), elCount=\(elFrameQueue.count)", category: .swPlayback, level: .verbose)
                 var displaced: BypassRequest?
                 if let old = blFrameQueue[key] {
                     // Same canonical key twice: the old entry's ticket would stall
@@ -1034,7 +1034,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // This enhancement layer's base layer already went out
             // (composed or bypassed), so it can never pair; drop it.
             if settledBlKeys.contains(where: { FrameSideDataRing.isWithinJitter($0, key) }) {
-                EngineLog.emit("[DualLayer] DROP stale EL: key=\(key), already settled", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] dropped stale enhancement layer: key=\(key), already settled", category: .swPlayback, level: .verbose)
                 summaryDropStaleEL += 1
                 return .queued
             }
@@ -1051,18 +1051,18 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 let epoch = _feedEpoch
                 let dmNAL = waiting.side.dmNAL
                 guard let params = takeParams(key: mKey) else {
-                    // S1: Missing RPU metadata: do NOT synthesize identity NLQ. Emit base layer directly.
-                    EngineLog.emit("[DualLayer] Bypass: missing RPU for key=\(mKey)", category: .swPlayback, level: .verbose)
+                    // Missing RPU metadata: do NOT synthesize identity NLQ. Emit base layer directly.
+                    EngineLog.emit("[DualLayerVideoDecoder] bypass, missing RPU: key=\(mKey)", category: .swPlayback, level: .verbose)
                     summaryBypassNoRPU += 1
                     noteSettledBaseLayer(key: mKey)
                     return .bypass(BypassRequest(ticket: waiting.ticket, epoch: epoch, buffer: waiting.buffer, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: waiting.side.dmNAL, reason: "missing-rpu"))
                 }
                 frameIndex &+= 1
                 noteSettledBaseLayer(key: mKey)
-                return .compose(ComposeRequest(ticket: waiting.ticket, epoch: epoch, base: waiting.buffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: dmNAL, arrived: "EL arrived"))
+                return .compose(ComposeRequest(ticket: waiting.ticket, epoch: epoch, base: waiting.buffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: dmNAL, arrived: "enhancement layer arrived last"))
             } else {
                 // Base Layer frame has not arrived yet: queue EL frame under its own larger cap
-                EngineLog.emit("[DualLayer] QUEUE EL: pts=\(String(format: "%.3f", pts.seconds)) key=\(key), blCount=\(blFrameQueue.count)", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] queued enhancement layer: pts=\(String(format: "%.3f", pts.seconds)) key=\(key), blCount=\(blFrameQueue.count)", category: .swPlayback, level: .verbose)
                 elFrameQueue[key] = elBuffer
                 let currentSkew = max(blFrameQueue.count, elFrameQueue.count)
                 if currentSkew > summaryMaxObservedSkew {
@@ -1071,7 +1071,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 if elFrameQueue.count > Self.maxEnhancementLayerQueueFrames {
                     let sortedKeys = elFrameQueue.keys.sorted()
                     for k in sortedKeys.prefix(elFrameQueue.count - Self.maxEnhancementLayerQueueFrames) {
-                        EngineLog.emit("[DualLayer] PRUNED EL: key=\(k)", category: .swPlayback, level: .verbose)
+                        EngineLog.emit("[DualLayerVideoDecoder] pruned enhancement layer: key=\(k)", category: .swPlayback, level: .verbose)
                         elFrameQueue.removeValue(forKey: k)
                         summaryPrunedEL += 1
                     }
@@ -1122,7 +1122,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 summaryBorrowedParams += 1
                 resolvedParams = last
                 resolvedNAL = dmNAL ?? lastGoodDMNAL
-                EngineLog.emit("[DualLayer] RPU missing for key=\(key); reusing the previous frame's parameters (\(borrowedParamsRun)/\(Self.maxBorrowedParamsRun))", category: .swPlayback, level: .verbose)
+                EngineLog.emit("[DualLayerVideoDecoder] RPU missing for key=\(key); reusing the previous frame's parameters (\(borrowedParamsRun)/\(Self.maxBorrowedParamsRun))", category: .swPlayback, level: .verbose)
             }
         }
         guard resolvedParams != nil || resolvedNAL != nil else { return }
@@ -1143,7 +1143,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         settledBlKeys.append(key)
         if settledBlKeys.count > Self.settledKeyMemory { settledBlKeys.removeFirst(settledBlKeys.count - Self.settledKeyMemory) }
         for k in elFrameQueue.keys where FrameSideDataRing.isWithinJitter(k, key) {
-            EngineLog.emit("[DualLayer] DROP stale EL: key=\(k), base \(key) settled", category: .swPlayback, level: .verbose)
+            EngineLog.emit("[DualLayerVideoDecoder] dropped stale enhancement layer: key=\(k), base \(key) settled", category: .swPlayback, level: .verbose)
             elFrameQueue.removeValue(forKey: k)
             summaryDropStaleEL += 1
         }
@@ -1159,7 +1159,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                   blArrivalSeq &- entry.seq >= UInt64(Self.maxLayerSkewFrames) else { continue }
             blFrameQueue.removeValue(forKey: k)
             summaryBypassNoEL += 1
-            EngineLog.emit("[DualLayer] BYPASS no-EL: pts=\(String(format: "%.3f", entry.pts.seconds)) key=\(k)", category: .swPlayback, level: .verbose)
+            EngineLog.emit("[DualLayerVideoDecoder] bypass, no enhancement layer arrived: pts=\(String(format: "%.3f", entry.pts.seconds)) key=\(k)", category: .swPlayback, level: .verbose)
             noteSettledBaseLayer(key: k)
             due.append(BypassRequest(ticket: entry.ticket, epoch: _feedEpoch, buffer: entry.buffer, pts: entry.pts, hdr10Data: entry.side.hdr10Data, dmNAL: entry.side.dmNAL, reason: "no-el"))
         }
@@ -1171,11 +1171,14 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     #if DEBUG
     var summaryTimestampProviderForTesting: (() -> TimeInterval)?
+    /// Sees every summary line with the level it went out at. `.verbose` lines never reach
+    /// `EngineLog.handler`, so a test cannot observe them there.
+    var summarySinkForTesting: ((String, EngineLog.Level) -> Void)?
     #endif
 
     // MARK: - Observability (dolby-vision-fel.md §5.11)
 
-    /// Seconds between `[DualLayer] summary` lines (dolby-vision-fel.md §5.11).
+    /// Seconds between `[DualLayerVideoDecoder] summary` lines (dolby-vision-fel.md §5.11).
     static let summaryIntervalSeconds: TimeInterval = 1.0
 
     func maybeEmitSummary() {
@@ -1225,8 +1228,15 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let gpuMs = activeComposer?.meanGPUTimeMs
         let pendingPeak = orderedDelivery.takePeakPendingCount()
         let gpuStr = gpuMs.map { String(format: "%.1f", $0) } ?? "n/a"
-        let line = "[DualLayer] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoEL=\(noEL), bypassNoRPU=\(noRPU), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
-        EngineLog.emit(line, category: .swPlayback)
+        let line = "[DualLayerVideoDecoder] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoEL=\(noEL), bypassNoRPU=\(noRPU), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
+        // Once a second is a trace, not an event: it goes to OSLog's debug level only. An interval in
+        // which a composition failed is the exception, so the failure reaches the default level and the
+        // host handler.
+        let level: EngineLog.Level = composeFailures > 0 ? .info : .verbose
+        EngineLog.emit(line, category: .swPlayback, level: level)
+        #if DEBUG
+        summarySinkForTesting?(line, level)
+        #endif
         activeComposer?.flushTextureCache()
     }
 

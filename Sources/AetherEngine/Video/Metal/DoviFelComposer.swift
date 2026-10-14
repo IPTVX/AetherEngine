@@ -84,8 +84,9 @@ final class DoviFelComposer: @unchecked Sendable {
     private static let onceLock = NSLock()
     private static let maxOnceLines = 64
 
-    /// Logs a parse-time rejection once per distinct line. `parseRpuParameters` runs for every RPU, so a stream
-    /// that trips one of these would otherwise repeat it on every frame.
+    /// Logs a line once per distinct text. Parse-time rejections and command buffer errors can recur on every
+    /// frame (a stream that trips a check, a GPU that keeps failing), so each would otherwise flood the log;
+    /// the decoder's per-second summary still counts every failed compose.
     private static func logOnce(_ line: String, category: EngineLog.Category = .swPlayback) {
         onceLock.lock()
         let fresh = onceLines.count < maxOnceLines && onceLines.insert(line).inserted
@@ -385,7 +386,7 @@ final class DoviFelComposer: @unchecked Sendable {
         work.commandBuffer.waitUntilCompleted()
         if let failure = Self.commandBufferFailure(work.commandBuffer, forced: forcedCommandBufferFailure.withLock { $0 }) {
             // The GPU did not finish writing the destination: it is not a frame, so no frame is returned.
-            EngineLog.emit("[DoviFelComposer] Command buffer error: \(failure)", category: .swPlayback)
+            Self.logOnce("[DoviFelComposer] Command buffer error: \(failure)")
             return nil
         }
         _ = work.keepAlive
@@ -587,7 +588,7 @@ final class DoviFelComposer: @unchecked Sendable {
             let composer = self
             deliveryQueue.async {
                 if let errorDescription {
-                    EngineLog.emit("[DoviFelComposer] Command buffer error: \(errorDescription)", category: .swPlayback)
+                    Self.logOnce("[DoviFelComposer] Command buffer error: \(errorDescription)")
                 }
                 composer?.recordGPUTime(ms: gpuMs)
                 os_signpost(.end, log: Self.signpostLog, name: "Compose", signpostID: signpostID)
@@ -938,7 +939,7 @@ final class DoviFelComposer: @unchecked Sendable {
         gpuTimeLock.unlock()
         if let closed {
             EngineLog.emit(String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames",
-                                  closed, Self.gpuTimeWindow), category: .swPlayback)
+                                  closed, Self.gpuTimeWindow), category: .swPlayback, level: .verbose)
         }
     }
 

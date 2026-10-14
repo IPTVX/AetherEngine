@@ -214,9 +214,11 @@ struct PulseHarnessView: View {
     /// Long-run FEL playback with a seek schedule. Measures only what the engine exposes publicly:
     /// - droppedFrames: `liveTelemetry.droppedFrameCount` (render synchronizer's dropped frames on the
     ///   software path, session total; nil reads as -1).
-    /// - composeFailures: sum of `composeFailures=` over the engine's 1 Hz `[DualLayer] summary` log
-    ///   lines (seen through EngineLog.handler; the counter itself is internal). Stays 0 if the FEL
-    ///   route never ran, so `route=` is the thing to check first.
+    /// - composeFailures: sum of `composeFailures=` over the engine's `[DualLayerVideoDecoder] summary`
+    ///   lines (seen through EngineLog.handler; the counter itself is internal). The engine writes that
+    ///   line every second at `.verbose`, which never reaches the handler, and at the default level only
+    ///   for a second that counted a failure, so the sum is exact. Stays 0 if the FEL route never ran,
+    ///   so `route=` is the thing to check first.
     /// - footprint: task_vm_info phys_footprint, sampled each second.
     @MainActor
     private func playSoak(_ arm: PulseArm, log: @Sendable (String) -> Void) async {
@@ -290,7 +292,9 @@ struct PulseHarnessView: View {
     }
 }
 
-/// Accumulates the engine's `[DualLayer] summary: ... composeFailures=N ...` lines (1 Hz, per-second deltas).
+/// Accumulates the engine's `[DualLayerVideoDecoder] summary: ... composeFailures=N ...` lines (per-second
+/// deltas; only the seconds with a failure reach the handler). The FEL route is recognised by its
+/// open-time line, since a healthy summary does not reach the handler.
 private final class SoakTally: @unchecked Sendable {
     private let lock = NSLock()
     private var failures = 0
@@ -298,7 +302,11 @@ private final class SoakTally: @unchecked Sendable {
     var composeFailures: Int { lock.lock(); defer { lock.unlock() }; return failures }
     var sawDualLayer: Bool { lock.lock(); defer { lock.unlock() }; return seen }
     func ingest(_ line: String) {
-        guard line.contains("[DualLayer] summary:") else { return }
+        if line.contains("[DualLayerVideoDecoder] FEL stream detected") {
+            lock.lock(); seen = true; lock.unlock()
+            return
+        }
+        guard line.contains("[DualLayerVideoDecoder] summary:") else { return }
         lock.lock(); defer { lock.unlock() }
         seen = true
         if let r = line.range(of: "composeFailures="),
