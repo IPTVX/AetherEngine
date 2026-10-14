@@ -1606,6 +1606,17 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         orderedDelivery.barrier()
     }
 
+    /// Invalidates both layers' sessions without forgetting them, as the system does on an iOS screen
+    /// lock (`HardwareVideoDecoder.invalidateSessionForTesting()`). For the aetherctl harness.
+    func invalidateSessionsForTesting() {
+        lock.lock()
+        let primary = primaryDecoder
+        let enhancement = enhancementDecoder
+        lock.unlock()
+        (primary as? HardwareVideoDecoder)?.invalidateSessionForTesting()
+        (enhancement as? HardwareVideoDecoder)?.invalidateSessionForTesting()
+    }
+
     /// Issues a ticket the same way `handleBaseLayerFrame` would — under
     /// `lock`, in decode order, tagged with the current epoch — and hands it
     /// straight to `orderedDelivery`, bypassing the `draining` gate that
