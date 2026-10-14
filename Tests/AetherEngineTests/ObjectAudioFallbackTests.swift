@@ -97,6 +97,7 @@ struct ObjectAudioFallbackTests {
 
         let producer = engine.buildSpatialAudioProducerIfEligible(
             audioStream: stream,
+            audioDemuxer: Demuxer(),
             sourceAudioStreamIndex: 0,
             sourceCodecLabel: "TrueHD",
             audioHLSCodecs: &codecs,

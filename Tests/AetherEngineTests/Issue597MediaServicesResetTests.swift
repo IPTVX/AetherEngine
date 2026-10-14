@@ -49,9 +49,23 @@ struct Issue597MediaServicesResetTests {
         #expect(!engine.consumeMediaServicesReset())
     }
 
+    /// PR #740: the Atmos output activator holds an `AVQueuePlayer` of its own, which a reset invalidates
+    /// like the engine's, so the reset drops it and the next native player builds a fresh one.
+    @Test("a reset drops the Atmos output activator with its invalidated player")
+    @MainActor
+    func resetDropsTheAtmosOutputActivator() throws {
+        let engine = try AetherEngine()
+        engine.atmosOutputActivator = AtmosOutputActivator()
+
+        engine.noteMediaServicesReset(lost: false)
+
+        #expect(engine.atmosOutputActivator == nil)
+    }
+
     /// Audit LIF-104: `reloadWithAudioOverride` (the audio pick, the disc-title pick, the custom-source
     /// reload) keeps the native host on the native route, and it never read the flag, so the first
     /// rebuild after a reset mounted the item on the invalidated AVPlayer while the flag stayed up.
+    // H.264 establishes the native route on simulators without requiring hardware HEVC support.
     @Test("a custom-source rebuild after a reset builds a fresh native player and consumes the reset",
           .timeLimit(.minutes(2)))
     @MainActor
@@ -59,7 +73,11 @@ struct Issue597MediaServicesResetTests {
         let engine = try AetherEngine()
         defer { engine.stop() }
         _ = try await engine.load(
-            source: .custom(DataIOReader(data: try ProbeTestFixtures.hdr10Plus()), formatHint: "mp4"))
+            source: .custom(
+                DataIOReader(data: TinyTransportStreamFixture.data),
+                formatHint: "mpegts"
+            )
+        )
         let invalidated = try #require(engine.nativeHost)
         engine.audioAVPlayerHost = AudioAVPlayerHost()
         engine.noteMediaServicesReset(lost: false)
@@ -79,7 +97,11 @@ struct Issue597MediaServicesResetTests {
         let engine = try AetherEngine()
         defer { engine.stop() }
         _ = try await engine.load(
-            source: .custom(DataIOReader(data: try ProbeTestFixtures.hdr10Plus()), formatHint: "mp4"))
+            source: .custom(
+                DataIOReader(data: TinyTransportStreamFixture.data),
+                formatHint: "mpegts"
+            )
+        )
         let host = try #require(engine.nativeHost)
 
         try await engine.reloadAtCurrentPosition()
