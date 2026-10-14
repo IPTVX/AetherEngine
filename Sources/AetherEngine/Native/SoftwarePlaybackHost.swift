@@ -1101,7 +1101,8 @@ final class SoftwarePlaybackHost {
         videoDecoder.onDecodedFormat = { [weak self] format in
             self?.onDecodedVideoFormat?(format)
         }
-        (videoDecoder as? HardwareVideoDecoder)?.onSessionLost = { [weak self] in
+        // Both VideoToolbox decoders, the dual-layer one included: its two sessions can be lost the same way.
+        (videoDecoder as? any VideoSessionRebuilding)?.onSessionLost = { [weak self] in
             Task { @MainActor [weak self] in self?.handleVideoSessionLost() }
         }
         videoDecoder.onA53Captions = { [weak self] triplets, pts in
@@ -1475,7 +1476,7 @@ final class SoftwarePlaybackHost {
         if backgroundAudioOnly {
             videoDecoder.flush()
             renderer.flush()
-            let rebuilt = (videoDecoder as? HardwareVideoDecoder)?.rebuildSession()
+            let rebuilt = (videoDecoder as? any VideoSessionRebuilding)?.rebuildSession()
             if rebuilt == false { videoSessionRecoveryOwed = true }
             backgroundAudioOnly = false
             EngineLog.emit(
@@ -1488,6 +1489,10 @@ final class SoftwarePlaybackHost {
 
     #if DEBUG
     func invalidateVideoSessionForTesting() -> Bool {
+        if let dual = videoDecoder as? DualLayerVideoDecoder {
+            dual.invalidateSessionsForTesting()
+            return true
+        }
         guard let hw = videoDecoder as? HardwareVideoDecoder else { return false }
         hw.invalidateSessionForTesting()
         return true
@@ -1512,7 +1517,7 @@ final class SoftwarePlaybackHost {
     /// at instead of freezing until the next keyframe. A live source without a rewind ring cannot go
     /// back and picks up at the next keyframe. A refused rebuild stays owed to the next foreground return.
     private func recoverVideoSession() {
-        guard !stopRequested, let hw = videoDecoder as? HardwareVideoDecoder else {
+        guard !stopRequested, let hw = videoDecoder as? any VideoSessionRebuilding else {
             videoSessionRecoveryOwed = false
             return
         }
@@ -2640,6 +2645,7 @@ final class SoftwarePlaybackHost {
                 // next append, or finish when the source is gone and the
                 // ring is fully drained.
                 if sourceEnded() {
+                    (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
                     videoDecoder.flush()
                     audioDecoder?.flush()
                     renderer.drainReorderBuffer()
@@ -3158,6 +3164,9 @@ final class SoftwarePlaybackHost {
                 waitForRenderer(.drainAll)
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
                 freeParkedVideo()
+                // The dual-layer decoder's flush drops what its sessions and the GPU still hold,
+                // which here is the last frames of the stream: hand those over first.
+                (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
                 videoDecoder.flush()
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
@@ -3187,6 +3196,7 @@ final class SoftwarePlaybackHost {
                         // its reference chain; the seam packet itself parks after this block.
                         waitForRenderer(.drainAll)
                         freeParkedVideo()
+                        (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
                         videoDecoder.flush()
                         // AE#492: this flush is THIS thread's, made after the read and on behalf of
                         // the packet in hand. Retiring that packet along with the seam it opens
