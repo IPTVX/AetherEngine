@@ -1117,6 +1117,31 @@ struct DualLayerVideoDecoderTests {
 
     // MARK: - Delivery queue
 
+    /// Fake composer whose every composition fails (completes with nil), as a GPU error does.
+    private final class FailingFakeComposer: FelComposing, @unchecked Sendable {
+        func acquireSlot() {}
+        func releaseSlot() {}
+        func flush() {}
+        func composeAsync(
+            baseBuffer: CVPixelBuffer,
+            enhancementBuffer: CVPixelBuffer,
+            params: DoviMetalParams,
+            frameIndex: UInt32,
+            completion: @escaping @Sendable (CVPixelBuffer?) -> Void
+        ) {
+            completion(nil)
+        }
+        func composeAsyncWithAcquiredSlot(
+            baseBuffer: CVPixelBuffer,
+            enhancementBuffer: CVPixelBuffer,
+            params: DoviMetalParams,
+            frameIndex: UInt32,
+            completion: @escaping @Sendable (CVPixelBuffer?) -> Void
+        ) {
+            completion(nil)
+        }
+    }
+
     /// Fake composer whose Nth call (1-indexed) never calls its completion at
     /// all — the one failure mode a ticket cannot self-report, unlike a
     /// bypass or a "compose failed" fallback. Every other call completes
@@ -2211,7 +2236,7 @@ struct DualLayerVideoDecoderTests {
 
     // MARK: - Per-Frame Logging & 1 Hz Summary
 
-    @Test("per-frame logs (QUEUE, Bypass, DROP) are NOT emitted at default info level")
+    @Test("per-frame logs (queue, bypass, drop) are NOT emitted at default info level")
     func fel14PerFrameLogsNotEmittedAtDefaultInfoLevel() throws {
         let prevHandler = EngineLog.handler
         defer { EngineLog.handler = prevHandler }
@@ -2247,12 +2272,12 @@ struct DualLayerVideoDecoderTests {
         logLock.unlock()
 
         let forbiddenPrefixes = [
-            "[DualLayer] QUEUE BL",
-            "[DualLayer] QUEUE EL",
-            "[DualLayer] Bypass:",
-            "[DualLayer] DROP stale EL",
-            "[DualLayer] PRUNED EL",
-            "[DualLayer] BYPASS no-EL"
+            "[DualLayerVideoDecoder] queued base layer",
+            "[DualLayerVideoDecoder] queued enhancement layer",
+            "[DualLayerVideoDecoder] bypass,",
+            "[DualLayerVideoDecoder] dropped stale enhancement layer",
+            "[DualLayerVideoDecoder] pruned enhancement layer",
+            "[DualLayerVideoDecoder] compose failed"
         ]
         for prefix in forbiddenPrefixes {
             let found = captured.filter { $0.contains(prefix) }
@@ -2262,25 +2287,21 @@ struct DualLayerVideoDecoderTests {
 
     @Test("1 Hz summary aggregates and emits expected fields, then resets interval")
     func fel14OneHzSummaryAggregationAndFormat() throws {
-        let prevHandler = EngineLog.handler
-        defer { EngineLog.handler = prevHandler }
-
         var summaryLines: [String] = []
         let logLock = NSLock()
-        EngineLog.handler = { line in
-            if line.contains("[DualLayer] summary:") {
-                logLock.lock()
-                summaryLines.append(line)
-                logLock.unlock()
-            }
-        }
-
+        var summaryLevels: [EngineLog.Level] = []
         let composer = ImmediateFakeComposer()
         let decoder = DualLayerVideoDecoder(composer: composer)
         defer { decoder.close() }
 
         var currentTime: TimeInterval = 10.0
         decoder.summaryTimestampProviderForTesting = { currentTime }
+        decoder.summarySinkForTesting = { line, level in
+            logLock.lock()
+            summaryLines.append(line)
+            summaryLevels.append(level)
+            logLock.unlock()
+        }
 
         decoder.primeForTesting(enhancementLayer: true)
 
@@ -2311,7 +2332,7 @@ struct DualLayerVideoDecoderTests {
         let summary = summaryLines.first ?? ""
         logLock.unlock()
 
-        #expect(summary.contains("[DualLayer] summary:"))
+        #expect(summary.contains("[DualLayerVideoDecoder] summary:"))
         #expect(summary.contains("composed=1"))
         #expect(summary.contains("bypassNoEL=0"))
         #expect(summary.contains("bypassNoRPU=0"))
@@ -2320,6 +2341,10 @@ struct DualLayerVideoDecoderTests {
         #expect(summary.contains("poolBuffers="))
         #expect(summary.contains("deliveryPendingPeak="))
         #expect(summary.contains("meanGpuMs="))
+        // A healthy second is a trace: verbose reaches OSLog's debug level only, never the host handler.
+        logLock.lock()
+        #expect(summaryLevels == [.verbose])
+        logLock.unlock()
 
         // Next call immediately at 11.2 does not emit again until another second passes
         currentTime = 11.2
@@ -2338,26 +2363,57 @@ struct DualLayerVideoDecoderTests {
         #expect(summary2.contains("composed=0"))
     }
 
+    @Test("a 1 Hz summary that counts a compose failure goes out at the default level")
+    func summaryWithComposeFailureIsInfo() throws {
+        var levels: [EngineLog.Level] = []
+        var lines: [String] = []
+        let logLock = NSLock()
+        let decoder = DualLayerVideoDecoder(composer: FailingFakeComposer())
+        defer { decoder.close() }
+
+        var currentTime: TimeInterval = 30.0
+        decoder.summaryTimestampProviderForTesting = { currentTime }
+        decoder.summarySinkForTesting = { line, level in
+            logLock.lock()
+            lines.append(line)
+            levels.append(level)
+            logLock.unlock()
+        }
+        decoder.primeForTesting(enhancementLayer: true)
+
+        let baseBuf = try #require(Self.baseLayer())
+        let elBuf = try #require(Self.enhancementLayer())
+        decoder.seedRPUForTesting(pts: Self.pts(1), params: Self.params(), displayMetadataNAL: nil)
+        decoder.handleBaseLayerFrame(baseBuffer: baseBuf, pts: Self.pts(1), hdr10Data: nil)
+        decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(1))
+
+        currentTime = 31.1
+        decoder.maybeEmitSummary()
+        currentTime = 32.2
+        decoder.maybeEmitSummary()
+
+        logLock.lock()
+        defer { logLock.unlock() }
+        #expect(lines.count == 2)
+        #expect(lines.first?.contains("composeFailures=1") == true)
+        #expect(levels == [.info, .verbose], "only the interval with the failure reaches the host handler")
+    }
+
     @Test("flush and close reset 1 Hz summary counters")
     func fel14FlushAndCloseResetSummaryCounters() throws {
-        let prevHandler = EngineLog.handler
-        defer { EngineLog.handler = prevHandler }
-
         var summaryLines: [String] = []
         let logLock = NSLock()
-        EngineLog.handler = { line in
-            if line.contains("[DualLayer] summary:") {
-                logLock.lock()
-                summaryLines.append(line)
-                logLock.unlock()
-            }
-        }
 
         let decoder = DualLayerVideoDecoder(composer: ImmediateFakeComposer())
         defer { decoder.close() }
 
         var currentTime: TimeInterval = 20.0
         decoder.summaryTimestampProviderForTesting = { currentTime }
+        decoder.summarySinkForTesting = { line, _ in
+            logLock.lock()
+            summaryLines.append(line)
+            logLock.unlock()
+        }
         decoder.primeForTesting(enhancementLayer: true)
 
         let baseBuf = try #require(Self.baseLayer())
