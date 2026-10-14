@@ -894,6 +894,61 @@ struct DualLayerVideoDecoderTests {
         #expect(CMTimeCompare(deliveries.snapshot.first?.pts ?? .invalid, Self.pts(1)) == 0)
     }
 
+    @Test("the end-of-stream drain delivers the frames the sessions still owe, paired or alone, in order")
+    func endOfStreamDrainDeliversOwedFrames() async throws {
+        let primary = FlushEmittingFakeDecoder()
+        let enhancement = FlushEmittingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        let deliveries = Deliveries()
+        decoder.onFrame = { buffer, pts, hdr10 in deliveries.record(buffer, pts, hdr10) }
+        decoder.primeForTesting(enhancementLayer: true)
+        defer { decoder.close() }
+
+        let bl: [SendableFrameBuffer] = try (0..<3).map { _ in
+            guard let b = Self.baseLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: b)
+        }
+        let el: [SendableFrameBuffer] = try (0..<2).map { _ in
+            guard let e = Self.enhancementLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: e)
+        }
+        for i in 0..<3 {
+            decoder.seedRPUForTesting(pts: Self.pts(Int64(i)), params: Self.params(), displayMetadataNAL: nil)
+        }
+        // The last frames of a stream, still inside the sessions after the last packet was fed: three
+        // base-layer frames, and enhancement-layer frames for the first two only.
+        primary.emitFromInsideFlush = {
+            for i in 0..<3 {
+                decoder.handleBaseLayerFrame(baseBuffer: bl[i].value, pts: Self.pts(Int64(i)), hdr10Data: nil)
+            }
+        }
+        enhancement.emitFromInsideFlush = {
+            for i in 0..<2 {
+                decoder.handleEnhancementLayerFrame(elBuffer: el[i].value, pts: Self.pts(Int64(i)))
+            }
+        }
+
+        decoder.drainForEndOfStream()
+        // No wait: the drain returns once its frames have reached `onFrame`.
+        let frames = deliveries.snapshot
+        #expect(frames.count == 3)
+        #expect(frames.map { ObjectIdentifier($0.buffer) } == bl.map { ObjectIdentifier($0.value) })
+        #expect(Self.isStrictlyIncreasing(frames))
+        #expect(decoder.composedFrameCount == 2, "the two frames with an enhancement layer are composed")
+        #expect(decoder.stateSnapshotForTesting.blQueueCount == 0)
+
+        // The host's flush that follows has nothing left to drop or deliver.
+        primary.emitFromInsideFlush = nil
+        enhancement.emitFromInsideFlush = nil
+        decoder.flush()
+        decoder.quiesceForTesting()
+        #expect(deliveries.count == 3)
+    }
+
     // MARK: - Thread safety
 
     /// Synchronous composer so the stress test needs no GPU: every composition
