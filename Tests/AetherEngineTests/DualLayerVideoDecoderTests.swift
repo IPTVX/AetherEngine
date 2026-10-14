@@ -951,7 +951,7 @@ struct DualLayerVideoDecoderTests {
 
     // MARK: - Session loss (AE#739)
 
-    @Test("the session-loss handler reaches both layers' decoders, and clearing it clears both")
+    @Test("the session-loss handler reaches both layers' decoders, once per loss, and clearing it clears both")
     func sessionLostHandlerReachesBothLayers() {
         let primary = HardwareVideoDecoder()
         let enhancement = HardwareVideoDecoder()
@@ -963,7 +963,12 @@ struct DualLayerVideoDecoderTests {
         defer { decoder.close() }
         let calls = SessionLossCount()
         decoder.onSessionLost = { calls.bump() }
+        // A screen lock loses both sessions and each layer reports it: one recovery, not two.
         primary.onSessionLost?()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 1)
+        // After a rebuild (refused here: neither decoder was opened) the next loss is reported again.
+        _ = decoder.rebuildSession()
         enhancement.onSessionLost?()
         #expect(calls.value == 2)
         decoder.onSessionLost = nil

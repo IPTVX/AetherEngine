@@ -179,8 +179,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
     private var _skipUntilPTS: CMTime?
 
-    /// AE#739: called when the system invalidates either layer's session. Handed to both sub-decoders
-    /// (outside `lock`, as `skipUntilPTS` is), and to the enhancement decoder when it opens.
+    /// AE#739: called when the system invalidates either layer's session. Both sub-decoders report
+    /// through `reportSessionLost()` (installed outside `lock`, as `skipUntilPTS` is), the enhancement
+    /// decoder from when it opens.
     var onSessionLost: (@Sendable () -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return _onSessionLost }
         set {
@@ -189,11 +190,29 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             let primary = primaryDecoder
             let enhancement = enhancementDecoder
             lock.unlock()
-            (primary as? HardwareVideoDecoder)?.onSessionLost = newValue
-            (enhancement as? HardwareVideoDecoder)?.onSessionLost = newValue
+            (primary as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(newValue)
+            (enhancement as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(newValue)
         }
     }
     private var _onSessionLost: (@Sendable () -> Void)?
+    /// Guarded by `lock`. A screen lock invalidates both sessions and each sub-decoder reports it;
+    /// the owner hears one loss until `rebuildSession()` has replaced both, not one per layer
+    /// (which rebuilt both sessions twice and repositioned twice).
+    private var sessionLossReported = false
+
+    private func subDecoderLossHandler(_ handler: (@Sendable () -> Void)?) -> (@Sendable () -> Void)? {
+        guard handler != nil else { return nil }
+        return { [weak self] in self?.reportSessionLost() }
+    }
+
+    private func reportSessionLost() {
+        lock.lock()
+        let first = !sessionLossReported
+        sessionLossReported = true
+        let handler = _onSessionLost
+        lock.unlock()
+        if first { handler?() }
+    }
 
     /// The primary decoder's own methods are internally synchronized
     /// (`HardwareVideoDecoder.lock` / `skipLock`); it is safe to call without holding
@@ -762,7 +781,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         let decoder = makeEnhancementDecoder()
         decoder.skipUntilPTS = skip
-        (decoder as? HardwareVideoDecoder)?.onSessionLost = sessionLost
+        (decoder as? HardwareVideoDecoder)?.onSessionLost = subDecoderLossHandler(sessionLost)
         do {
             try decoder.open(parameterSets: [vv, ss, pp], timeBase: tb) { [weak self] elBuffer, pts, _ in
                 self?.handleEnhancementLayerFrame(elBuffer: elBuffer, pts: pts)
@@ -1472,6 +1491,10 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // `flush()` and `close()` wait on `lifecycleLock`, so `epoch` is still this decoder's.
         primary.adoptFeedEpoch(epoch)
         enhancement?.adoptFeedEpoch(epoch)
+        // Both sessions are new (or refused, and the host owes another rebuild): the next loss is news.
+        lock.lock()
+        sessionLossReported = false
+        lock.unlock()
         return primaryRebuilt && enhancementRebuilt
     }
 
