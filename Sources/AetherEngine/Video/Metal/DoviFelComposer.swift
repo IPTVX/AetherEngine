@@ -938,7 +938,7 @@ final class DoviFelComposer: @unchecked Sendable {
         gpuTimeLock.unlock()
         if let closed {
             EngineLog.emit(String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames",
-                                  closed, Self.gpuTimeWindow), category: .swPlayback)
+                                  closed, Self.gpuTimeWindow), category: .swPlayback, level: .verbose)
         }
     }
 
