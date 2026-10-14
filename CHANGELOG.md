@@ -28,7 +28,8 @@ the public-API contract.
   recognizes that shape only from an exact CFR lattice, complete picture-order ranks and two
   corroborating clamps, then reconstructs PTS and DTS from the IDR anchor, picture order and decode
   order. A seek starts from a new IDR, and overflow or any later timestamp outside the proven shape
-  disables the repair and leaves that packet untouched.
+  disables the repair and leaves that packet untouched, as does a reconstruction that would present a
+  picture before its decode time.
 - **H.264 MP4s with missing composition offsets keep display order across cadence changes and
   hierarchical B pictures.** A corroborated missing-offset head with a changing decode cadence now
   reuses the existing timestamp slots. Later zero-offset regions can prove a forward-coded anchor
