@@ -22,6 +22,11 @@ the public-API contract.
 
 ### Fixed
 
+- **H.264 MP4s with missing composition offsets keep display order across cadence changes and
+  hierarchical B pictures.** A corroborated missing-offset head with a changing decode cadence now
+  reuses the existing timestamp slots. Later zero-offset regions can prove a forward-coded anchor
+  farther ahead than the declared backward reorder delay, using a bounded complete-prefix check.
+  Original DTS, audio, payload and index remain unchanged; unsupported sequences still pass through.
 - **`activeVideoDecoder` names the decoder used by the software host (#753).** HEVC decoded by
   VideoToolbox now reports `VideoToolbox HEVC (HW)` on initial load and reload, instead of
   `libavcodec HEVC (SW)`. Decoder selection and playback routing are unchanged.
