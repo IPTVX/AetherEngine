@@ -341,7 +341,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var summaryComposeFailures: Int = 0
     /// Compositions started, and compositions whose frame (composed or fallback) has been handed to
     /// `orderedDelivery`. Equal when nothing is on the GPU or in a completion handler. Guarded by
-    /// `composeResultLock`; read only by `quiesceForTesting`.
+    /// `composeResultLock`; read by `drainForEndOfStream` and `quiesceForTesting`.
     private var composeRequestsStarted = 0
     private var composeRequestsHandedOff = 0
     private var summaryBypassNoEL: Int = 0
@@ -1368,6 +1368,58 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.unlock()
 
         composer?.flush()
+    }
+
+    /// How long `drainForEndOfStream()` waits for compositions still on the GPU.
+    static let endOfStreamComposeWait: TimeInterval = 0.5
+
+    /// End of stream: delivers the frames still owed, which `flush()` drops. `flush()` cannot tell the
+    /// frames it drains from pre-seek ones, so it drops everything the sessions, the GPU and the pairing
+    /// queues still hold, and at the end of the stream that is the last frames of the title. The host
+    /// calls this once the last packet has been fed, before its end-of-stream `flush()`.
+    ///
+    /// The drained frames pair as usual; a base-layer frame whose enhancement layer never came goes out
+    /// alone, under its own ticket. Returns once everything has reached `onFrame`, or after
+    /// `endOfStreamComposeWait` if a composition is still on the GPU.
+    func drainForEndOfStream() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        lock.lock()
+        guard !isClosed else { lock.unlock(); return }
+        let primary = primaryDecoder
+        let el = enhancementDecoder
+        lock.unlock()
+
+        // Without `draining`, and without moving the epoch: what the sessions still owe arrives through
+        // the normal callbacks while these wait, and pairs with what the other layer already sent.
+        primary.flushKeepingEpoch()
+        el?.flushKeepingEpoch()
+
+        let unpaired: [BypassRequest] = {
+            lock.lock()
+            defer { lock.unlock() }
+            var due: [BypassRequest] = []
+            for k in blFrameQueue.keys.sorted() {
+                guard let entry = blFrameQueue.removeValue(forKey: k) else { continue }
+                summaryBypassNoEL += 1
+                noteSettledBaseLayer(key: k)
+                due.append(BypassRequest(ticket: entry.ticket, epoch: _feedEpoch, buffer: entry.buffer, pts: entry.pts, hdr10Data: entry.side.hdr10Data, dmNAL: entry.side.dmNAL, reason: "end-of-stream"))
+            }
+            return due
+        }()
+        for req in unpaired {
+            fulfilBypass(req)
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + Self.endOfStreamComposeWait
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            composeResultLock.lock()
+            let idle = composeRequestsStarted == composeRequestsHandedOff
+            composeResultLock.unlock()
+            if idle { break }
+            usleep(500)
+        }
+        orderedDelivery.barrier()
     }
 
     func close() {

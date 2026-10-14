@@ -315,6 +315,21 @@ struct DoviFelRealFileTests {
         print(String(format: "[fallback] %@: worst per-plane mean |d| %.2f (10-bit codes)", name, worstMean))
     }
 
+    @Test("the end-of-stream drain delivers a frame for every packet fed, leaving nothing for the flush after it",
+          .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[0]), DoviFelRealFileTests.needsClips),
+          .timeLimit(.minutes(2)), arguments: [DoviFelRealFileTests.fixtures[0]])
+    func endOfStreamDrainDeliversTheLastFrames(name: String) throws {
+        let s = try Self.open(name)
+        defer { s.decoder.close(); s.demuxer.close() }
+        // The clip opens on an IDR, so every packet from its head decodes to one frame.
+        let fed = Self.feed(s, count: 120)
+        s.decoder.drainForEndOfStream()
+        let drained = s.sink.pts.count
+        #expect(drained == fed, "\(drained) frames from \(fed) packets")
+        s.decoder.flush()
+        #expect(s.sink.pts.count == drained, "the drain left frames for the flush to drop")
+    }
+
     @Test("a flush before the first enhancement packet leaves the enhancement decoder in step: its frames still arrive",
           .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[0]), DoviFelRealFileTests.needsClips),
           .timeLimit(.minutes(2)), arguments: [DoviFelRealFileTests.fixtures[0]])
