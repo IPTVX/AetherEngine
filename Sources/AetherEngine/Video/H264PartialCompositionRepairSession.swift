@@ -90,7 +90,7 @@ final class H264PartialCompositionRepairSession {
     /// Returns true when the packet was taken over and must not be emitted yet.
     func ingest(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
         guard packet.pointee.stream_index == streamIndex else {
-            guard !pending.isEmpty else { return false }
+            guard !pending.isEmpty else { return handBack(packet) }
             append(packet, rank: nil)
             drain()
             enforceBounds()

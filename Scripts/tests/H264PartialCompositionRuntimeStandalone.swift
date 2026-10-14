@@ -87,6 +87,7 @@ struct H264PartialCompositionRuntimeTests {
             avcodec_flush_buffers(raw); avcodec_flush_buffers(fixed)
             var rawPTS: [Int64] = [], fixedPTS: [Int64] = []
             var videoRead = 0, reads = 0, delivered = 0, stop = false, observedRepair = false
+            var lastOther: [Int32: Int64] = [:]
             func emit(_ packet: UnsafeMutablePointer<AVPacket>) throws {
                 defer { var owned: UnsafeMutablePointer<AVPacket>? = packet; trackedPacketFree(&owned) }
                 let expected = inputs.removeValue(forKey: UInt(bitPattern: packet))!
@@ -102,7 +103,14 @@ struct H264PartialCompositionRuntimeTests {
                         precondition(twinPTS[actual.dts] == actual.pts, "repaired video PTS must exactly match its healthy twin")
                     }
                     try decode(fixed, packet: packet, into: &fixedPTS)
-                } else { precondition(actual == expected) }
+                } else {
+                    precondition(actual == expected)
+                    // Other streams keep the container's order: a held packet must not overtake one
+                    // that was handed over before it.
+                    precondition(lastOther[actual.streamIndex].map { actual.dts > $0 } ?? true,
+                                 "non-video packet left the session out of order")
+                    lastOther[actual.streamIndex] = actual.dts
+                }
                 delivered += 1
             }
             while !stop {
@@ -234,6 +242,9 @@ struct H264PartialCompositionRuntimeTests {
             guard let packet = trackedPacketAlloc() else { throw Failure.demux }
             packet.pointee.stream_index = index + 1
             if session.ingest(packet) { heldForeign += 1 } else { av_packet_free_safe(packet) }
+            // The demuxer drains the queue before every read, so a released packet is gone again
+            // before the next one arrives.
+            while let released = session.dequeue() { av_packet_free_safe(released) }
         }
         precondition(heldForeign > 0 && heldForeign <= H264PartialCompositionRepair.maximumHeldPackets,
                      "the all-stream budget has to end the hold, held \(heldForeign)")
