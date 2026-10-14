@@ -123,7 +123,7 @@ frames of any composer's output and prints `ok`, `MISMATCH` or `no-EL` per frame
 The soak arm is not a pulse measurement. It plays a FEL title for several minutes through a seek
 schedule and reports one line, `soak summary: played= seeks= droppedFrames= composeFailures=
 peakFootprintMB= endFootprintMB= route=`. Check `route=` first: it reads `FEL` only if the engine's
-dual-layer summary lines were seen, and a run that never took the route reports zero compose failures
+dual-layer decoder reported a FEL stream (or a summary line with a failure), and a run that never took the route reports zero compose failures
 for the wrong reason.
 
 ## Run on an Apple TV
