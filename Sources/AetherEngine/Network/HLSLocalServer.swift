@@ -512,6 +512,36 @@ final class HLSLocalServer: @unchecked Sendable {
         return servedMediaBytes
     }
 
+    /// AE#682: how long `iframe.m3u8` waits for the first media segment request when the rendition is
+    /// SDR JPEG next to an HDR variant. AVPlayer asks for the main variant's segments before the I-frame
+    /// playlist; one that refused the HDR variant never asks for a segment, and would otherwise play the
+    /// stills as the video instead of failing into the media-playlist fallback.
+    static let iFrameMainVariantWaitSeconds: TimeInterval = 3
+
+    private var _iFrameRenditionWithheld = false
+    /// True once `iframe.m3u8` was answered 404 because no media segment was requested: AVPlayer refused
+    /// the HDR variant, and the item fails with the 404's -1100 instead of a display rejection code.
+    var iFrameRenditionWithheld: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return _iFrameRenditionWithheld
+    }
+
+    /// True once a media segment was requested, waiting up to `iFrameMainVariantWaitSeconds`.
+    private func waitForMainVariant() -> Bool {
+        let deadline = Date().addingTimeInterval(Self.iFrameMainVariantWaitSeconds)
+        while true {
+            stateLock.lock()
+            let served = servedMediaBytes, stopping = shouldStop
+            stateLock.unlock()
+            if served { return true }
+            guard !stopping, Date() < deadline else {
+                stateLock.lock(); _iFrameRenditionWithheld = !stopping; stateLock.unlock()
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+    }
+
     private var loggedReducedMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
@@ -1209,6 +1239,12 @@ final class HLSLocalServer: @unchecked Sendable {
         case "/iframe.m3u8":
             guard let prov = provider, prov.iFrameRenditionServed else {
                 return send404(fd: fd, path: normalizedPath, reason: "no I-frame rendition")
+            }
+            if case .jpeg = prov.iFrameRenditionFormat, !waitForMainVariant() {
+                EngineLog.emit("[HLSLocalServer] i-frame rendition withheld: no media segment requested within "
+                               + "\(Self.iFrameMainVariantWaitSeconds)s, so the HDR variant was refused",
+                               category: .hlsServer)
+                return send404(fd: fd, path: normalizedPath, reason: "main variant not playing")
             }
             let body = Self.buildIFramePlaylistText(provider: prov, subResourceBaseURL: subResourceBaseURL)
             return send200(fd: fd, path: normalizedPath, data: Data(body.utf8),

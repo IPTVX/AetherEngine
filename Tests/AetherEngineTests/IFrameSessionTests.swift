@@ -111,6 +111,27 @@ struct IFrameSessionTests {
         }
     }
 
+    @Test("a JPEG I-frame playlist waits for the main variant and is withheld from a player that refused it",
+          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
+    func jpegPlaylistFollowsMainVariant() throws {
+        let engine = HLSVideoEngine(url: fixtureURL(Self.dolbyVisionFixture), dvModeAvailable: true)
+        engine.requestIFramePlaylist()
+        let playbackURL = try engine.start()
+        defer { engine.stop() }
+        let base = playbackURL.deletingLastPathComponent()
+        let playlistURL = base.appendingPathComponent("iframe.m3u8")
+
+        let started = Date()
+        #expect(!engine.iFrameRenditionWithheld)
+        #expect((try? String(contentsOf: playlistURL, encoding: .utf8)) == nil)
+        #expect(Date().timeIntervalSince(started) >= HLSLocalServer.iFrameMainVariantWaitSeconds - 0.1)
+        #expect(engine.iFrameRenditionWithheld)
+
+        _ = try Data(contentsOf: base.appendingPathComponent("init.mp4"))
+        let playlist = try String(contentsOf: playlistURL, encoding: .utf8)
+        #expect(playlist.contains("iframe1.mp4"))
+    }
+
     @Test("the loopback server answers the three new paths",
           .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
     func routes() throws {

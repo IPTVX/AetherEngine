@@ -1392,6 +1392,7 @@ extension AetherEngine {
         // keyed to the item that loaded it. Installed on the one funnel every attach passes through, so
         // the session's FIRST item is covered as well as every swap: both used to reconstruct the axis
         // from the cache instead, and a reconstruction is only as good as the older of its two samples.
+        host.iFramePlaylistWithheld = { [weak session] in session?.iFrameRenditionWithheld ?? false }
         host.onWillAttachItem = { [weak self] in
             // The host owns this closure, so it reaches back for the host rather than capturing it.
             guard let self, let attaching = self.nativeHost else { return }

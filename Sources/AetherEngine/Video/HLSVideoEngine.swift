@@ -250,6 +250,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// that took it, at once when the rendition stays absent, or in `stop()`.
     var customIFrameReader: (reader: IOReader, formatHint: String?)?
     private(set) var iFrameRenditionVerdict: IFrameRenditionEligibility.Verdict = .absent(.notRequested)
+    /// AE#682: the server withheld the JPEG I-frame playlist because AVPlayer never asked for a media
+    /// segment, which is how a refused HDR variant looks next to an SDR I-frame rendition.
+    var iFrameRenditionWithheld: Bool { server?.iFrameRenditionWithheld ?? false }
     private var iFrameRendition: IFrameRendition?
 
     /// Native subtitle rendition marked DEFAULT=YES in the master (Sodalite#32). Set before `start()`; the
