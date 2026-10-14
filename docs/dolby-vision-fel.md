@@ -237,7 +237,8 @@ sections below are the rules that keep per-frame work and shared mutable state t
 3. **Nothing blocks while holding a lock, and every piece of state has one owner.**
 4. **Every frame has a bounded lifetime.** Bounded wait for its partner, bounded queues, bounded GPU
    work in flight, and nothing from before a flush survives it.
-5. **Per-frame work writes no log lines.** Counters feed a 1 Hz summary.
+5. **Per-frame work writes no log lines at the default level.** Counters feed a 1 Hz summary, which is
+   a `.verbose` line (§5.11).
 
 ### 5.2 Routing
 
@@ -521,7 +522,7 @@ CPU per composed frame:
 | libdovi RPU parses | 1 |
 | Base-layer access-unit copies | 0 (`CustomBlockSource` hands VideoToolbox the packet's own buffer) |
 | Enhancement-layer copies | 1 (extraction into a standalone access unit) |
-| Log lines at the default level | 0; a 1 Hz summary instead (§5.11) |
+| Log lines at the default level | 0 per frame; a 1 Hz summary at `.verbose` instead (§5.11) |
 | Parameter upload | written into a preallocated `MTLBuffer` |
 | Side-data lookup | the 32-entry ring, no sorting |
 | Shader compilation | once per process, lazily |
@@ -531,12 +532,21 @@ GPU: 12.9–14.3 ms per frame measured on the A12 (§4.2), against a 41.7 ms bud
 
 ### 5.11 Observability
 
-One `[DualLayer] summary` line per second while composing: frames composed, bypassed without EL,
-bypassed without RPU, stale enhancement frames dropped, maximum observed layer skew in frames, peak
-GPU slots in use, output pool buffers allocated, delivery pending peak, mean GPU ms. The existing
-`[DoviFelComposer] gpu … ms/frame` line stays. `os_signpost` intervals around compose and delivery
-make the pipeline readable in Instruments. Nothing else logs per frame; anything genuinely per-frame
-for debugging uses `EngineLog` level `.verbose`.
+One `[DualLayerVideoDecoder] summary` line per second while composing: frames composed, compose
+failures, bypassed without EL, bypassed without RPU, stale enhancement frames dropped, maximum
+observed layer skew in frames, peak GPU slots in use, output pool buffers allocated, delivery pending
+peak, mean GPU ms. `[DoviFelComposer] gpu … ms/frame` is the same kind of line, once per 120 composed
+frames. Both are `.verbose`: they go to OSLog's debug level and never reach the host handler, so they
+cost nothing unless the category's debug level is on:
+
+```
+log stream --level debug --predicate 'subsystem == "de.superuser404.AetherEngine" && category == "sw.playback"'
+```
+
+The exception is a summary whose second counted a compose failure, which goes out at the default level
+so the failure is visible without that. `os_signpost` intervals around compose and delivery make the
+pipeline readable in Instruments. Nothing else logs per frame; anything genuinely per-frame for
+debugging, such as the pairing, queueing and bypass traces, uses `EngineLog` level `.verbose` too.
 
 ### 5.12 Invariants and the tests that hold them
 
