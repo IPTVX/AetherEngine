@@ -17,7 +17,8 @@ the public-API contract.
   as DVD-Video: the title sets, VMGI filtering, durations, chapters and languages come from the same code
   as an image's (`DiscReader.dvdTitleSet`, now shared), the selected title's VOBs play back to back in
   part order, and the cell timeline and VTS time map apply as on an image, since the VOBs in order are
-  the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before.
+  the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before,
+  and one with both trees plays its Blu-ray title, the order an image is recognized in.
 
 ### Fixed
 

@@ -276,10 +276,12 @@ enum DiscReader {
         // A disc folder is a set of files, not one byte range, so it is recognized before the cache,
         // which rebuilds a reader from extents of a single image.
         if let folder = reader as? DiscDirectoryReader {
-            if folder.discFiles.contains(where: { $0.path.uppercased().hasPrefix("VIDEO_TS/") }) {
-                return wrapDVDFolder(folder, selectTitleID: selectTitleID)
-            }
-            return wrapBluRayFolder(folder, selectTitleID: selectTitleID)
+            // Blu-ray first and DVD-Video as the fallback, as on an image, so a hybrid listing with both
+            // trees plays its Blu-ray title.
+            func has(_ root: String) -> Bool { folder.discFiles.contains { $0.path.uppercased().hasPrefix(root) } }
+            guard has("VIDEO_TS/") else { return wrapBluRayFolder(folder, selectTitleID: selectTitleID) }
+            if has("BDMV/"), let bluRay = wrapBluRayFolder(folder, selectTitleID: selectTitleID) { return bluRay }
+            return wrapDVDFolder(folder, selectTitleID: selectTitleID)
         }
         if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),

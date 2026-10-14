@@ -51,6 +51,22 @@ struct DVDFolderTests {
         #expect(info.titles.first?.durationTicks == UInt64(2100 * discTickRate))
     }
 
+    @Test("a listing with both trees plays its Blu-ray title, and falls back to the DVD when BDMV has none")
+    func hybridListing() throws {
+        let bluRay = BluRayFolderTests.tinyStreamFolder().folder
+        let dvd = Self.folder()
+        let both = Folder(bluRay.order.map { ($0, bluRay.files[$0]!) } + dvd.order.map { ($0, dvd.files[$0]!) })
+        let info = try #require(try DiscReader.wrap(both))
+        #expect(info.formatHint == "mpegts")
+        #expect(!both.openedPaths.contains { $0.hasPrefix("VIDEO_TS/") })
+
+        let emptyBDMV = Folder([("BDMV/index.bdmv", Data([0x49, 0x4E, 0x44, 0x58]))]
+                               + dvd.order.map { ($0, dvd.files[$0]!) })
+        let fallback = try #require(try DiscReader.wrap(emptyBDMV))
+        #expect(fallback.formatHint == "mpeg")
+        #expect(BluRayFolderTests.readToEnd(fallback.reader) == Self.bytes(5, 7000) + Self.bytes(6, 4000))
+    }
+
     @Test("a VIDEO_TS folder without title VOBs is not a disc")
     func noTitleVOBs() throws {
         let folder = Folder([("VIDEO_TS/VIDEO_TS.IFO", Self.bytes(1, 2048)), ("VIDEO_TS/VIDEO_TS.VOB", Self.bytes(2, 2048))])

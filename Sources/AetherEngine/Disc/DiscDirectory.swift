@@ -3,8 +3,8 @@ import Foundation
 /// A disc that a host serves as a FOLDER (the `BDMV` or `VIDEO_TS` tree, one address per file) rather
 /// than as a single image. Hand one to `load(source: .custom(reader))`: the engine selects the title and
 /// concatenates its clips or VOBs the same way it does for an ISO, so titles, chapters, track languages,
-/// the multi-clip and multi-cell timelines and the seek tables all behave as they do there. A listing
-/// with `VIDEO_TS/` in it is read as DVD-Video, anything else as Blu-ray.
+/// the multi-clip and multi-cell timelines and the seek tables all behave as they do there. As on an
+/// image, Blu-ray is tried first and a listing with `VIDEO_TS/` in it falls back to DVD-Video.
 ///
 /// A folder carries no bytes of its own: `read` is never called on it. The engine recognizes the
 /// conformance before it reads anything and opens the files it needs through `openDiscFile(_:)`.
