@@ -14,18 +14,12 @@ enum PacketBalanceTracker {
         lock.lock()
         _allocs &+= 1
         lock.unlock()
-        #if DEBUG
-        scope?.recordAlloc()
-        #endif
     }
 
     static func recordFree() {
         lock.lock()
         _frees &+= 1
         lock.unlock()
-        #if DEBUG
-        scope?.recordFree()
-        #endif
     }
 
     static var alive: Int {
@@ -39,45 +33,6 @@ enum PacketBalanceTracker {
         defer { lock.unlock() }
         return _allocs
     }
-
-    #if DEBUG
-    /// The allocs and frees made by one task and the synchronous calls it makes. `alive` is
-    /// process-wide, so a test that compares it before and after reads every other test running in
-    /// parallel; a leak check scoped to the test's own task does not.
-    final class Scope: @unchecked Sendable {
-        private let lock = NSLock()
-        private var allocs = 0
-        private var frees = 0
-
-        var alive: Int {
-            lock.lock()
-            defer { lock.unlock() }
-            return allocs - frees
-        }
-
-        fileprivate func recordAlloc() {
-            lock.lock()
-            allocs &+= 1
-            lock.unlock()
-        }
-
-        fileprivate func recordFree() {
-            lock.lock()
-            frees &+= 1
-            lock.unlock()
-        }
-    }
-
-    @TaskLocal static var scope: Scope?
-
-    /// Runs `body` with a fresh `Scope` and returns it. Work `body` hands to another queue or thread
-    /// is not counted.
-    static func measure(_ body: () throws -> Void) rethrows -> Scope {
-        let scope = Scope()
-        try $scope.withValue(scope) { try body() }
-        return scope
-    }
-    #endif
 }
 
 /// Drop-in for av_packet_alloc() that records the alloc in PacketBalanceTracker.
