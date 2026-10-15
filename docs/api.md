@@ -294,7 +294,8 @@ let outcome = player.updateRequestHeaders(["Authorization": "Bearer \(fresh)"])
 
 The set replaces the session's headers, the way `LoadOptions.httpHeaders` sets them at `load`; it is
 not merged. The session's source readers (the playback demuxer, the producer's reopens and revives,
-the I-frame and embedded-subtitle side readers) read their headers per request from one store the
+the I-frame and embedded-subtitle side readers, and the still extractor `makeFrameExtractor()` returns
+for the session's own source) read their headers per request from one store the
 session creates at `load`, so the next request any of them makes carries the new set. A request
 already in flight finishes with the headers it was sent with. A reconnect already backing off after
 a refusal sends the new set on its next attempt, so a session stalled over a lapsed credential

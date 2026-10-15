@@ -96,6 +96,26 @@ struct LiveRequestHeaderTests {
         #expect(origin.requestHeaders.allSatisfy { $0["authorization"] == "Bearer opened" })
     }
 
+    /// The session's still extractor (`makeFrameExtractor()`) opens its demuxer lazily, on the first
+    /// scrub after the extractor was built, and again after an idle close, so it must read the store
+    /// at that moment, not the token current when the host asked for the extractor.
+    @Test("a still extractor over the session's source opens with the rotated headers")
+    func stillExtractorFollowsTheStore() throws {
+        let originMaybe = ThrottledOriginServer(totalSize: 4 * 1024 * 1024)
+        let origin = try #require(originMaybe)
+        defer { origin.stop() }
+        let store = RequestHeaderStore(["Authorization": "Bearer first"])
+        let context = FrameDecodeContext(url: URL(string: "http://127.0.0.1:\(origin.port)/movie.bin")!,
+                                         httpHeaders: store.current, requestHeaderStore: store)
+        defer { context.close() }
+        store.replace(["Authorization": "Bearer second"])
+        // The bytes are not a container, so the open fails after its requests; only their headers matter.
+        try? context.ensureOpen()
+        let sent = origin.requestHeaders.map { $0["authorization"] }
+        #expect(!sent.isEmpty, "the open reached the origin")
+        #expect(sent.allSatisfy { $0 == "Bearer second" })
+    }
+
     @Test("the outcome says live only where every source request is built by the session's readers")
     func outcomeFollowsWhoOwnsTheRequests() {
         func outcome(custom: Bool = false, disc: Bool = false, route: VideoRoute,

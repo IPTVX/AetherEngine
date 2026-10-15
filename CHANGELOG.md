@@ -15,8 +15,8 @@ the public-API contract.
 - **A live session's request headers can be replaced without a rebuild (#792).**
   `updateRequestHeaders(_:)` hands the session a new header set, and the next request each of its
   source readers makes carries it: one store per load now feeds the playback demuxer, the producer's
-  reopens and revives, and the I-frame and embedded-subtitle side readers, which used to freeze a copy
-  at their open. A media server whose bearer tokens expire under a long title no longer costs a
+  reopens and revives, the I-frame and embedded-subtitle side readers, and the still extractor
+  `makeFrameExtractor()` returns for the session's source, which used to freeze a copy at their open. A media server whose bearer tokens expire under a long title no longer costs a
   `reloadAtCurrentPosition(applying:)` teardown per rotation, and a reconnect already backing off over
   a lapsed token heals on its next attempt once the host renews. The returned
   `RequestHeaderUpdateOutcome` says `.installedForNextRebuild` where the requests are not the
