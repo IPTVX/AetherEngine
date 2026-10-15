@@ -1050,13 +1050,18 @@ final class SoftwarePlaybackHost {
 
         // Audit PERF-104: only the VideoToolbox decoders emit out of presentation order. That includes the
         // DualLayerVideoDecoder: OrderedDelivery keeps its frames in the order the base layer came out of
-        // VideoToolbox, which is decode order (measured on the real fixtures, `DoviFelRealFileTests`), so it
-        // needs the same reorder depth as the single-layer hardware decoder.
+        // VideoToolbox, which is decode order (measured on the real fixtures, `DoviFelRealFileTests`). It gets
+        // the same reorder depth as the single-layer hardware decoder, used only when arrival-order handover
+        // below is off (no frame rate).
         renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(
             forHardwareDecoder: videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder))
         renderer.setFELLookahead(
             enabled: videoDecoder is DualLayerVideoDecoder,
             frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        // The FEL look-ahead window only holds if none of it waits in the reorder buffer; see
+        // `SampleBufferRenderer.arrivalFloor`. Without a frame rate it stays on the reorder buffer.
+        renderer.setArrivalOrderHandover(
+            frameRate: videoDecoder is DualLayerVideoDecoder ? AetherEngine.detectFrameRate(stream: vStream) : nil)
 
         // Flip display layer into HDR mode before frames arrive; without this preferredDynamicRange stays .standard and PQ/HLG renders desaturated.
         if let codecpar = vStream.pointee.codecpar {
