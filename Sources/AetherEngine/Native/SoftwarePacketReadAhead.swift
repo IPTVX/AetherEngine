@@ -149,8 +149,20 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
 
     /// Called only by a background sampler. Copy bounded metadata under the short state lock;
-    /// timestamp conversion/intersection and keyframe selection happen after releasing it. No I/O.
+    /// timestamp conversion/intersection and keyframe selection happen after releasing it. No I/O
+    /// beyond a purgeable-state query per history chunk on the memory store.
     var residentRanges: [ClosedRange<Double>] {
+        // A purged history chunk is gone before any restore notices. Never wait for the store:
+        // a busy one is checked on the next sample.
+        if operations.try() {
+            if fifo.evictPurgedHistory() {
+                let state = fifo.snapshot
+                condition.lock()
+                if !closed { copyDiskStateLocked(state) }
+                condition.unlock()
+            }
+            operations.unlock()
+        }
         condition.lock()
         // Fixed numeric state only, emitted on edges by this background sampler. No URLs,
         // error descriptions or packet content. Bits: closed/reposition/reset/failure,

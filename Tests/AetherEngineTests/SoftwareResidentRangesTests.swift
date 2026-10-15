@@ -23,9 +23,10 @@ struct SoftwareResidentRangesTests {
     }
     private func source(_ packets: [SoftwareStoredPacket], audio: Bool = false,
                         reorder: Int? = nil, budget: Int = 1_000_000,
-                        chunkBytes: Int = 1024) throws -> SoftwarePacketReadAhead {
+                        chunkBytes: Int = 1024,
+                        store: (any SoftwarePacketStore)? = nil) throws -> SoftwarePacketReadAhead {
         let input = Input(packets)
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: chunkBytes, retainConsumed: true)
+        let fifo = try store ?? SoftwarePacketDiskFIFO(chunkTargetBytes: chunkBytes, retainConsumed: true)
         let source = SoftwarePacketReadAhead(video: .init(index: 0, numerator: 1, denominator: 1000),
             audio: audio ? .init(index: 1, numerator: 1, denominator: 1000) : nil,
             byteBudget: budget, forwardSeconds: 3600, initialSourceClock: 0,
@@ -112,6 +113,22 @@ struct SoftwareResidentRangesTests {
         let miss = source.beginSeek(to: 0.1)
         #expect(try !source.prepareSeek(miss, to: 0.1))
         #expect(source.residentRanges.isEmpty)
+    }
+
+    @Test("History the kernel emptied in the memory store leaves the published spans (#759)")
+    func purgedMemoryHistory() async throws {
+        let packets = (0..<400).map { packet(Int64($0) * 40) }
+        let store = SoftwarePacketMemoryFIFO(chunkTargetBytes: 1, historyCapBytes: .max)
+        let source = try source(packets, store: store)
+        defer { source.close() }
+        try await consume(source, expecting: packets, fails: false)
+        #expect(source.residentRanges == [0...16])
+        store.purgeHistoryForTesting()
+        let spans = source.residentRanges
+        #expect((spans.first?.lowerBound ?? 0) > 0)
+        #expect(spans.last?.upperBound == 16)
+        let miss = source.beginSeek(to: 0.1)
+        #expect(try !source.prepareSeek(miss, to: 0.1))
     }
 
     @Test("Evicted reordered timestamps and metadata pressure only shorten coverage")
