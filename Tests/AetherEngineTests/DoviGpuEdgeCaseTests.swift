@@ -489,4 +489,31 @@ extension DoviGpuEdgeCaseTests {
         let c = try Self.composeConstant(composer, bl: (512, 512, 512), el: (512, 612, 512), params: p)
         #expect(Set(DoviTestSupport.rawVDR(c)[1]) == [99])
     }
+
+    /// DoViBaker also caps the prediction at full scale (`v > 0xffff ? 0xffff : v`) before the residual, so a
+    /// prediction above it is not pulled back down from there: 4095 - 99, not 4506 - 99 -> clamp 4095.
+    @Test("a prediction above full scale is capped at vdr_max before the residual is added")
+    func overRangePredictionCappedBeforeResidual() throws {
+        let composer = try #require(DoviFelComposer())
+        var high = DoviPolynomialParams()
+        high.numPivots = 2; high.pivots[0] = 0; high.pivots[1] = 1023
+        high.method[0] = DoviMapping.polynomial.rawValue
+        high.order[0] = 0; high.coefShift[0] = 23
+        high.coef[0] = [Int32(1.1 * 8388608.0), 0, 0]   // 1.1 * 4096 = 4506 VDR codes
+
+        var p = Self.params()
+        p.ditherMode = .debugRawVDR
+        p.polyY = high
+        let out = try Self.composeConstant(composer, bl: (512, 512, 512), el: (412, 512, 512), params: p)
+        #expect(Set(DoviTestSupport.rawVDR(out)[0]) == [3996])   // -100 EL codes -> -99 residual
+
+        // The same through MMR (chroma): constant 1.1, residual -99.
+        var m = DoviMmrParams(); m.coefShift = 23; m.constant[0] = Int32(1.1 * 8388608.0)
+        var mp = DoviPolynomialParams()
+        mp.numPivots = 2; mp.pivots[1] = 1023
+        mp.method[0] = DoviMapping.mmr.rawValue; mp.order[0] = 1; mp.coefShift[0] = 23
+        p.polyCr = mp; p.mmrCr = m
+        let c = try Self.composeConstant(composer, bl: (512, 512, 512), el: (512, 512, 412), params: p)
+        #expect(Set(DoviTestSupport.rawVDR(c)[2]) == [3996])
+    }
 }

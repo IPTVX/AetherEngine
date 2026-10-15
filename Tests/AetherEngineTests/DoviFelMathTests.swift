@@ -164,18 +164,19 @@ struct DoviFelMathTests {
         #expect(worst <= 1.0, "worst deviation \(worst) VDR codes")
     }
 
-    // MARK: - N3: prediction overshoot survives until the residual is added
+    // MARK: - N3: prediction overshoot is capped before the residual is added
 
-    @Test("N3: a prediction above the VDR range keeps its overshoot until the residual is added")
-    func predictionOvershootKeptBeforeResidual() throws {
+    @Test("N3: a prediction above the VDR range is capped at vdr_max before the residual is added")
+    func predictionOvershootCappedBeforeResidual() throws {
         let composer = try #require(DoviFelComposer())
         // Prediction 1.02 -> 4178 12-bit codes (above vdr_max 4095); EL 312 -> r = -200 -> (399 * 2048) >> 12 = 199 -> -199.
-        // Clamping the prediction first would give 4095 - 199 = 3896; adding first gives 4178 - 199 = 3979.
+        // DoViBaker caps the mapping result at 0xffff before the residual (`polynompialMapping` returns uint16_t):
+        // (65535 - 3192 + 8) >> 4 = 3896, which is 4095 - 199. Adding first would give 4178 - 199 = 3979.
         var p = Self.rawParams(residual: true)
         p.polyY = Self.polynomial(1.02, order: 0)
         p.nlqY = DoviGpuEdgeCaseTests.nlq(vdrInMax: 4095)
         let out = try DoviGpuEdgeCaseTests.composeConstant(composer, bl: (512, 512, 512), el: (312, 512, 512), params: p)
-        #expect(Set(DoviTestSupport.rawVDR(out)[0]) == [3979])
+        #expect(Set(DoviTestSupport.rawVDR(out)[0]) == [3896])
     }
 
     // MARK: - D2: chroma MMR on a real RPU
