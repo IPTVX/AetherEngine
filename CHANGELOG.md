@@ -53,6 +53,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A TrueHD track started or switched to mid-stream is no longer reported as a dead decoder** (#786,
+  thanks @ijuniorfu). TrueHD and MLP decode only from a major sync, so after a start, seek or track
+  switch past the opening the decoder skips up to about a hundred 40-frame access units before its
+  first frame. The channel bridge judged its decoder dead after 64 silent packets, about 53 ms of
+  TrueHD, so `AudioBridge` raised AE#396 / AE#641 and the session went to `.error`
+  (`.audioBridgeProducedNoOutput`) while it played, ignoring seeks after it. For these two codecs the
+  bound is now 1200 packets (one second of source), the bound `SpatialAudioBridge` already used for
+  the same wait; every other source keeps 64.
+
 - **Software VOD exposes retained cache ranges to host timelines.** `residentRanges` now covers
   compressed video packets together with the selected audio stream, including retained history,
   gaps and disk eviction. Cached seeks keep the same spans; cold seeks and teardown clear them.
