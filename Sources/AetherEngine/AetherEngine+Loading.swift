@@ -2293,7 +2293,7 @@ extension AetherEngine {
         let sideTracks = session.companionAudioTracks
         if !sideTracks.isEmpty {
             audioTracks = sideTracks
-            applyConfirmedAtmos()   // #214 follow-up: a whole-list swap must not drop confirmed JOC
+            applyConfirmedTrackFlags()   // #214 follow-up: a whole-list swap must not drop confirmed JOC
         }
         let active = session.activeAudioSourceStreamIndex
         let resolved: Int? = active >= 0 ? Int(active) : nil
@@ -2305,6 +2305,9 @@ extension AetherEngine {
                 category: .engine
             )
             activeAudioTrackIndex = resolved
+        }
+        if session.audioIsConfirmedDTSX, active >= 0 {
+            recordConfirmedDTSX(streamIndex: active)
         }
     }
 
@@ -2736,7 +2739,7 @@ extension AetherEngine {
             // not reconcile tracks post-load, needs the probe-derived lists re-applied here.
             if targetSoftwarePath {
                 audioTracks = reopenedAudioTracks
-                applyConfirmedAtmos()   // #214 follow-up: a title switch re-applies probe lists
+                applyConfirmedTrackFlags()   // #214 follow-up: a title switch re-applies probe lists
                 subtitleTracks = reopenedSubtitleTracks
             }
         } else {
