@@ -238,6 +238,15 @@ cleanup uses session leases without following symlinks or deleting live stores.
 If creating the store fails, the original direct playback loop remains available.
 Runtime cache corruption is a reported playback failure, not silently skipped data.
 
+On tvOS the same records live in purgeable memory instead
+(`SoftwarePacketMemoryFIFO`, bounds in `SoftwarePlaybackHost.memoryPacketStoreBudget`):
+a 96 MB forward window, and up to 128 MB of played history kept volatile, so the
+kernel may reclaim it under pressure and a seek into reclaimed history is a normal
+cache miss. On an Apple TV 4K the disk store's appends took 100 to 600 ms while a
+download ran, the demux thread stalled behind them, and video it had already
+parked reached the decoder late; AVPlayer keeps its progressive-download cache in
+memory on tvOS too. No session files and no disk retention claim are made there.
+
 The cache frontier is the intersection of selected audio and video presentation
 coverage containing the playhead. Unknown intervals remain unknown; byte counts
 are not converted to guessed seconds. H.264 and HEVC use a bounded presentation
@@ -407,6 +416,9 @@ Sources/AetherEngine/
 ├── Decoder/
 │   ├── A53ReorderBuffer.swift               Decode-to-presentation reorder for SEI caption groups (#131)
 │   ├── A53SEIParser.swift                   A53/GA94 cc_data extraction from H.264/HEVC SEI NALs (#131)
+│   ├── DualLayerPictureAlignment.swift      SW FEL path (not routed yet): pairs each EL picture with the base picture of the same display slot (POC), falling back to access-unit pairing (#702)
+│   ├── FrameSideDataRing.swift              SW FEL path (not routed yet): fixed ring of per-frame RPU parameters and display metadata keyed by timestamp (#702)
+│   ├── OrderedDelivery.swift                SW FEL path (not routed yet): hands composed frames from the Metal completion queue to the renderer in decode order, with an epoch for seeks and a stall guard (#702)
 │   ├── CCDataParser.swift                   Parses the bare cc_data triplet stream from a demuxable CEA-608 caption track (#77)
 │   ├── CEA608Decoder.swift                  In-house CEA-608 line-21 decoder (field-1 / CC1), validated against FFmpeg ccaption_dec.c (#77)
 │   ├── DeinterlaceFilter.swift              SW path: persistent bwdif / yadif libavfilter graph, engages on the first interlaced frame
@@ -414,6 +426,7 @@ Sources/AetherEngine/
 │   ├── InterlaceProbe.swift                 Decodes a sample and applies the deinterlacer's own engagement predicate, so a declared field order that no frame backs up (PsF) stops costing a SW decode (#232)
 │   ├── VideoRoutingPolicy.swift             Pure codec-and-field-order dispatch rule: AV1 gated on HW, VP9/VP8/MPEG4/MPEG2/VC1 always SW, interlaced H.264 SW so bwdif can deinterlace (#107, verified against decoded frames on VOD, #232), plus a second-stage gate routing H.264 High 4:2:2/4:4:4/10 + HEVC Rext to SW where VideoToolbox has no HW decoder (#2)
 │   ├── HardwareVideoDecoder.swift           SW path: VideoToolbox HW HEVC / AV1 decoder for sources routed away from AVPlayer
+│   ├── DualLayerVideoDecoder.swift          SW path: Dolby Vision Profile 7 FEL. Two HardwareVideoDecoders (a base layer, typically 4K, and an enhancement layer, typically 1080p) paired by HEVC picture order with the packet's RPU, composed on Metal by `DoviFelComposer`, delivered in decode order with the Profile 8.1 RPU attached per frame; see [dolby-vision-fel.md](dolby-vision-fel.md)
 │   ├── SoftwareVideoDecoder.swift           SW path: libavcodec/dav1d → CVPixelBuffer (NV12 / P010), HDR10+ side data
 │   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only); decodes several streams of one container in a single pass (#266)
 │   ├── VideoDecoderTypes.swift              DecodedFrameHandler typealias + VideoDecoderError
@@ -540,8 +553,18 @@ Sources/AetherEngine/
 │   ├── HLSVideoEngine+LiveReopen.swift      Native path: live source-loss recovery (capped-backoff reopen on the same timeline); VOD backpressure-wedge re-anchor + consumer re-engage nudge, which re-reads the rendered position at nudge time so the zero-tolerance seek never lands behind the on-screen frame (#115)
 │   ├── CodecRoutePolicy.swift               Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE)
 │   ├── AnnexBSampleConverter.swift          Native path: Annex-B HEVC samples rewritten to length-prefixed NALs by the session muxer, in-band VPS/SPS/PPS kept. movenc's own conversion under `hvc1` drops them, so a stream that sends a new PPS mid-title stopped decoding at the change (PR #703)
-│   ├── DoviRpuConverter.swift               Native path: per-packet DV Profile 7 → 8.1 RPU conversion via libdovi (NAL surgery: convert type-62 RPU, drop type-63 EL)
+│   ├── DoviRpuConverter.swift               libdovi RPU surgery for both routes. Native path: per-packet Profile 7 → 8.1 rewrite (convert type-62 RPU, drop type-63 EL). SW FEL path: `separateDualLayers` also lifts the EL into its own packet and returns the composer's reshaping parameters plus the 8.1 RPU attached as display metadata
 │   ├── DoviRpuConverter+Probe.swift         Diagnostic DV-conversion probe (`doviConvertProbe` / `DoviConvertProbeResult`), backs `aetherctl dovitest`
+│   ├── HEVCPictureOrderCount.swift          H.265 picture order count (8.3.1) of one layer from parameter sets and first slice headers, no decoding; nil for anything it cannot follow (#702)
+│   ├── DoviDisplayMetadata.swift            SW FEL path: sets `DolbyVisionRPUData` (the Profile 8.1 RPU minus its NAL header) and `DolbyCompatibilityID` (the CFString "1", never a number) on every emitted buffer, or clears both; tvOS consumes them in backboardd
+│   ├── DoviDisplayMetadataDebug.swift       DEBUG-only pin test: substitutes a captured RPU on a duty cycle, the on-device consumption test
+│   ├── DoviRpuSurvey.swift                  L1 / L2 display-metadata survey over a title's RPUs (no decode, no GPU); backs `aetherctl dvsurvey`
+│   ├── AetherEngine+FelProbe.swift          FEL decode probe backing `aetherctl feltest`, and the `--cycle-el` residual switch
+│   ├── AetherEngine+DolbyVisionTest.swift   DEBUG-only `@_spi(Diagnostics)` hook (not host API) that arms the pin test from a debug menu or `aetherctl play --dv-pin`
+│   ├── Metal/
+│   │   ├── DoviFelComposer.swift            BL + EL + RPU composition: runtime-compiled pipelines, pooled P010 output, `composeAsync` bounded at `maxFramesInFlight` with completions on its own serial queue; RPU → `DoviMetalParams` parsing
+│   │   ├── DoviShaderSource.swift           Luma / chroma compose kernels (reshaping, inverse NLQ, bilinear EL upsampling, ordered dither) and the ABI layout probe, compiled at runtime
+│   │   └── DoviMetalParams.swift            Swift mirror of the kernel parameter structs and their byte-exact serializer
 │   ├── Issue65LivelockBreakers.swift        Pure backpressure-wedge detection (`BackpressureWedgeDetector`) breaking the VOD HLS scrub-burst livelock (#65); `seekIsWedged` starvation check + `SeekResumeGuard` single-resume latch for the deadline-bounded seek
 │   ├── Issue99MuxerFailureRevive.swift      Bounded revive for a VOD pump that died with `muxerFailed` (#99): the first cut firing before any bridged audio reached the muxer (dec3 box) no longer ends the session
 │   ├── SlowServeSignal.swift                One-shot slow-serve timer arming the server's early chunked header (keeps TTFB under AVPlayer's ~3.5 s -12889 window, #93 round 3)
@@ -588,7 +611,7 @@ The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [d
 | Package | License | Purpose |
 | --- | --- | --- |
 | [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-2.1-or-later | Slim FFmpeg 8.1 (avcodec / avformat / avutil / swresample / swscale / avfilter + zimg) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010. avfilter ships a trimmed filter set: zscale + tonemap + colorspace (HDR → SDR still extraction), bwdif + yadif + yadif_videotoolbox + hwupload (SW + GPU deinterlacing). Bundles libzvbi for the DVB teletext decoder (#107). Shipped as dynamically linked frameworks, no GPL components |
-| [LibDovi](https://github.com/superuser404notfound/LibDovi) | MIT / Apache-2.0 | libdovi (the `dolby_vision` crate's C API) for live Dolby Vision Profile 7 to single-layer 8.1 RPU conversion (`dovi_convert_rpu_with_mode`, mode 2), so the Apple TV engages real DV on dual-layer UHD-BD remuxes instead of plain HDR10. Prebuilt xcframework, no Rust at the consumer's build time |
+| [LibDovi](https://github.com/superuser404notfound/LibDovi) | MIT / Apache-2.0 | libdovi (the `dolby_vision` crate's C API) for live Dolby Vision Profile 7 to single-layer 8.1 RPU conversion (`dovi_convert_rpu_with_mode`, mode 2), so the Apple TV engages real DV on dual-layer UHD-BD remuxes instead of plain HDR10. The software FEL path uses the same library to read the reshaping and NLQ parameters for the Metal composer and to produce the per-frame 8.1 RPU it attaches as display metadata. Prebuilt xcframework, no Rust at the consumer's build time |
 | [SMBClient](https://github.com/kishikawakatsumi/SMBClient) | MIT | Pure-Swift SMB2 client over `NWConnection`, backing the opt-in `AetherEngineSMB` product only (never linked by the core engine). NTLMv2 / guest, SMB 2.0.2 / 2.1. Replaced AMSMB2/libsmb2, which `EPERM`s on tvOS / iOS |
 | VideoToolbox | System | Native path video decode (HW where available, Apple's bundled SW dav1d on iOS / macOS) |
 | AVFoundation | System | AVPlayer + AVDisplayManager (native path); AVSampleBufferDisplayLayer + AVSampleBufferRenderSynchronizer (SW path) |

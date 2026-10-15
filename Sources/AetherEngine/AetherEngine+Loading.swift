@@ -1392,6 +1392,7 @@ extension AetherEngine {
         // keyed to the item that loaded it. Installed on the one funnel every attach passes through, so
         // the session's FIRST item is covered as well as every swap: both used to reconstruct the axis
         // from the cache instead, and a reconstruction is only as good as the older of its two samples.
+        host.iFramePlaylistWithheld = { [weak session] in session?.iFrameRenditionWithheld ?? false }
         host.onWillAttachItem = { [weak self] in
             // The host owns this closure, so it reaches back for the host rather than capturing it.
             guard let self, let attaching = self.nativeHost else { return }
@@ -1935,7 +1936,8 @@ extension AetherEngine {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer?,
-        generation: UInt64
+        generation: UInt64,
+        elType: String? = nil
     ) async throws {
         let deinterlaceMode = loadedOptions.deinterlaceMode
         let waitStarted = DispatchTime.now()
@@ -1967,6 +1969,10 @@ extension AetherEngine {
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        host.configuredDVProfile = sourceDVProfile
+        host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
+        host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
+        host.elType = elType ?? sourceElType
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
@@ -2556,13 +2562,15 @@ extension AetherEngine {
                     isLive: loadedOptions.isLive,
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
-                    generation: gen
+                    generation: gen,
+                    elType: sourceElType
                 )
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
                 activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
                 activeVideoDecoder = Self.videoDecoderLabel(
-                    codecID: preservedVideoCodec, isSoftware: true
+                    codecID: preservedVideoCodec,
+                    isSoftware: !(softwareHost?.usesHardwareVideoDecoder ?? false)
                 )
                 // AE#462: the rebuilt host's own resolved index (see the load site).
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(

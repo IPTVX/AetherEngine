@@ -57,9 +57,15 @@ zero). A source is only repaired when every sampled pair is equal, the decode la
 picture order regresses, and the ranks it produces are distinct and fill the sampled window (or a
 decode-order prefix of at least nine pictures fills its own range exactly, which covers a
 hierarchical mini-GOP longer than the reorder delay, #699). Anything
-short of that (variable frame timing, a picture order that does not advance one rank per picture, a
+short of that (a picture order that does not advance one rank per picture, a
 sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
 Reported by @orut34iop; the HEVC case (#699) by @ijuniorfu.
+
+For H.264 only, a changing decode cadence can instead use the original-slot policy described below.
+This fallback requires a progressive IDR head with equal PTS/DTS, a container start/index lead that
+exactly matches the observed reorder head, and a complete, distinct picture-order prefix whose
+timestamps pass the slot policy. It assigns existing slots plus that lead rather than fitting a
+frame rate; DTS, audio and the keyframe index remain unchanged. An ambiguous head stays untouched.
 
 ### Matroska with presentation slots in coding order
 
@@ -104,10 +110,9 @@ offsets. Seeking into that region can produce persistent judder despite normal
 aggregate FPS and sufficient network buffering.
 
 When a healthy origin picture corroborates the container's edit/index lead, the
-demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. One
-bounded, complete IDR-to-IDR progressive sequence is parsed for picture order.
-If every selected packet has valid equal PTS/DTS and its distinct even POC fills
-the complete sequence, a proven permutation assigns its original DTS slots plus
+demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. Progressive
+pictures are parsed as they arrive. Valid equal PTS/DTS and distinct even POC let
+the streaming slot ladder assign original DTS slots plus
 the corroborated presentation lead by display rank. Original DTS, audio and the
 already published keyframe index never move. Actual timestamp slots, rather than
 an average-FPS clock, preserve interval changes and quantization within a sequence.
@@ -115,8 +120,11 @@ an average-FPS clock, preserve interval changes and quantization within a sequen
 The slot a picture needs is a packet away, not a plan away, exactly as in the Matroska
 policy above: a picture coded ahead of its own slot waits the mini-GOP the reorder
 created, so nothing waits for the end of a sequence and no sequence is too long to
-repair. The wait is bounded by the reorder delay the container declares, believed up
-to **16 pictures**, and the packets held behind it by **1024 interleaved packets and
+repair. Backward displacement remains bounded by the declared reorder delay. A forward-coded
+anchor farther ahead needs a bounded, complete decode-prefix proof, as in #700: distinct ranks
+fill a prefix, the backward delay still fits, and the observed slots plus lead pass a dry run.
+Only the measured forward distance is then allowed, limited to **16 pictures**; that proof resets
+at each candidate IDR. The packets held behind it remain bounded by **1024 interleaved packets and
 32 MiB**, which is a ceiling on a container's interleaving rather than on its GOP.
 A candidate sequence has to show its reordering within **64 pictures** before a single
 picture is rewritten.
@@ -127,7 +135,8 @@ not guessed at. **Every refusal hands the held packets back exactly as they arri
 and lets the rest of that sequence stream through, so a shape this policy does not own
 costs the repair and never the session; the next IDR is a fresh candidate. Seek and
 teardown release both unpublished input and pending output. No decoder-route or host-UI
-change is needed. The existing whole-file missing-offset policy above remains separate.
+change is needed. The uniform whole-file policy above is unchanged; its strictly proven
+variable-cadence H.264 fallback reuses this same slot ladder.
 
 See the [partial-composition regression and reproduction](partial-composition-regression.md)
 for generated fixtures, original numeric evidence and verification limits.
@@ -198,7 +207,9 @@ For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationReco
 
 AV1+DV emits a bare `dav1.10.<dvLevel>` primary for Profile 10.0 (DV-only, no base layer to fall back to), and an `av01...` primary plus a supplemental entry for the two cross-compatible profiles: `dav1.10.<dvLevel>/db1p` with `VIDEO-RANGE=PQ` for Profile 10.1 (HDR10-compat base) and `dav1.10.<dvLevel>/db4h` with `VIDEO-RANGE=HLG` for Profile 10.4 (HLG-compat base), on hardware-AV1 hosts. Same split as HEVC: the `dav1` sample entry belongs to the profile without a base layer the way `dvh1` belongs to Profile 5, and a cross-compatible profile carries its base layer's own sample entry so a client that cannot read Dolby Vision still plays it.
 
-**Profile 7** (dual-layer, the common UHD-Blu-ray remux profile) has no decoder on any Apple platform, so the engine converts it to single-layer **Profile 8.1** live during muxing: the RPU of each video packet is rewritten with [libdovi](https://github.com/superuser404notfound/LibDovi) (`dovi_convert_rpu_with_mode`, mode 2, the same transform as `dovi_tool -m 2`), the enhancement-layer NALs are dropped, and the container `dvvC` is set to Profile 8.1. The conversion runs on every display and the result is served exactly as a Profile 8.1 is: on a DV-capable display this means real Dolby Vision (`dvh1.08/db1p` supplemental) instead of the plain HDR10 base, and on a display without Dolby Vision the kept `dvvC` lets AVPlayer tone-map from the RPU rather than from the base layer's static metadata, the way mpv plays Profile 7 without an EL decoder. It used to skip the conversion and strip the record there, which cost every Mac (no per-mode table) and every HDR10 / SDR panel the RPU and shipped the enhancement layer into segments nothing decodes. The conversion is loss-free relative to what Apple could show before (the enhancement layer was never decodable on Apple hardware). MEL and FEL sources are both handled; a Full Enhancement Layer (FEL) source is logged, since its enhancement layer, which a native Profile 7 player would fold in, is discarded here while a Minimal (MEL) source loses nothing. Any per-packet conversion failure drops that RPU so the frame degrades to the clean HDR10 base, rather than shipping a Profile 7 RPU inside a container already declared 8.1. A session that converts publishes `dolbyVisionConversion = .profile7ToProfile81`, so a host label can name the profile actually served next to `sourceDVProfile`.
+**Profile 7** (dual-layer, the common UHD-Blu-ray remux profile) is handled according to `LoadOptions.preferDualLayerDolbyVision` (default `false`: dual-layer composition is opt-in) and `LoadOptions.dolbyVisionHandling`:
+- **Dual-layer composition (`preferDualLayerDolbyVision = true`, `dolbyVisionHandling` `.automatic`, `el_type` FEL, VideoToolbox HEVC hardware decode)**: Profile 7 routes through `SoftwarePlaybackHost` + `DualLayerVideoDecoder`. Each packet is split into the 4K base layer (BL), the enhancement layer (EL, typically 1080p, carried in `unspec63` NAL units) and the RPU (`unspec62`). Both layers decode in their own `VTDecompressionSession`; `DoviFelComposer` applies the RPU's reshaping (polynomial luma, MMR chroma) and the inverse-NLQ residual from the upsampled EL at 12-bit precision, then an ordered 8×8 Bayer dither (inverted on odd frames) takes the result to 10-bit P010 for `AVSampleBufferDisplayLayer`. The composed frame also carries the RPU converted to Profile 8.1 as a `DolbyVisionRPUData` attachment, with `DolbyCompatibilityID` set to the string `"1"`; tvOS 27 reads it on every frame and applies Dolby Vision display management, so L1 / L2 dynamic metadata reaches the panel. A MEL source never reaches the dual-layer decoder: the route is FEL only, and MEL (nothing to compose) keeps the native route below. The route needs a seekable VOD and is logged once per Profile 7 load (`DV P7 dual-layer route: taken` / `not taken (<reason>)`). It does not consult the display: on a display that does not take Dolby Vision the route is still taken and the composed picture is presented with its attached metadata, tvOS deciding how; the native route would have played the converted Profile 8.1 there. The software host also plays an E-AC-3 Atmos track as its channel-bed core (no objects). The stream is classified by `el_type` alone; an RPU that sets `disable_residual_flag` only switches the residual off for that frame and never changes the classification. See [dolby-vision-fel.md](dolby-vision-fel.md) for the design.
+- **Single-layer conversion (the default: `preferDualLayerDolbyVision = false`, or no VideoToolbox HEVC hardware decode)**: No Apple platform has a Profile 7 decoder, so the engine converts the stream to single-layer **Profile 8.1** live during muxing: the RPU of each video packet is rewritten with [libdovi](https://github.com/superuser404notfound/LibDovi) (`dovi_convert_rpu_with_mode`, mode 2, the same transform as `dovi_tool -m 2`), the enhancement-layer NALs are dropped, and the container `dvvC` is set to Profile 8.1. The conversion runs on every display and the result is served exactly as a Profile 8.1 is: on a DV-capable display this means real Dolby Vision (`dvh1.08/db1p` supplemental) instead of the plain HDR10 base, and on a display without Dolby Vision the kept `dvvC` lets AVPlayer tone-map from the RPU rather than from the base layer's static metadata, the way mpv plays Profile 7 without an EL decoder. It used to skip the conversion and strip the record there, which cost every Mac (no per-mode table) and every HDR10 / SDR panel the RPU and shipped the enhancement layer into segments nothing decodes. The conversion is loss-free relative to what Apple could show before (the enhancement layer was never decodable on Apple hardware). MEL and FEL sources are both handled; a Full Enhancement Layer (FEL) source is logged, since its enhancement layer, which a native Profile 7 player would fold in, is discarded on this route (the dual-layer route above keeps it) while a Minimal (MEL) source loses nothing. Any per-packet conversion failure drops that RPU so the frame degrades to the clean HDR10 base, rather than shipping a Profile 7 RPU inside a container already declared 8.1. A session that converts publishes `dolbyVisionConversion = .profile7ToProfile81`, so a host label can name the profile actually served next to `sourceDVProfile`.
 
 **SDR-compatible-base profiles** (HEVC **Profile 8.2**, AV1 **Profile 10.2**) carry a Rec.709 base layer that no Apple platform has a DV decoder for. The engine strips the `dvcC` / DV config and plays the base as plain `hvc1` / `av01` (logging `not DV-routable, playing Rec.709 base`); there is no Dolby Vision on any display for these, on DV panels and SDR panels alike.
 
@@ -238,7 +249,7 @@ The label can also be taken back from the item itself, where the platform has no
 
 | | |
 | --- | --- |
-| Stream-copy (lossless into fMP4) | AAC-LC, AC3, EAC3, FLAC, ALAC. HE-AAC / HE-AACv2 stream-copy when the source carries an AudioSpecificConfig (any movie container) and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR). LATM/LOAS-framed AAC (DVB broadcast framing) always bridges |
+| Stream-copy (lossless into fMP4) | AAC-LC, AC3, EAC3, FLAC, ALAC. HE-AAC / HE-AACv2 stream-copy when the source carries an AudioSpecificConfig (any movie container) and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR). LATM/LOAS-framed AAC (DVB broadcast framing) always bridges. FLAC whose `STREAMINFO` `min_blocksize` is below 192 bridges too (AE#764): CoreMedia drops a track that declares less, and hangs on frames smaller than the field claims, so such a stream cannot be copied (the bridge is bit-perfect for FLAC). The same field sends an audio-only FLAC to the FFmpeg host instead of AVPlayer |
 | Bridged (`AudioBridge`) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM (raw shapes plus G.711 A-law / mu-law), WMA (Standard, Pro, Lossless, Voice), and the Flash tail Nellymoser Asao / ADPCM-SWF / Speex: decoded to PCM and re-encoded |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` preserved through the wrapper |
 
@@ -524,6 +535,8 @@ A remote `.iso` / `.img` / `.udf` needs an origin that honours HTTP `Range`, bec
 
 **Blu-ray folders.** A disc that was ripped as a `BDMV` folder rather than an image plays the same way through `MediaSource.custom` with a `DiscDirectoryReader`: the host lists the folder's files (path relative to the disc root, and size) and opens any one of them on request. `HTTPDiscDirectoryReader` is the ready-made one, with one URL per file, so an origin serves the disc as plain files over `Range` and never remuxes it. Recognition is the image path with files in place of UDF extents: the same bounded playlist scan and title selection, the selected title's `.m2ts` files concatenated in playlist order as one MPEG-TS, the same multi-clip timeline, chapters and STN track languages, and the same seek by the clips' EP maps when the folder carries `BDMV/CLIPINF`. A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The concatenating reader opens a clip's file when the read reaches it and keeps at most three open. A controlled probe (`limits` or `cancellation`) does not recognize a folder yet; an uncontrolled `probe(source:)` and `load(source:)` do.
 
+**DVD-Video folders.** A listing that holds `VIDEO_TS/` files and no playable Blu-ray title is read as DVD-Video instead, by the same title-set code as an image: the selected title set's VOBs are concatenated in part order, which is the same run of bytes as their sectors on a disc, so the cell timeline and the VTS time map apply unchanged. `preferredPlaylist` does not apply.
+
 **Title selection.** `engine.discTitles` (`@Published [TitleInfo]`) lists the disc's titles (id, name, duration, chapter count) and `engine.selectedDiscTitle` is the active one; `engine.selectTitle(id:)` switches title, rebuilding the pipeline from the new title's head. The selection survives audio-track switches and background-resume reloads, and a fresh `load` defaults to the main title (an out-of-range id clamps to it). Blu-ray enumerates all playlists; a DVD enumerates its title sets (the VMGI TT_SRPT title list, resolved whole-VTS, with the duration read from each VTS's main program chain; per-cell / episodic splitting is deferred).
 
 **Chapters.** `engine.discChapters` (`@Published [ChapterInfo]`) carries the selected title's chapters; `engine.selectChapter(id:)` seeks to one (a thin `seek` wrapper, no pipeline rebuild). For Blu-ray they come from the playlist's PlayListMark entries (entry marks only; link points dropped), each mark's timestamp on its clip's STC offset by the clip's in_time and the cumulative duration of preceding play items. For DVD they come from the main program chain's program map plus the cumulative cell playback times. Chapter starts are title-relative (0-based); `selectChapter` adds the title's content-start base (the native playlist shift, or the software path's container start PTS) so the seek lands on the source-PTS playback axis.
@@ -540,7 +553,7 @@ A remote `.iso` / `.img` / `.udf` needs an origin that honours HTTP `Range`, bec
 
 **`cancel()` unblocks, it does not invalidate.** Its whole job is to wake a `read` that is parked so teardown does not hang; a memory or file reader leaves it at the default no-op. A reader the engine may rebuild in place must be able to serve again immediately afterwards, because the rebuild reuses it. Reading `cancel()` as terminal (the way a socket's in-flight-request cancel is terminal) is the difference between a rebuilt session and a dead one: the reopen fails on its first read and the session lands in `.error` carrying libavformat's `Operation not permitted`. What that death LOOKS like is the reader's own convention, so one host defect has two signatures: a latched reader whose read returns a negative value produces the `Operation not permitted` above, while one that returns `0` is mapped to `AVERROR_EOF` and the session ENDS instead of failing, which on a live source is a stream that was never supposed to have an end (cmcpherson274). The engine cancels a reader it intends to reuse exactly once, before the successor opens.
 
-**In-place rebuilds reuse the reader.** `reloadAtCurrentPosition()` and `reloadAtCurrentPosition(applying:)`, an audio-track switch, a disc-title switch and a background return all tear the pipeline down and reopen on the retained reader instead of reopening a URL, so a custom source gets the same session-preserving rebuild a URL source does. A reader that reports itself non-seekable is refused instead (`SessionReloadRefusal.customSourceNotSeekable`), since the rebuild cannot reposition it.
+**In-place rebuilds reuse the reader.** `reloadAtCurrentPosition()` and `reloadAtCurrentPosition(applying:)`, an audio-track switch, a disc-title switch and a background return all tear the pipeline down and reopen on the retained reader instead of reopening a URL, so a custom source gets the same session-preserving rebuild a URL source does (except that the Profile 7 dual-layer route is decided by `load()`: `reloadAtCurrentPosition(applying:)` refuses a `preferDualLayerDolbyVision` change (or a `dolbyVisionHandling` change while the preference is on) on a custom Profile 7 source with `SessionReloadRefusal.dualLayerRouteNeedsFreshLoad`). A reader that reports itself non-seekable is refused instead (`SessionReloadRefusal.customSourceNotSeekable`), since the rebuild cannot reposition it.
 
 **Where the reopen starts depends on whether the source is live.** A fresh `AVIOContext` always starts its byte axis at 0, so the reader's cursor and that axis have to agree, and there are two ways to make them:
 

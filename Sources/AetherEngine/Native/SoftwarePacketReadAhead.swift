@@ -28,7 +28,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// Never acquired by a main-thread API. Serializes reset with append/pop, including the
     /// generation check, so an old consumer cannot pop and discard the first NEW-generation packet.
     private let operations = NSLock()
-    private let fifo: SoftwarePacketDiskFIFO
+    private let fifo: any SoftwarePacketStore
     private let readSource: @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?
     private let beforeConsumerOperation: (@Sendable () -> Void)?
     private let video: Stream
@@ -75,6 +75,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var consumedVideoSeconds: Double?
     private var videoCoverage: SoftwarePacketCoverage
     private var audioCoverage: SoftwarePacketCoverage
+    /// Newest audio timestamp stored this epoch, for duration-less packets. See `insertAudioCoverageLocked`.
+    private var lastAudioPTS: Int64?
     private var presentationCoverage: SoftwareVideoPacketCoverage?
     private struct Keyframe {
         let seconds: Double
@@ -85,7 +87,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
-         initialSourceClock: Double, fifo: SoftwarePacketDiskFIFO,
+         initialSourceClock: Double, fifo: any SoftwarePacketStore,
          videoReorderDepth: Int? = nil,
          coverageRangeCap: Int = 4096,
          beforeConsumerOperation: (@Sendable () -> Void)? = nil,
@@ -404,6 +406,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         ended = false; failure = nil
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
         storedVideoSeconds = nil; consumedVideoSeconds = nil
+        lastAudioPTS = nil
         keyframes.removeAll(keepingCapacity: true)
     }
 
@@ -520,7 +523,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                             if audioCoverage.isFull, let tick = playheadTick(audio) {
                                 audioCoverage.prune(before: tick)
                             }
-                            audioCoverage.insert(pts: packet.pts, duration: packet.duration)
+                            insertAudioCoverageLocked(pts: packet.pts, duration: packet.duration, stream: audio)
                         }
                     }
                     condition.broadcast()
@@ -529,6 +532,29 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             }
             operations.unlock()
         } catch { recordFailure(error, token: token) }
+    }
+
+    /// Widest gap between two duration-less audio packets that still counts as contiguous. Real
+    /// frame spacing is 0.8 ms (TrueHD) to ~100 ms (long AAC/Vorbis frames); a larger gap is a hole.
+    static let maxAudioSuccessorGapSeconds = 0.5
+
+    /// Audio arrives in presentation order, so a packet without a duration still proves coverage up
+    /// to the next packet's timestamp. Matroska TrueHD is the case that needs it: no packet carries
+    /// a duration and the millisecond timestamps repeat (0.83 ms frames), so the duration model
+    /// rejected every packet, the A/V frontier stayed nil, and no seek ever hit the cache: each one,
+    /// even back to a spot just played, refetched from the source.
+    private func insertAudioCoverageLocked(pts: Int64, duration: Int64, stream: Stream) {
+        guard pts != Int64.min else { return }
+        let previous = lastAudioPTS
+        if previous.map({ pts > $0 }) ?? true { lastAudioPTS = pts }
+        if duration > 0 {
+            audioCoverage.insert(pts: pts, duration: duration)
+            return
+        }
+        guard let previous, pts > previous, stream.numerator > 0, stream.denominator > 0,
+              Double(pts - previous) * Double(stream.numerator) / Double(stream.denominator)
+                <= Self.maxAudioSuccessorGapSeconds else { return }
+        audioCoverage.insert(pts: previous, duration: pts - previous)
     }
 
     private func shouldParkLocked() -> Bool {
