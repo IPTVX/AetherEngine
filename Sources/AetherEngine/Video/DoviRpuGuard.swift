@@ -219,7 +219,7 @@ enum DoviRpuGuard {
         if !compressed {   // fixed fields of VdrDmData::parse
             guard r.pos + 509 <= r.end else { return false }
             r.pos += 509
-        }   // fixed fields of VdrDmData::parse
+        }
         for section in 0..<2 {
             if section == 1 && r.end - r.pos < 56 { return false }   // DM_DATA_PAYLOAD2_MIN_BITS
             guard let count = r.ue() else { return false }
