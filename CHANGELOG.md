@@ -155,6 +155,16 @@ the public-API contract.
   with the status in `underlyingCode`, or `liveSourceUnavailable` when the playlist could not be
   reached.
 
+- **A live channel on the HLS ingest follows a wireless AirPlay route change.** The ingest hands the
+  pipeline a forward-only custom source, and the route change rebuilt the session to serve it on the
+  device's LAN address. That rebuild is refused for such a source (#526) and the refusal was dropped,
+  so the receiver stayed on 127.0.0.1, which it cannot reach, and played nothing while the sender
+  reported external playback. The route change now swaps the player's item onto the receiver's
+  address (and back onto the loopback when the receiver lets go), as it already did for a sequential
+  origin. The session, its ingest and its segment cache carry on, so the source is asked for nothing
+  again; the swapped item rejoins its live playlist at the player's join point, as a live reload does
+  (`AirPlayPlaylistDecision.routeChangeHop`).
+
 ## [7.36.0] - 2026-10-13
 
 ### Added

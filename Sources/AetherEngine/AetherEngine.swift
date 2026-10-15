@@ -6956,28 +6956,45 @@ public final class AetherEngine: ObservableObject {
         Task { try? await reloadAtCurrentPosition() }
     }
 
-    /// A sequential origin crosses an AirPlay edge by swapping the item, not by rebuilding the session.
-    /// A rebuild reopens the source, and such a source can only be read again from byte 0: the reload
-    /// resumed at 0 instead of the playhead and then sat seeking while the producer re-read the prefix.
-    /// Nothing about the session has to change for the hop anyway. The server already listens on every
-    /// interface and keeps every segment it cut, so only the address AVPlayer is handed differs (the LAN
-    /// IP and the receiver's playlist, or the loopback again when the receiver lets go).
+    /// A session that cannot be reopened where it is crosses an AirPlay edge by swapping the item, not by
+    /// rebuilding the session (`AirPlayPlaylistDecision.routeChangeHop`). Nothing about the session has to
+    /// change for the hop. The server already listens on every interface and keeps every segment it cut,
+    /// so only the address AVPlayer is handed differs (the LAN IP and the receiver's playlist, or the
+    /// loopback again when the receiver lets go).
+    ///
+    /// - A sequential origin can only be read again from byte 0: the reload resumed at 0 instead of the
+    ///   playhead and then sat seeking while the producer re-read the prefix. It resumes at the playhead.
+    /// - A live session on a forward-only custom source (the live HLS ingest) cannot be rebuilt at all, so
+    ///   the reload was refused (#526) and the receiver stayed on an address it cannot reach. It rejoins its
+    ///   own live playlist the way a live reload does (`LiveReloadPolicy`): the player picks the join point.
     @MainActor
     private func swapsItemForAirPlayEdge() -> Bool {
-        guard loadedOptions.sequentialOrigin, !loadedOptions.isLive, !loadedOptions.nativeRemoteHLS,
+        let hop = AirPlayPlaylistDecision.routeChangeHop(
+            sequentialOrigin: loadedOptions.sequentialOrigin,
+            isLive: loadedOptions.isLive,
+            isCustomSource: isCustomSource,
+            customSourceIsSeekable: customSourceIsSeekable)
+        guard hop == .swapItem, !loadedOptions.nativeRemoteHLS,
               let host = nativeHost, let session = nativeVideoSession,
               let loopback = session.servingMasterPlaylist
                 ? session.masterPlaylistURL : session.mediaPlaylistURL else { return false }
-        let position = currentTime
+        // Live: no position, as for any live rejoin (a playhead taken here would be on the outgoing
+        // item's axis). On demand: the playhead, as the sequential hop always did.
+        let position: Double? = loadedOptions.isLive ? nil : currentTime
         let served = airPlayAdjustedPlayback(url: loopback, session: session)
         nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
+        let reason = loadedOptions.isLive
+            ? "a live session on a forward-only source cannot be rebuilt, #526"
+            : "the source cannot be reopened past byte 0"
         EngineLog.emit(
-            "[AirPlay] external playback \(airPlayActive ? "active (wireless)" : "ended") on a sequential "
-            + "origin -> item swap to \(served.url.absoluteString) at \(String(format: "%.2f", position))s "
-            + "(the source cannot be reopened past byte 0)",
+            "[AirPlay] external playback \(airPlayActive ? "active (wireless)" : "ended") -> item swap to "
+            + "\(served.url.absoluteString) "
+            + (position.map { "at \(String(format: "%.2f", $0))s" } ?? "at the player's live join point")
+            + " (\(reason))",
             category: .engine)
-        host.swapItem(url: served.url, startPosition: position)
-        armAirPlayProgressWatchdog(gen: loadGeneration, position: position)
+        host.swapItem(url: served.url, startPosition: position,
+                      skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: loadedOptions.isLive, isRejoin: true))
+        armAirPlayProgressWatchdog(gen: loadGeneration, position: position ?? 0)
         return true
     }
 
