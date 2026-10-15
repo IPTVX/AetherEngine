@@ -10,7 +10,7 @@ import AetherLibavcodec
 /// the enhancement decoder opens. A per-frame `disable_residual_flag` is a kernel flag
 /// (`DoviComposerFlags.disableResidual`, honoured by the composer) and must never shut
 /// off the enhancement layer for the rest of the session.
-@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(1)))
+@Suite(.serialized, .offCooperativePool, .timeLimit(.minutes(1)))
 struct DualLayerStreamClassificationTests {
 
     // MARK: - Fixtures

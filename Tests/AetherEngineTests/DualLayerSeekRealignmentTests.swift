@@ -11,7 +11,7 @@ import AetherLibavformat
 /// the side-data ring, and a seek lands on timestamps the pre-seek frames may already have used (a
 /// backward seek replays the same PTS keys). These tests drive the frame handlers with tagged
 /// synthetic buffers and check what the composer was asked to pair and what reached `onFrame`.
-@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(2)))
+@Suite(.serialized, .offCooperativePool, .timeLimit(.minutes(2)))
 struct DualLayerSeekRealignmentTests {
 
     // MARK: - Fixtures

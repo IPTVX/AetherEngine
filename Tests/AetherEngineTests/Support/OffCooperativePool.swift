@@ -34,7 +34,8 @@ extension Trait where Self == OffCooperativePoolTrait {
 /// `BlockingExecutor` adds a thread per blocked job, so on their own they all ran at once and
 /// took the 3-core runner from the timing tests beside them. One lane keeps them to one core.
 /// The time a case waits for the lane counts against its `.timeLimit`, so a suite of short
-/// deadlock watchdogs (`DoviComposeAsyncTests`) takes the plain trait instead.
+/// deadlock watchdogs (`DoviComposeAsyncTests`, the time-limited dual-layer decoder suites) takes
+/// the plain trait instead.
 struct OneLaneOffCooperativePoolTrait: SuiteTrait, TestTrait, TestScoping {
     var isRecursive: Bool { true }
 

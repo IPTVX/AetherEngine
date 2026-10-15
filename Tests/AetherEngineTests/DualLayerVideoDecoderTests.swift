@@ -15,7 +15,7 @@ import Dovi
 /// asynchronously. These tests drive the two frame handlers directly with synthetic P010 buffers,
 /// using `primeForTesting` / `seedRPUForTesting` to stand in for what `decode(packet:)` sets up, so
 /// the pairing, ordering, metadata and flush behaviour is covered without a real stream.
-@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(2)))
+@Suite(.serialized, .offCooperativePool, .timeLimit(.minutes(2)))
 struct DualLayerVideoDecoderTests {
 
     // MARK: - Fixtures
