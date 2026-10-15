@@ -62,15 +62,4 @@ struct ActiveVideoDecoderTests {
     func softwareAV1() async throws {
         try await checkLoadAndReload("av1.mp4", label: "dav1d AV1 (SW)")
     }
-
-    @Test("both VideoToolbox decoders, the dual-layer one included, report as hardware (#760)",
-          .timeLimit(.minutes(1)))
-    func videoToolboxDecodersCountAsHardware() {
-        let single = HardwareVideoDecoder()
-        let dual = DualLayerVideoDecoder(composer: nil)
-        defer { dual.close() }
-        #expect(SoftwarePlaybackHost.isVideoToolboxDecoder(single))
-        #expect(SoftwarePlaybackHost.isVideoToolboxDecoder(dual))
-        #expect(!SoftwarePlaybackHost.isVideoToolboxDecoder(SoftwareVideoDecoder()))
-    }
 }

@@ -35,7 +35,6 @@ the public-API contract.
 
 ### Fixed
 
-- **The Profile 7 dual-layer route reports VideoToolbox as its decoder** (#760). `activeVideoDecoder` and the software/hardware flag counted the single-layer VideoToolbox decoder only, so a title on the FEL route was labelled as software decoded.
 - **A failed `CMBlockBuffer` creation around a packet's payload no longer releases the packet reference twice** when CoreMedia has already freed the block source from inside the failing call.
 
 - **FLAC with blocks under 192 samples plays instead of failing to open** (#764). An MKV whose FLAC used

@@ -125,12 +125,7 @@ final class SoftwarePlaybackHost {
 
     /// Whether load selected VideoToolbox rather than libavcodec / dav1d for video decoding.
     /// Only meaningful after load has returned successfully.
-    var usesHardwareVideoDecoder: Bool { Self.isVideoToolboxDecoder(videoDecoder) }
-
-    /// The FEL route's dual-layer decoder runs two VideoToolbox sessions, so it counts as hardware.
-    static func isVideoToolboxDecoder(_ decoder: any VideoDecodingPipeline) -> Bool {
-        decoder is HardwareVideoDecoder || decoder is DualLayerVideoDecoder
-    }
+    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder }
 
     /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
     /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
@@ -914,6 +909,7 @@ final class SoftwarePlaybackHost {
                 if let composer = DoviFelComposer() {
                     return DualLayerVideoDecoder(composer: composer)
                 }
+                EngineLog.emit("[SWHost] DV P7 dual-layer route: no Metal device for the composer, decoding the base layer alone", category: .swPlayback)
                 return HardwareVideoDecoder()
             } else {
                 return HardwareVideoDecoder()
