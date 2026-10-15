@@ -125,7 +125,12 @@ final class SoftwarePlaybackHost {
 
     /// Whether load selected VideoToolbox rather than libavcodec / dav1d for video decoding.
     /// Only meaningful after load has returned successfully.
-    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder }
+    var usesHardwareVideoDecoder: Bool { Self.isVideoToolboxDecoder(videoDecoder) }
+
+    /// The FEL route's dual-layer decoder runs two VideoToolbox sessions, so it counts as hardware.
+    static func isVideoToolboxDecoder(_ decoder: any VideoDecodingPipeline) -> Bool {
+        decoder is HardwareVideoDecoder || decoder is DualLayerVideoDecoder
+    }
 
     /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
     /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
@@ -2649,7 +2654,7 @@ final class SoftwarePlaybackHost {
                 // next append, or finish when the source is gone and the
                 // ring is fully drained.
                 if sourceEnded() {
-                    (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
+                    videoDecoder.drainForEndOfStream()
                     videoDecoder.flush()
                     audioDecoder?.flush()
                     renderer.drainReorderBuffer()
@@ -3170,7 +3175,7 @@ final class SoftwarePlaybackHost {
                 freeParkedVideo()
                 // The dual-layer decoder's flush drops what its sessions and the GPU still hold,
                 // which here is the last frames of the stream: hand those over first.
-                (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
+                videoDecoder.drainForEndOfStream()
                 videoDecoder.flush()
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
@@ -3200,7 +3205,7 @@ final class SoftwarePlaybackHost {
                         // its reference chain; the seam packet itself parks after this block.
                         waitForRenderer(.drainAll)
                         freeParkedVideo()
-                        (videoDecoder as? DualLayerVideoDecoder)?.drainForEndOfStream()
+                        videoDecoder.drainForEndOfStream()
                         videoDecoder.flush()
                         // AE#492: this flush is THIS thread's, made after the read and on behalf of
                         // the packet in hand. Retiring that packet along with the seam it opens

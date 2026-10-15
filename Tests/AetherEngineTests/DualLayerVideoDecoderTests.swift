@@ -988,6 +988,67 @@ struct DualLayerVideoDecoderTests {
         #expect(!decoder.rebuildSession())
     }
 
+    @Test("after a session rebuild both layers are back on the decoder's epoch, so later packets are accepted")
+    func rebuildAdoptsFeedEpoch() {
+        let primary = EpochRecordingFakeDecoder()
+        let enhancement = EpochRecordingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        defer { decoder.close() }
+        decoder.flush()
+        let epoch = decoder.feedEpoch
+        #expect(epoch > 0)
+        // A rebuilt hardware decoder moves its own epoch; the dual decoder must put it back.
+        primary.epoch = epoch &+ 7
+        enhancement.epoch = epoch &+ 9
+        #expect(decoder.rebuildSession())
+        #expect(primary.epoch == epoch)
+        #expect(enhancement.epoch == epoch)
+        #expect(decoder.feedEpoch == epoch)
+    }
+
+    @Test("the host's drain reaches the dual-layer decoder through the pipeline protocol; a plain decoder's is a no-op")
+    func drainDispatchesThroughProtocol() {
+        let primary = FlushEmittingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: nil
+        )
+        defer { decoder.close() }
+        var flushedByDrain = 0
+        primary.emitFromInsideFlush = { flushedByDrain += 1 }
+        let pipeline: any VideoDecodingPipeline = decoder
+        pipeline.drainForEndOfStream()
+        #expect(flushedByDrain == 1)
+        // A decoder whose flush delivers needs no drain.
+        let plain: any VideoDecodingPipeline = FlushEmittingFakeDecoder()
+        plain.drainForEndOfStream()
+    }
+
+    private final class EpochRecordingFakeDecoder: SingleLayerVideoDecoder, @unchecked Sendable {
+        var onFrame: DecodedFrameHandler?
+        var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+        var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
+        var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
+        var skipUntilPTS: CMTime?
+        var epoch: UInt64 = 0
+        var feedEpoch: UInt64 { epoch }
+        func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
+            self.onFrame = onFrame
+        }
+        func open(parameterSets: [[UInt8]], timeBase: AVRational, onFrame: @escaping DecodedFrameHandler) throws {
+            self.onFrame = onFrame
+        }
+        func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64?) {}
+        func flush() {}
+        func adoptFeedEpoch(_ epoch: UInt64) { self.epoch = epoch }
+        func close() { onFrame = nil }
+    }
+
     private final class SessionLossCount: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
