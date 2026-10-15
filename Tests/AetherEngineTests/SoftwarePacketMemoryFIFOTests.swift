@@ -92,6 +92,20 @@ struct SoftwarePacketMemoryFIFOTests {
         #expect(try fifo.pop() == record(100))
     }
 
+    @Test("emptied history is evicted on a check, before any restore walks into it (#759)")
+    func evictPurgedHistory() throws {
+        let (fifo, cursors) = try filled(100)
+        for _ in 0..<90 { _ = try fifo.pop() }
+        #expect(!fifo.evictPurgedHistory())
+        let before = try #require(fifo.snapshot.oldestRetainedChunkID)
+        fifo.purgeHistoryForTesting()
+        #expect(fifo.evictPurgedHistory())
+        #expect(try #require(fifo.snapshot.oldestRetainedChunkID) > before)
+        #expect(!fifo.evictPurgedHistory())
+        #expect(throws: SoftwarePacketDiskFIFO.Failure.invalidCursor) { try fifo.restore(to: cursors[10]) }
+        for i in 90..<100 { #expect(try fifo.pop() == record(i)) }
+    }
+
     @Test("a still walk into emptied history is refused and releases the store")
     func purgedHistoryWalk() async throws {
         let (fifo, cursors) = try filled(100)

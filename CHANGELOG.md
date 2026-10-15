@@ -62,7 +62,9 @@ the public-API contract.
   committed packets remain seekable after a source read error, which is still reported after drain;
   storage failures remain unusable. Failed resume/seek positioning can no longer publish a false
   successful landing. Bounded cold probes avoid speculative detour fetches, and foreground software
-  positioning has a finite 30 s budget for slow multi-probe remote keyframe searches.
+  positioning has a finite 30 s budget for slow multi-probe remote keyframe searches. On tvOS's
+  in-memory packet store, history the system reclaims under memory pressure leaves the published
+  ranges at the next sample instead of only when a seek walks into it.
 
 - **A remuxed title declares a `BANDWIDTH` its densest segment fits under** (#783, thanks @hp561). The
   master declared twice the container's average, and a VBR ending in an HEVC Matroska file with three

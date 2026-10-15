@@ -14,6 +14,12 @@ protocol SoftwarePacketStore: AnyObject, Sendable {
     func trimConsumed(toByteBudget budget: Int) throws
     func reset() throws
     func close() throws
+    /// Drops history the system reclaimed behind the store's back. Returns whether anything went.
+    func evictPurgedHistory() -> Bool
+}
+
+extension SoftwarePacketStore {
+    func evictPurgedHistory() -> Bool { false }
 }
 
 extension SoftwarePacketDiskFIFO: SoftwarePacketStore {}

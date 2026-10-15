@@ -62,6 +62,17 @@ final class SoftwarePacketMemoryFIFO: @unchecked Sendable {
             return kr == KERN_SUCCESS && state != VM_PURGABLE_EMPTY
         }
 
+        private static let getState: vm_purgable_t = 1
+
+        /// A query only: the chunk stays volatile either way.
+        var isEmptied: Bool {
+            guard isVolatile else { return false }
+            var state: Int32 = 0
+            let kr = vm_purgable_control(mach_task_self_, vm_address_t(UInt(bitPattern: base)),
+                                         Self.getState, &state)
+            return kr == KERN_SUCCESS && state == VM_PURGABLE_EMPTY
+        }
+
         /// Empties the chunk now, as the kernel may once it is volatile. Tests only.
         func purgeForTesting() {
             var state: Int32 = VM_PURGABLE_EMPTY
@@ -262,6 +273,17 @@ final class SoftwarePacketMemoryFIFO: @unchecked Sendable {
             oldestChunkID = oldest.id + 1
             history -= oldest.used
         }
+    }
+
+    /// Evicts history the kernel has emptied, up to the newest emptied chunk. Without it the store
+    /// learns of a purge only when a restore walks into it, and published residency (#759) would
+    /// keep claiming history that is already gone. Returns whether anything was evicted.
+    func evictPurgedHistory() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let newest = chunks.last(where: { $0.id < headID && $0.isEmptied })?.id else { return false }
+        evictPurgedLocked(through: newest)
+        return true
     }
 
     /// Empties every volatile history chunk now, as the kernel may under memory pressure. Tests only.
