@@ -175,7 +175,7 @@ struct H264ConfigurationTrackerTests {
         #expect(engine.pendingVODVideoConfigurationMismatch == nil)
     }
 
-    @Test("A complete cold load follows the compatibility takeover and retains its paused resume", .timeLimit(.minutes(1)))
+    @Test("A cold resume reaches the compatibility path and retains its paused position", .timeLimit(.minutes(1)))
     @MainActor
     func fullColdResume() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("h264-change-\(UUID().uuidString).mp4")
@@ -188,6 +188,9 @@ struct H264ConfigurationTrackerTests {
         defer { subscription.cancel() }
         try await engine.load(url: file, startPosition: 2.0,
             options: LoadOptions(suppressDisplayCriteria: true, autoplay: false))
+        // The producer can discover the configuration change after load returns. Wait for
+        // the asynchronous takeover to settle before inspecting its route, event and position.
+        try await waitFor { engine.softwareHost != nil && engine.state == .paused }
         #expect(engine.loadedOptions.preferredDecodePath == .software)
         #expect(engine.softwareHost != nil)
         #expect(events.count == 1)
