@@ -28,6 +28,9 @@ struct PresentationFloor {
 
     /// How far past the frontier the clock may be and still give up slots, in seconds.
     static let maxClockGap: Double = 1
+    /// Most frames `ahead` may hold before the slot under its head is given up without the clock.
+    /// Far past any GOP's reordering, so it only fires when a hole has outlived `maxClockGap`.
+    static let maxAhead = 64
 
     init(interval: Double) {
         self.interval = interval
@@ -68,13 +71,21 @@ struct PresentationFloor {
         // A clock more than `maxClockGap` past the frontier is not this stream's: a renderer not yet
         // attached to its synchronizer runs on host time.
         let clock = clockSeconds.flatMap { $0.isFinite && $0 - f <= Self.maxClockGap ? $0 : nil }
+        // A hole the clock can no longer reach (decode fell more than `maxClockGap` behind) would hold
+        // the floor until the next flush and grow `ahead` by a frame each time.
+        if ahead.count > Self.maxAhead, let head = ahead.first {
+            f = max(f, head - interval)
+        }
         while true {
             if let next = ahead.first, next < f + 1.5 * interval {
                 step.contiguous.append(next)
                 f = max(f, next)
                 ahead.removeFirst()
-            } else if let clock, f + interval < clock {
-                f += interval  // a slot the clock has passed: anything still owed there is late anyway
+            } else if let clock, f + 1.5 * interval <= clock {
+                // A slot the clock has passed: anything still owed there is late anyway. The step
+                // leaves the floor at or below the clock, since after an off-grid seek the frontier
+                // is not on the stream's grid and a real slot can sit just past the clock.
+                f += interval
             } else {
                 break
             }

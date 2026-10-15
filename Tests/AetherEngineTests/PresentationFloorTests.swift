@@ -50,7 +50,7 @@ struct PresentationFloorTests {
         return (floor, shown, violations)
     }
 
-    @Test("In display order the floor follows every frame", arguments: [0, 4, 8, 16])
+    @Test("In display or decode order the floor never passes a frame still to come", arguments: [0, 4, 8, 16])
     func neverPassesAFrameStillToCome(gop: Int) {
         let order = gop == 0 ? Array(0..<96) : Self.decodeOrder(gop: gop, frames: 96)
         #expect(Set(order) == Set(0..<96), "the generator covers every frame once")
@@ -64,7 +64,7 @@ struct PresentationFloorTests {
 
     @Test("The floor rises within a GOP, not only at its end")
     func risesInsideTheGOP() {
-        // GOP of 8: 0, 8, 4, 2, 1, 3, 6, 5, 7. Once 1 arrives, 0..4 are contiguous.
+        // GOP of 8: 0, 8, 4, 2, 1, 3, 6, 5, 7. Once 1 arrives, 0..2 are contiguous.
         var floor = PresentationFloor(interval: Self.interval)
         var raised: [Double?] = []
         for i in [0, 8, 4, 2, 1] { raised.append(floor.record(Double(i) * Self.interval, clockSeconds: nil).raisedFloor) }
@@ -107,9 +107,43 @@ struct PresentationFloorTests {
         let order = [0, 1, 2, 4, 5, 6, 7, 8]
         let stuck = Self.walk(order)
         #expect(abs(stuck.floor.floor - 2.5 * Self.interval) < 1e-9)
-        let moving = Self.walk(order, clock: { k in k >= 5 ? 3.5 * Self.interval : nil })
+        let moving = Self.walk(order, clock: { k in k >= 5 ? 3.6 * Self.interval : nil })
         #expect(abs(moving.floor.floor - 8.5 * Self.interval) < 1e-9)
         #expect(moving.violations == 0)
+    }
+
+    @Test("After an off-grid seek a running clock never promises past a frame not yet due",
+          arguments: [0.1, 0.25, 0.51, 0.75, 0.9])
+    func offGridSeekWithARunningClock(phase: Double) {
+        let target = (100 + phase) * Self.interval
+        let order = Self.decodeOrder(gop: 8, frames: 48, startingAt: 96).filter { Double($0) * Self.interval >= target }
+        for lag in stride(from: 0.0, through: 0.9, by: 0.05) {
+            // The clock was seeked to the target and runs while the first frames past it arrive. Only a
+            // frame the clock has not reached yet is owed; one it has passed is late with or without
+            // the floor.
+            var floor = PresentationFloor(interval: Self.interval)
+            floor.reset(start: target)
+            var owedBelowFloor = 0
+            for (k, index) in order.enumerated() {
+                let clock = target + (lag + Double(k) * 0.1) * Self.interval
+                _ = floor.record(Double(index) * Self.interval, clockSeconds: clock)
+                owedBelowFloor += order[(k + 1)...].filter {
+                    let t = Double($0) * Self.interval
+                    return t >= clock && t < floor.floor
+                }.count
+            }
+            #expect(owedBelowFloor == 0, "phase \(phase), lag \(lag)")
+        }
+    }
+
+    @Test("A hole the clock can no longer reach is given up once enough frames pile up behind it")
+    func holePastTheClockGap() {
+        var floor = PresentationFloor(interval: Self.interval)
+        for i in 0..<3 { _ = floor.record(Double(i) * Self.interval, clockSeconds: nil) }
+        // Frame 3 is lost and the clock is far past the frontier, so it does not count.
+        for i in 4..<200 { _ = floor.record(Double(i) * Self.interval, clockSeconds: 1000) }
+        #expect(floor.ahead.count <= PresentationFloor.maxAhead + 1)
+        #expect(abs(floor.floor - 199.5 * Self.interval) < 1e-9)
     }
 
     @Test("A frame below the promised floor is flagged and does not move it")
@@ -220,6 +254,8 @@ struct ArrivalOrderHandoverTests {
         #expect(!renderer.handsOverInArrivalOrder)
         renderer.setArrivalOrderHandover(frameRate: .nan)
         #expect(!renderer.handsOverInArrivalOrder)
+        renderer.setArrivalOrderHandover(frameRate: 90_000)
+        #expect(!renderer.handsOverInArrivalOrder, "a bogus rate is not a grid")
         renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(forHardwareDecoder: true))
         let pixels = Self.makePixelBuffer()
         for i in [0, 4, 2, 1, 3] { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }

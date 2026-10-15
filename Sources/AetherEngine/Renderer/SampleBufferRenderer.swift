@@ -87,12 +87,16 @@ final class SampleBufferRenderer: @unchecked Sendable {
     func setArrivalOrderHandover(frameRate: Double?) {
         reorderLock.lock()
         defer { reorderLock.unlock() }
-        if #available(visionOS 1.1, *), let rate = frameRate, rate.isFinite, rate > 0 {
+        if #available(visionOS 1.1, *), let rate = frameRate, Self.arrivalOrderFrameRates.contains(rate) {
             arrivalFloor = PresentationFloor(interval: 1 / rate)
         } else {
             arrivalFloor = nil
         }
     }
+
+    /// Rates the floor trusts. A declared rate below the real one would promise past B-frames still to
+    /// come, and a bogus `avg_frame_rate` in the thousands would walk the grid a slot at a time.
+    static let arrivalOrderFrameRates: ClosedRange<Double> = 10...120
 
     var handsOverInArrivalOrder: Bool {
         reorderLock.lock()
@@ -588,14 +592,21 @@ final class SampleBufferRenderer: @unchecked Sendable {
         if step.belowFloor { _framesBelowFloor += 1 }
         let belowCount = _framesBelowFloor
         let floor = arrivalFloor?.floor
+        let generation = _flushGeneration
         reorderLock.unlock()
 
         flushFrame(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData,
                    displayOrderSpacing: step.contiguous)
         if let raised = step.raisedFloor, #available(visionOS 1.1, *) {
             let source = CMTime(seconds: raised, preferredTimescale: 90_000)
-            videoRenderer.presentationTimeExpectation =
-                .minimumUpcoming(timeline?.rendererTime(forSource: source) ?? source)
+            // A flush in between dropped this promise along with the frames it covered; setting it
+            // now would hold the first frame of a backward seek below a pre-seek floor.
+            reorderLock.lock()
+            if generation == _flushGeneration {
+                videoRenderer.presentationTimeExpectation =
+                    .minimumUpcoming(timeline?.rendererTime(forSource: source) ?? source)
+            }
+            reorderLock.unlock()
         }
         if step.belowFloor, belowCount == 1 || belowCount % 250 == 0 {
             EngineLog.emit(
@@ -647,6 +658,11 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// Send all buffered frames to the display layer (call at EOF).
     func drainReorderBuffer() {
         reorderLock.lock()
+        // Arrival order: nothing is held, but a hole in the last GOP would leave the promise below
+        // the tail with no further frame to move it.
+        if arrivalFloor != nil, #available(visionOS 1.1, *) {
+            videoRenderer.presentationTimeExpectation = .none
+        }
         let remaining = reorderBuffer
         reorderBuffer.removeAll()
         if let newest = remaining.last { _lastReleasedPtsSeconds = CMTimeGetSeconds(newest.1) }
