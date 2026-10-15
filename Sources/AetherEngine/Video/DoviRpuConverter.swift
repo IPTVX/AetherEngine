@@ -20,6 +20,15 @@ public enum DoviRpuConverter {
         }
     }
 
+    /// The Profile 8.1 form of a parsed RPU (`dovi_convert_rpu_with_mode`, mode 2) written back as an
+    /// unspec62 NAL unit, or nil when libdovi refuses either step. The caller frees the result with
+    /// `dovi_data_free`. This is the pair of calls the library can abort in, so everything that feeds it
+    /// goes through `DoviRpuGuard.parse` first, and the tests drive it through this one entry point.
+    static func convertedUnspec62(_ rpu: OpaquePointer) -> UnsafePointer<DoviData>? {
+        guard dovi_convert_rpu_with_mode(rpu, 2) == 0 else { return nil }
+        return dovi_write_unspec62_nalu(rpu)
+    }
+
     /// Returns `false` when a libdovi conversion fails (or on an internal allocation failure).
     /// On a libdovi failure the offending RPU (and EL) are dropped so the frame degrades to the
     /// clean HDR10 base, rather than shipping a P7 RPU inside a container already declared 8.1
@@ -63,13 +72,12 @@ public enum DoviRpuConverter {
             case nalTypeRPU:
                 // Any libdovi failure drops the RPU (degraded) instead of muxing a stale P7 RPU
                 // inside a container already declared 8.1 (mixed-profile hazard, #135).
-                guard let rpu = dovi_parse_unspec62_nalu(nal, len) else {
+                guard let rpu = DoviRpuGuard.parse(nal, len) else {
                     degraded = true
                     return
                 }
                 defer { dovi_rpu_free(rpu) }
-                guard dovi_convert_rpu_with_mode(rpu, 2) == 0,
-                      let out = dovi_write_unspec62_nalu(rpu) else {
+                guard let out = Self.convertedUnspec62(rpu) else {
                     degraded = true
                     return
                 }
@@ -153,7 +161,8 @@ public enum DoviRpuConverter {
         var result: String?
         A53SEIParser.forEachNAL(data, size, framing) { nal, len in
             guard result == nil, (nal[0] >> 1) & 0x3F == nalTypeRPU else { return }
-            guard let rpu = dovi_parse_unspec62_nalu(nal, len) else { return }
+            // Behind the CRC and panic-path checks: libdovi aborts the process on some malformed RPUs.
+            guard let rpu = DoviRpuGuard.parse(nal, len) else { return }
             defer { dovi_rpu_free(rpu) }
             guard let hdr = dovi_rpu_get_header(rpu) else { return }
             defer { dovi_rpu_free_header(hdr) }

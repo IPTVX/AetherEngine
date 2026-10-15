@@ -71,6 +71,61 @@ struct DoviRpuConverterTests {
         #expect(nalTypes(pkt) == [1])
     }
 
+    /// CRC-valid RPUs that reach a panic or an unbounded allocation in libdovi, and one with a wrong CRC.
+    /// Handing any of them to libdovi aborts the test process, so passing is the point.
+    typealias Hostile = (name: String, rpu: [UInt8])
+    static let hostileRPUs: [Hostile] = {
+        typealias G = DoviRpuGuardTests
+        let poly: [[G.Piece]] = [[.polynomial], [.polynomial], [.polynomial]]
+        return [
+            ("linear interpolation", G.craft(linearOnComponent: 1)),
+            ("polynomial and MMR mix, no residual", G.craft(pieces: [[.polynomial, .mmr], [.polynomial], [.polynomial]])),
+            ("polynomial and MMR mix, MEL", G.craft(pieces: [[.mmr, .polynomial], [.polynomial], [.polynomial]], residual: .mel)),
+            ("polynomial and MMR mix, FEL", G.craft(pieces: [[.polynomial], [.polynomial], [.polynomial, .mmr]], residual: .fel)),
+            ("pivot count beyond the payload", G.craft(pieces: poly, pivotCount: (UInt64(1) << 32) - 2)),
+            ("mapping_idc with 64 leading zeros", G.craft(pieces: [[.linear], [.polynomial], [.polynomial]],
+                                                          firstMappingIdc: { $0.ueRaw(zeros: 64, rest: 0) })),
+            ("vdr_rpu_id with 40 leading zeros", G.craft(pieces: poly, vdrRpuId: { $0.ueRaw(zeros: 40, rest: G.maxRest(40)) })),
+            ("undefined level 8 block length", G.craftUsePrev(cmv40Block: (11, 8))),
+            ("bad CRC", G.withBadCRC(G.craft(linearOnComponent: nil), crcByte: 1)),
+        ]
+    }()
+
+    @Test("A hostile or corrupt RPU is refused on the real conversion paths: HDR10 fallback, no abort",
+          arguments: Array(DoviRpuConverterTests.hostileRPUs.indices), [VideoNALFraming.lengthPrefixed(size: 4), .annexB])
+    func hostileRPUDegradesOnEveryEntryPoint(index: Int, framing: VideoNALFraming) {
+        let (name, rpu) = Self.hostileRPUs[index]
+        let nals = [hevcNAL(type: 1, payload: [0xAA, 0xBB]), rpu, hevcNAL(type: 63, payload: [0xCC])]
+        let bytes = framed(nals, framing)
+
+        // The probes read the packet and must come back empty-handed.
+        let probe = packet(from: bytes)
+        defer { free(probe) }
+        #expect(DoviRpuConverter.enhancementLayerType(probe, framing: framing) == nil, Comment(rawValue: name))
+        #expect(DolbyVisionRecordAudit.rpuProfile(probe, framing: framing) == nil, Comment(rawValue: name))
+
+        // The conversion reports the failure and drops the RPU and the EL, keeping the base layer.
+        let pkt = packet(from: bytes)
+        defer { free(pkt) }
+        #expect(DoviRpuConverter.convertPacketToProfile81(pkt, framing: framing) == false, Comment(rawValue: name))
+        let expected = framed([nals[0]], framing)
+        #expect(packetBytes(pkt) == expected, Comment(rawValue: name))
+    }
+
+    @Test("A well-formed crafted RPU takes the same paths and converts, so the refusals above are the guard's")
+    func craftedRPUConvertsOnTheSamePaths() {
+        let rpu = DoviRpuGuardTests.craft(pieces: [[.polynomial], [.mmr], [.mmr]], residual: .fel)
+        let bytes = framed([hevcNAL(type: 1, payload: [0xAA, 0xBB]), rpu, hevcNAL(type: 63, payload: [0xCC])],
+                           .lengthPrefixed(size: 4))
+        let probe = packet(from: bytes)
+        defer { free(probe) }
+        #expect(DoviRpuConverter.enhancementLayerType(probe) == "FEL")
+        let pkt = packet(from: bytes)
+        defer { free(pkt) }
+        #expect(DoviRpuConverter.convertPacketToProfile81(pkt) == true)
+        #expect(nalTypes(pkt) == [1, 62])
+    }
+
     @Test("A non-DV packet is left untouched")
     func leavesNonDVUntouched() {
         let bl = hevcNAL(type: 1, payload: [0xAA, 0xBB])
@@ -258,7 +313,7 @@ struct DoviRpuConverterTests {
             A53SEIParser.forEachNAL(buf.baseAddress!, buf.count, framing) { nal, len in
                 switch (nal[0] >> 1) & 0x3F {
                 case 62:
-                    guard let rpu = dovi_parse_unspec62_nalu(nal, len) else { degraded = true; return }
+                    guard let rpu = DoviRpuGuard.parse(nal, len) else { degraded = true; return }   // as production: the guard first, libdovi is panic=abort
                     if dovi_convert_rpu_with_mode(rpu, 2) != 0 { dovi_rpu_free(rpu); degraded = true; return }
                     guard let out = dovi_write_unspec62_nalu(rpu) else { dovi_rpu_free(rpu); degraded = true; return }
                     guard let data = out.pointee.data, out.pointee.len > 0 else {
