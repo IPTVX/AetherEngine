@@ -4,6 +4,7 @@ import Metal
 @testable import AetherEngine
 
 /// Guards the Dolby Vision shader source integrity and parameter serialization.
+@Suite(.offCooperativePool)
 struct DoviShaderSyncTests {
 
     static let metalAvailable = MTLCreateSystemDefaultDevice() != nil
