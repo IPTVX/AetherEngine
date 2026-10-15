@@ -6909,7 +6909,11 @@ public final class AetherEngine: ObservableObject {
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
         airPlayServedMasterToReceiver = false
-        host.swapItem(url: airPlayHostSwapped(mediaURL), startPosition: position)
+        // A live session rejoins its playlist at the player's join point (`LiveReloadPolicy`): a seek to the
+        // armed position would point the item at the start of the window.
+        host.swapItem(url: airPlayHostSwapped(mediaURL),
+                      startPosition: loadedOptions.isLive ? nil : position,
+                      skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: loadedOptions.isLive, isRejoin: true))
         host.play()
     }
 
@@ -6983,9 +6987,9 @@ public final class AetherEngine: ObservableObject {
         let position: Double? = loadedOptions.isLive ? nil : currentTime
         let served = airPlayAdjustedPlayback(url: loopback, session: session)
         nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
-        let reason = loadedOptions.isLive
-            ? "a live session on a forward-only source cannot be rebuilt, #526"
-            : "the source cannot be reopened past byte 0"
+        let reason = loadedOptions.sequentialOrigin && !loadedOptions.isLive
+            ? "the source cannot be reopened past byte 0"
+            : "a forward-only custom source cannot be rebuilt, #526"
         EngineLog.emit(
             "[AirPlay] external playback \(airPlayActive ? "active (wireless)" : "ended") -> item swap to "
             + "\(served.url.absoluteString) "

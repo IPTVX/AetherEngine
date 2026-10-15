@@ -163,7 +163,9 @@ the public-API contract.
   address (and back onto the loopback when the receiver lets go), as it already did for a sequential
   origin. The session, its ingest and its segment cache carry on, so the source is asked for nothing
   again; the swapped item rejoins its live playlist at the player's join point, as a live reload does
-  (`AirPlayPlaylistDecision.routeChangeHop`).
+  (`AirPlayPlaylistDecision.routeChangeHop`, #780, thanks @jpsts). The fallback for a receiver that
+  refuses the master (#227) rejoins a live playlist the same way, instead of seeking the media playlist
+  to the start of its window.
 
 ## [7.36.0] - 2026-10-13
 
