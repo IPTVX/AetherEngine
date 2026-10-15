@@ -190,7 +190,8 @@ public enum DoviRpuConverter {
                 defer { dovi_rpu_free(rpu) }
                 let thisParams: DoviMetalParams? = extractParams ? DoviFelComposer.parseRpuParameters(rpu: rpu) : nil
                 var thisPrevious = false, thisDisableResidual = false, thisFEL = false, thisMEL = false
-                if let hdr = dovi_rpu_get_header(rpu) {
+                // Only the dual-layer outputs read the header; the P8.1 rewrite drops what it yields.
+                if keepRpuBytes, let hdr = dovi_rpu_get_header(rpu) {
                     if hdr.pointee.use_prev_vdr_rpu_flag { thisPrevious = true }
                     thisDisableResidual = hdr.pointee.disable_residual_flag
                     if let elTypePtr = hdr.pointee.el_type {

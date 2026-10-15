@@ -20,6 +20,13 @@ the public-API contract.
   the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before,
   and one with both trees plays its Blu-ray title, the order an image is recognized in.
 
+### Changed
+
+- **Dolby Vision Profile 7: a packet whose only NALs are a refused RPU and its EL now reports the
+  conversion as failed** (#767, thanks @pkajaba). The packet is left as it was, as before; the result used
+  to say success, which hid the dropped RPU from the one-shot conversion log and from `aetherctl dovitest`.
+  The same PR adds the Metal FEL composer and the Dolby Vision display metadata, which nothing selects yet.
+
 ### Fixed
 
 - **FLAC with blocks under 192 samples plays instead of failing to open** (#764). An MKV whose FLAC used
