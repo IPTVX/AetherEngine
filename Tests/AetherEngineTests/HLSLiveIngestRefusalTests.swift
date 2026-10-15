@@ -316,6 +316,42 @@ struct HLSLiveIngestRefusalTests {
         #expect(origin.requestCount("/media.m3u8") == 2)
     }
 
+    @Test("a broken refresh that is not a refusal ends on the short budget")
+    func brokenRefreshEndsOnShortBudget() async throws {
+        // 502 is a broken gateway, not an origin saying "not now": a dead channel must reach the
+        // host's reopen or fallback after the short budget, not after the minute a refusal gets.
+        let origin = try #require(ScriptedOrigin { path, index in
+            if path == "/media.m3u8" {
+                return index == 0
+                    ? .init(status: 200, body: Self.playlist(count: 8, endList: false))
+                    : .init(status: 502)
+            }
+            if let segment = Self.segmentIndex(path) { return .init(status: 200, body: Self.segment(segment)) }
+            return .init(status: 404)
+        })
+        defer { origin.stop() }
+
+        let reader = HLSLiveIngestReader(playlistURL: origin.url("/media.m3u8"))
+        defer { reader.close() }
+
+        let startedAt = Date()
+        let joined = (1..<8).map(Self.segment).reduce(Data(), +)
+        _ = try await drain(reader, expectedBytes: joined.count + 1)
+        #expect(reader.terminalError == .playlistUnreachable(status: 502))
+        #expect(Date().timeIntervalSince(startedAt) < HLSLiveIngestReader.refreshRetryBudget / 2)
+    }
+
+    @Test("only a refusal gets the long retry budget")
+    func retryBudgets() {
+        for status in [429, 503, 509] {
+            #expect(HLSLiveIngestReader.retryBudget(forStatus: status) == HLSLiveIngestReader.refreshRetryBudget)
+        }
+        for status: Int? in [500, 502, 504, nil] {
+            #expect(HLSLiveIngestReader.retryBudget(forStatus: status) == HLSLiveIngestReader.unreachableRetryBudget)
+        }
+        #expect(HLSLiveIngestReader.unreachableRetryBudget < HLSLiveIngestReader.refreshRetryBudget)
+    }
+
     @Test("the wait between retries is a second, or what the origin asks for up to five")
     func retryWaits() {
         #expect(HLSLiveIngestReader.retryWait(retryAfter: nil) == 1)

@@ -49,8 +49,10 @@ the public-API contract.
   goes on refusing a session it evicted, while a fresh session from the loaded URL is admitted at
   once. The ingest retried 1, 2 and 4 s apart and went terminal at 12 s, which on the software path
   ended the session, and each refusal armed the origin's request pacer, so the host's reload then
-  waited up to 10 s for its first request. A refused or unreachable refresh is now asked again every
-  second, or after the origin's Retry-After up to 5 s, for up to 60 s, and so is a refused segment. A
+  waited up to 10 s for its first request. A refused refresh (429, 503, 509) is now asked again every
+  second, or after the origin's Retry-After up to 5 s, for up to 60 s, and so is a refused segment; an
+  unreachable origin or any other 5xx keeps the 12 s budget, so a dead channel or a lost network still
+  reaches the host's reopen or fallback as soon as before. A
   session URL the loaded URL led to through redirects is asked for afresh through the loaded URL once
   it has been refused twice, or at once when it answers as gone (a 4xx other than 429 and 408); the
   playlist tracker follows MEDIA-SEQUENCE, so the segments continue where they left off. The live

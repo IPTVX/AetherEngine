@@ -585,14 +585,27 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         }
     }
 
-    /// How long a live refresh is retried while the origin refuses it (429, 5xx including 509) or
-    /// cannot be reached. It outlasts what a session holds ahead of the playhead, so a refusal that
+    /// How long a live refresh is retried while the origin refuses it (`refusalStatuses`: 429, 503,
+    /// 509). It outlasts what a session holds ahead of the playhead, so a refusal that
     /// ends while the picture is still playing from it is never seen: the host's own stall handling
     /// steps in once that runs dry. A connection-limited IPTV panel answers 509 for as long as another
     /// device on the account holds its last slot, which is seconds to tens of seconds when that device
     /// changes channels, and then serves again at once. The 7.36.0 ladder (1, 2, 4 s within 12 s) went
     /// terminal well inside such a window, and on the software path that ended the session.
     static let refreshRetryBudget: TimeInterval = 60
+
+    /// How long a refresh or segment is retried when the origin cannot be reached or answers with any
+    /// other 5xx. That is not a refusal that lifts by itself: a dead channel or a lost network would
+    /// otherwise sit behind a spinner for a minute before the host's reopen or fallback gets a turn.
+    /// FIFO and producer buffer give 10 to 20 s of slack, so 12 s still bridges a single CDN timeout.
+    static let unreachableRetryBudget: TimeInterval = 12
+
+    /// The retry budget for a failure with this HTTP status, nil for a transport error. A retry loop
+    /// keeps the longest budget it has seen, so one transport blip inside a refusal does not end it.
+    static func retryBudget(forStatus status: Int?) -> TimeInterval {
+        guard let status, refusalStatuses.contains(status) else { return unreachableRetryBudget }
+        return refreshRetryBudget
+    }
 
     /// The steady wait between those retries. One small request a second, never growing: a refusal of
     /// this kind lifts the moment the other device lets its slot go, and a growing backoff only adds
@@ -621,11 +634,12 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// once. Returns the playlist and the URL it was read from, which later refreshes use.
     private func refreshMediaPlaylist(_ mediaURL: URL, canReresolve: Bool) async throws -> (HLSMediaPlaylist, URL) {
         let startedAt = Date()
-        let deadline = startedAt.addingTimeInterval(Self.refreshRetryBudget)
+        var budget = Self.unreachableRetryBudget
         var url = mediaURL
         var failures = 0
         while true {
             try Task.checkCancellation()
+            startLock.withLock { _playlistRetryAfter = nil }
             do {
                 let (playlist, finalURL) = try await fetchPlaylist(url)
                 guard case .media(let media) = playlist else {
@@ -652,7 +666,8 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     continue
                 }
                 failures += 1
-                try await waitBeforeRetrying(error, failures: failures, deadline: deadline)
+                budget = max(budget, Self.retryBudget(forStatus: status))
+                try await waitBeforeRetrying(error, failures: failures, deadline: startedAt.addingTimeInterval(budget))
                 url = Self.nextRefreshURL(after: failures, current: url, sessionURL: mediaURL,
                                           loadedURL: playlistURL, canReresolve: canReresolve)
             } catch is CancellationError {
@@ -660,7 +675,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             } catch {
                 if (error as? URLError)?.code == .cancelled { throw error }
                 failures += 1
-                try await waitBeforeRetrying(error, failures: failures, deadline: deadline)
+                try await waitBeforeRetrying(error, failures: failures, deadline: startedAt.addingTimeInterval(budget))
                 url = Self.nextRefreshURL(after: failures, current: url, sessionURL: mediaURL,
                                           loadedURL: playlistURL, canReresolve: canReresolve)
             }
@@ -694,10 +709,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     }
 
     private func waitBeforeRetrying(_ error: Error, failures: Int, deadline: Date) async throws {
-        let retryAfter = startLock.withLock { () -> TimeInterval? in
-            defer { _playlistRetryAfter = nil }
-            return _playlistRetryAfter
-        }
+        let retryAfter = startLock.withLock { _playlistRetryAfter }
         let delay = Self.retryWait(retryAfter: retryAfter)
         guard Date().addingTimeInterval(delay) < deadline else { throw error }
         if failures <= Self.loggedRetries || failures % Self.retryLogStride == 0 {
@@ -780,11 +792,13 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private func fetchSegment(_ url: URL, duration: Double) async throws -> Data {
         var lastStatus = -1
         let limit = BoundedFetch.segmentLimit(forDuration: duration)
-        let deadline = Date().addingTimeInterval(Self.refreshRetryBudget)
+        let startedAt = Date()
+        var budget = Self.unreachableRetryBudget
         var attempt = 0
         while true {
             if Task.isCancelled { throw CancellationError() }
             var retryAfter: TimeInterval?
+            var status: Int?
             do {
                 let (data, response): (Data, URLResponse)
                 do {
@@ -796,6 +810,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     throw HLSIngestError.playlistInvalid(reason: "segment exceeds \(limit) bytes")
                 }
                 lastStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
+                status = lastStatus
                 if (200..<300).contains(lastStatus) { return data }
                 if lastStatus == 404 { return Data() } // slid out of provider window; tracker advances regardless
                 if (400..<500).contains(lastStatus) && lastStatus != 429 {
@@ -807,9 +822,10 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             catch { /* transport blip: retry */ }
             attempt += 1
             // Two quick retries for a blip, as before; then the steady pace of a refused refresh,
-            // for as long as the refresh itself would keep trying.
+            // within the same budget the refresh would get for this failure.
             let delay = attempt <= 2 ? 0.5 * Double(attempt) : Self.retryWait(retryAfter: retryAfter)
-            guard Date().addingTimeInterval(delay) < deadline else {
+            budget = max(budget, Self.retryBudget(forStatus: status))
+            guard Date().addingTimeInterval(delay) < startedAt.addingTimeInterval(budget) else {
                 throw HLSIngestError.playlistUnreachable(status: lastStatus)
             }
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
