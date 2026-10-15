@@ -2435,6 +2435,11 @@ public final class AetherEngine: ObservableObject {
     var confirmedAtmosStreamIndices: Set<Int32> = []
     var confirmedAtmosSource: URL?
 
+    /// #744 follow-up: the stream indices LibDTSX confirmed as DTS:X while they played, keyed to their
+    /// source like the Atmos ledger above and republished through `applyConfirmedTrackFlags()`.
+    var confirmedDTSXStreamIndices: Set<Int32> = []
+    var confirmedDTSXSource: URL?
+
     /// AE#154: publishes the remote-HLS bypass item's legible options as `subtitleTracks`.
     /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
     var remoteHLSSubtitleDiscoveryTask: Task<Void, Never>? = nil
@@ -4698,7 +4703,7 @@ public final class AetherEngine: ObservableObject {
             : avcodec_get_name(detectedCodecID).map { String(cString: $0) }
         sourceContainerFormat = probeOpened ? probe.containerFormatName : nil
         audioTracks = probedAudioTracks
-        applyConfirmedAtmos()
+        applyConfirmedTrackFlags()
         subtitleTracks = probedSubtitleTracks
         // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
         // and the native rendition table are built from it.

@@ -559,6 +559,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `AtmosOutputActivator` beside the player to reach the receiver as Atmos.
     var audioIsAPAC = false
 
+    /// LibDTSX confirmed the playing track as DTS:X (#744), whatever FFmpeg's profile label said. The
+    /// engine folds it into the published track's `isDTSX`.
+    var audioIsConfirmedDTSX = false
+
     /// Producer's `videoShiftPts` in seconds, updated on every gate open. AVPlayer clock =
     /// `source_pts - playlistShiftSeconds`. Lock-guarded: written on pump thread, read on others.
     public var playlistShiftSeconds: Double {
