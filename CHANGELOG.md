@@ -44,6 +44,8 @@ the public-API contract.
 
 ### Fixed
 
+- **The package builds again on toolchains before Swift 6.4** (#787). `H264MatroskaSlotPermutation.CFRRewriter` (from #762) relied on Swift 6.4 leaving private stored properties with a default out of the memberwise initializer; earlier compilers make that initializer private, so `swift build` failed on Xcode 26. The initializer is now written out. No behavior change.
+
 - **A jump back opens one connection at the landing instead of three serial detour fetches** (#782,
   thanks @tweakapps). On the native path a producer restart behind the reader's window was served the
   way a parse read is: one 4 MB detour block per request, serially, until 8 MB had gone by, while the old
