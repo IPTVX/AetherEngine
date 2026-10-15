@@ -4422,6 +4422,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
             activeDem.seek(to: absoluteTargetSeconds)
         }
+        // AE#782: after the seek, so a container whose seek reads (a TS bisection) spends none of it.
+        activeDem.notePlaybackRepositioned()
         // Re-arm bridge PTS rebase so the encoder timeline starts from the new demuxer cursor.
         ab?.startSegment()
         seekMs = msSince(seekStart)

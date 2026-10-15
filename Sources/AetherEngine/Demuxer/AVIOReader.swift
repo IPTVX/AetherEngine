@@ -1031,6 +1031,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// work rather than playback. winCond-guarded.
     private var indexPassActive = false
 
+    /// AE#782: a producer restart repositioned the demuxer. The next backward read that needs the
+    /// network re-anchors the streaming connection there at once, instead of serving the new playback
+    /// position as serial 4 MB detour blocks until `detourReanchorBytes` have gone by. winCond-guarded.
+    private var playbackRepositionPending = false
+
     /// Playback path (known size + prefetch) or live feeds. Live always uses the
     /// persistent reader; the streaming reader has no reconnect machinery.
     private var usePersistentReader: Bool {
@@ -2298,9 +2303,31 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
 
             let curPosition = position
+            let repositionedForPlayback = playbackRepositionPending
+            if curPosition >= winStart { playbackRepositionPending = false }
 
             if curPosition < winStart {
                 winCond.unlock()
+                // AE#782: a producer restart landed here, so this is where playback continues, not a
+                // parse read that returns. Bytes already resident still serve first; the first miss
+                // anchors the connection here. Detouring cost a jump back three serial 4 MB fetches
+                // (~2 s each against a 400 ms origin) before the 8 MB re-anchor below, while the old
+                // connection kept streaming ahead of a position nobody would read.
+                if repositionedForPlayback, detourEligible {
+                    if case .served(let n, _) = serveFromDetour(into: buf.advanced(by: totalRead),
+                                                               maxLen: requestSize - totalRead,
+                                                               at: curPosition, allowFetch: false) {
+                        diag.recordDetourServe(ms: 0, fetched: false)
+                        winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
+                        totalRead += n
+                        continue
+                    }
+                    winCond.lock(); playbackRepositionPending = false; winCond.unlock()
+                    detourResetRun()
+                    sweepIdleDetourBlocks(force: true)
+                    timedReconnect(seek: true, at: curPosition)
+                    continue
+                }
                 // Backward random-access read (MP4 parse ping-pong, or a large backward scrub).
                 // Serve via the pooled detour cache so the anchored streaming connection is NOT
                 // torn down (the reconnect storm + origin 429, AetherEngine#69).
@@ -3138,6 +3165,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     func endIndexPass() {
         winCond.lock()
         indexPassActive = false
+        winCond.unlock()
+    }
+
+    /// AE#782: see `playbackRepositionPending`.
+    func notePlaybackRepositioned() {
+        winCond.lock()
+        playbackRepositionPending = true
         winCond.unlock()
     }
 
