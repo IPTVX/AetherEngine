@@ -78,7 +78,9 @@ struct HEVCPictureOrderCount {
         for p in present {
             guard r.skip(p.profile ? 88 : 0), r.skip(p.level ? 8 : 0) else { return }
         }
-        guard let id = r.ue(), let chroma = r.ue() else { return }
+        // sps_seq_parameter_set_id is at most 15 and pps_pic_parameter_set_id at most 63 (7.4.3.2,
+        // 7.4.3.3): a stream naming more would otherwise grow these maps by one entry per NAL.
+        guard let id = r.ue(), id <= 15, let chroma = r.ue() else { return }
         var separate = false
         if chroma == 3 { guard let f = r.flag() else { return }; separate = f }
         guard r.ue() != nil, r.ue() != nil, let window = r.flag() else { return }   // width, height
@@ -89,7 +91,7 @@ struct HEVCPictureOrderCount {
 
     private mutating func parsePPS(_ nal: UnsafePointer<UInt8>, _ len: Int) {
         var r = Self.reader(nal, len, limit: 32)
-        guard let id = r.ue(), let spsID = r.ue(), r.flag() != nil,   // dependent_slice_segments_enabled
+        guard let id = r.ue(), id <= 63, let spsID = r.ue(), spsID <= 15, r.flag() != nil,   // dependent_slice_segments_enabled
               let outputFlag = r.flag(), let extra = r.u(3) else { return }
         pps[id] = PPS(sps: spsID, outputFlagPresent: outputFlag, extraSliceHeaderBits: extra)
     }

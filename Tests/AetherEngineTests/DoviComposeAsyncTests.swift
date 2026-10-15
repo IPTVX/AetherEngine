@@ -7,7 +7,7 @@ import Metal
 /// `composeAsync` is the playback path: it must produce exactly what the blocking
 /// `compose` produces, fire its completion exactly once per call, and never let
 /// more than `maxFramesInFlight` compositions be outstanding.
-@Suite(.enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
+@Suite(.offCooperativePool, .enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
 struct DoviComposeAsyncTests {
 
     private static func makeBuffer(width: Int, height: Int, fill: UInt16) -> CVPixelBuffer? {

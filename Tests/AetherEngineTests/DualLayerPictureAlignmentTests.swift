@@ -10,6 +10,7 @@ import AetherLibavutil
 /// (counting from the decoded POCs gives 2823: that also counts the last unit, whose EL is a lone IDR
 /// that pairs with its own BL picture but ranks two places off because two EL-less units precede it);
 /// the others share one GOP.
+@Suite(.offCooperativePoolOneLane)
 struct DualLayerPictureAlignmentTests {
 
     struct Walk {

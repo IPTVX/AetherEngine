@@ -6,7 +6,7 @@ import Metal
 /// The enhancement layer is upsampled to the base-layer grid by one hardware bilinear fetch
 /// (`dovi_sample_el_1d`). These tests run the production composer and read the residual back out of the
 /// un-quantised VDR plane, so a different filter (a Catmull-Rom, or nearest) fails them.
-@Suite(.enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
+@Suite(.offCooperativePoolOneLane, .enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
 struct DoviEnhancementUpsamplerTests {
 
     typealias H = DoviGpuCurveSweepTests
