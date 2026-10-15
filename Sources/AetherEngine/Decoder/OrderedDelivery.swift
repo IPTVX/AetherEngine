@@ -258,7 +258,13 @@ final class OrderedDelivery: @unchecked Sendable {
                     category: .swPlayback)
                 stallLogPending = true
             }
-            nextToEmit &+= 1
+            // Straight to the oldest frame that did arrive: stepping one missing ticket per turn
+            // spins the queue once per number when the backlog sits far ahead of the head.
+            guard let oldest = pending.keys.min(), oldest > nextToEmit else {
+                nextToEmit &+= 1
+                continue
+            }
+            nextToEmit = oldest
         }
     }
 

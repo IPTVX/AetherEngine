@@ -9,6 +9,7 @@ import Foundation
 /// The fixtures (`fel-clip-a.mkv`, `fel-clip-b.mkv`, `fel-clip-c.mp4`) live in the
 /// directory named by `DV_FEL_TESTS_DIR`, or in `DV FEL Tests/` next to the package;
 /// they are not checked in, and every test skips when its file is absent.
+@Suite(.offCooperativePoolOneLane)
 struct DoviFelRealFileTests {
 
     static let fixtures = [
