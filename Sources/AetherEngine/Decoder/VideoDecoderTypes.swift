@@ -46,6 +46,15 @@ enum VideoDecoderError: Error, LocalizedError {
     case noExtradata
     case formatDescriptionFailed(status: OSStatus)
     case sessionCreationFailed(status: OSStatus)
+    /// `DualLayerVideoDecoder` is single use (dolby-vision-fel.md §5.8): `open` after `close` refuses
+    /// with this instead of inheriting the previous stream's state. Thrown rather than a
+    /// trapping precondition so host misuse surfaces as an error and tests can assert it.
+    case decoderClosed
+    /// No Metal device or shader compilation failed; FEL composition cannot run.
+    /// Thrown from `open()` for a decoder built without a composer. The software host does not get
+    /// there in production: it builds the composer first and decodes the base layer alone when that
+    /// fails.
+    case composerUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -54,6 +63,8 @@ enum VideoDecoderError: Error, LocalizedError {
         case .noExtradata: "Missing codec extradata"
         case .formatDescriptionFailed(let s): "Format description failed (\(s))"
         case .sessionCreationFailed(let s): "Decoder session failed (\(s))"
+        case .decoderClosed: "Decoder is closed (single use)"
+        case .composerUnavailable: "Dolby Vision FEL composer unavailable (no Metal device or shader compilation failed)"
         }
     }
 }

@@ -19,6 +19,8 @@ the public-API contract.
   part order, and the cell timeline and VTS time map apply as on an image, since the VOBs in order are
   the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before,
   and one with both trees plays its Blu-ray title, the order an image is recognized in.
+- **`AETHER_FEL_MEASURE` reports the signed FEL-minus-MEL mean per plane and luma band.** The diagnostic composes every Nth frame a second time with the residual off and compares the two; the signed mean says whether the residual brightens or darkens, which the absolute difference could not. It runs one sample at a time and skips a frame that arrives while one is in flight. Off by default; it is an environment-variable diagnostic, not API.
+- **The dual-layer decoder pairs the two layers by picture order.** `DualLayerPictureAlignment` derives each layer's display slot from its POC (`HEVCPictureOrderCount`, no decoding) and stamps each enhancement-layer packet with the time of the base-layer picture in the same slot, so a stream whose enhancement layer is coded with B-frames over a base layer without them pairs the right pictures. A stream whose layers share one GOP keeps every packet's own time. After a seek a layer pairs by access unit until its next sequence-opening IRAP.
 
 ### Changed
 
