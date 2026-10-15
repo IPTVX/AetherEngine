@@ -528,4 +528,11 @@ struct DoviRpuGuardTests {
         #expect(elType == (residual == .fel ? "FEL" : "MEL"))
         #expect(Self.convertedBytes(nal) != nil)
     }
+
+    @Test("real RPUs from the FEL fixtures are never flagged",
+          .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[2]), DoviFelRealFileTests.needsClips))
+    func realRpusPass() throws {
+        let seed = try #require(try DoviFelFuzzTests.seed())
+        #expect(Self.verdict(seed.rpu) == (true, false))
+    }
 }
