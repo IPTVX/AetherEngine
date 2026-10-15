@@ -11,7 +11,7 @@ import Metal
 /// of each sub-block back out of the buffer the host actually uploaded: any offset
 /// drift between ``DoviMetalParams/serialize()`` and the shader's struct
 /// definitions moves a sentinel and fails a comparison below.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviLayoutProbeTests {
 
     /// Distinct value per probed field, so a shifted read lands on a value that

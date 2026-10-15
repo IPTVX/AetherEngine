@@ -15,7 +15,7 @@ import Dovi
 ///
 /// The path under test is `DoviRpuConverter.separateDualLayers` with a custom block source, whose
 /// `convertedRpu` is the RPU a composed frame carries (what `DoviDisplayMetadata.attach` takes).
-@Suite(.serialized, .offCooperativePool)
+@Suite(.serialized, .offCooperativePoolOneLane)
 struct DoviComposedFrameRpuTests {
 
     // MARK: - Fixture

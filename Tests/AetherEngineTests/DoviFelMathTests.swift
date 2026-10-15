@@ -9,7 +9,7 @@ import Dovi
 /// `DoviFelComposer.compose` with `.debugRawVDR` (12-bit VDR codes, no quantisation) and the real RPU parser.
 /// Nothing here re-implements the kernel's arithmetic: expectations are worked out from the DoViBaker
 /// formulas (erazortt/DoViBaker, `DoViProcessor.cpp`) and written down as numbers.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviFelMathTests {
 
     // Raw 376-byte unspec62 RPU NAL extracted from fel-clip-a.mkv

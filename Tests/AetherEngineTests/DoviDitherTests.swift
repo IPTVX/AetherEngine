@@ -17,7 +17,7 @@ import Metal
 /// scale of 4 that every Dolby Vision stream uses, the two are bit-identical and
 /// no end-to-end test can tell them apart. The centring matters only above that,
 /// and the reason it is there is written out in the shader.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviDitherTests {
 
     static let width = 64
