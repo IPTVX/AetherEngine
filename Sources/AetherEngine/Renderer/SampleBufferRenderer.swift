@@ -170,6 +170,25 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
+    /// How much composed video the FEL path hands the layer before the clock starts, in seconds
+    /// (`felPrerollSatisfied(clock:)`): four frames at 24 fps, which covers a decode-order burst of a
+    /// hierarchical GOP. Measured on the Apple TV 4K (A12) with 4K FEL, the preroll completes after
+    /// 90 to 100 ms at a start and 0.3 to 0.9 s after a seek.
+    static let felPrerollSeconds = 0.167
+
+    /// The FEL path's preroll gate for `AudioOutput.videoPrerollSatisfied`: true once frames up to
+    /// `felPrerollSeconds` past `clock` (source seconds) are in the layer, nil off the FEL path. On
+    /// the arrival-order path only the frontier counts, the newest timestamp with every earlier slot
+    /// handed over, so a frame that came early past a gap does not open the gate.
+    func felPrerollSatisfied(clock: Double) -> Bool? {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        guard let rate = felFrameRate, clock.isFinite else { return nil }
+        let handed = arrivalFloor != nil ? arrivalFloor?.frontier : _lastReleasedPtsSeconds
+        guard let handed else { return false }
+        return handed + 1 / rate - clock >= Self.felPrerollSeconds
+    }
+
     /// Combined queue-readiness and look-ahead gate, called BEFORE decode so excess frames stay compressed.
     func mayEnqueueVideoFrame(ptsSeconds: Double, clockSeconds: Double, clockArmed: Bool) -> Bool {
         reorderLock.lock()
