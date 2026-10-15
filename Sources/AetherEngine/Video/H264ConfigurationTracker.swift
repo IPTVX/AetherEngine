@@ -1,7 +1,9 @@
 import Foundation
 
 /// Pump-local evidence that an AVC access unit no longer matches the sample description.
-/// Merely repeating SPS/PPS, or announcing an unused set, is not a decoder failure.
+/// Merely repeating SPS/PPS, or announcing an unused set, is not a decoder failure, and neither is a
+/// set that differs only where the native decoder takes the in-band value: a new PPS, VUI or level
+/// (#785 follow-up, see `H264SPS.decoderSignature`).
 /// No frames are decoded and only parameter sets / short slice headers are copied.
 struct H264ConfigurationTracker {
     struct Mismatch: Sendable, Equatable {
@@ -12,8 +14,7 @@ struct H264ConfigurationTracker {
         var summary: String { "H264 active SPS/PPS differs from native init: \(width)x\(height), SPS=\(spsID), PPS=\(ppsID)" }
     }
 
-    private let baselineSPS: [Int: [UInt8]]
-    private let baselinePPS: [Int: [UInt8]]
+    private let baselineSignatures: Set<[UInt8]>
     private var sps: [Int: [UInt8]]
     private var pps: [Int: [UInt8]]
 
@@ -41,7 +42,7 @@ struct H264ConfigurationTracker {
             pictures[ids.pps] = nal
         }
         guard !sequences.isEmpty, !pictures.isEmpty else { return nil }
-        baselineSPS = sequences; baselinePPS = pictures
+        baselineSignatures = Set(sequences.values.compactMap(H264SPS.decoderSignature(fromNAL:)))
         sps = sequences; pps = pictures
     }
 
@@ -77,8 +78,9 @@ struct H264ConfigurationTracker {
                 let prefix = Array(bytes[range.lowerBound..<min(range.upperBound, range.lowerBound + 33)])
                 guard let id = Self.slicePPS(prefix), let picture = pictures[id],
                       let ids = Self.pictureIDs(picture), let sequence = sequences[ids.sps],
-                      let size = Self.dimensions(sequence) else { continue }
-                if baselinePPS[id] != picture || baselineSPS[ids.sps] != sequence {
+                      let size = Self.dimensions(sequence),
+                      let signature = H264SPS.decoderSignature(fromNAL: sequence) else { continue }
+                if !baselineSignatures.contains(signature) {
                     mismatch = Mismatch(width: size.width, height: size.height, spsID: ids.sps, ppsID: id)
                 }
             default: break

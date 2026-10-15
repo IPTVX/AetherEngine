@@ -24,7 +24,8 @@ Why HLS-fMP4 for the native path instead of feeding `AVPlayer` the source URL di
 
 **AVC VOD configuration changes are judged before native muxing.** `H264ConfigurationTracker`
 starts from the producer’s effective `avcC`, follows length-prefixed SPS/PPS in NAL order, and checks
-the pair referenced by an IDR against that baseline. A mismatch exits the pump with a typed reason
+the SPS referenced by an IDR against that baseline by its decoder signature (profile through
+cropping; PPS, VUI and level are taken in band by the native decoder and do not count). A mismatch exits the pump with a typed reason
 before the changed sample is written; the session retains the verdict for a pump that finishes before
 its owning load is installed. Producer epoch and load generation checks reject superseded events.
 The existing `SoftwarePathEscalation` takeover owns recovery under its normal route and host opt-in

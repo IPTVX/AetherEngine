@@ -30,7 +30,11 @@ A length-prefixed H.264 file can retain its original `avcC` while later samples 
 SPS/PPS, including a resolution change under the same parameter-set IDs. Native HLS can then play
 audio without displaying video, including after seeking or reopening at that position. The producer
 checks the parameter sets actually referenced by an IDR before writing it into the native segment;
-repeated sets and announcements that no IDR uses do not change the route.
+repeated sets and announcements that no IDR uses do not change the route. Only the part of the SPS a
+decoder session is built from counts (`H264SPS.decoderSignature`: profile, chroma format and bit
+depth, frame numbering and picture order, reference frames, size and cropping). A new PPS, VUI or
+level keeps the native route, since the native decoder takes those in band: on macOS such a change
+played through natively in every arm, while a profile or resolution change froze the picture.
 
 In automatic mode, with `escalatesToSoftwarePath` enabled, a confirmed mismatch uses the existing
 native-to-software takeover. The software decoder accepts the changing frame dimensions, while the

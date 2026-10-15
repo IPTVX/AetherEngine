@@ -78,6 +78,40 @@ struct H264ConfigurationTrackerTests {
         #expect(H264ConfigurationTracker(avcC: Array(avcc().dropLast())) == nil)
         #expect(H264ConfigurationTracker(avcC: [1,2,3]) == nil)
     }
+    // #785 follow-up: in-band set pairs taken from x264 encodes joined with a stream copy. On macOS the
+    // native route played the VUI, level and PPS changes through (739 to 743 frames over 30 s) and
+    // froze at the profile change, as at a resolution change.
+    private static let baselineSPS = hex("6742c01fda014016ec05a810100a000003000200000300601e306540")
+    private static let baselinePPS = hex("68ce0fc8")
+    private func avcc(sps: [UInt8], pps: [UInt8]) -> [UInt8] {
+        [1, sps[1], sps[2], sps[3], 255, 225, 0, UInt8(sps.count)] + sps + [1, 0, UInt8(pps.count)] + pps
+    }
+    @Test("A set that differs only in VUI, level or PPS keeps the native route", arguments: [
+        ("6742c01fda014016ec05a810102a000003000200000300601e306540", "68ce0fc8"),
+        ("6742c029da014016ec0440000003004000000c03c60ca8", "68ce0fc8"),
+        ("6742c01fda014016ec05a810100a000003000200000300601e306540", "68ce0fcb"),
+    ])
+    func decoderCompatibleChange(sps: String, pps: String) throws {
+        var tracker = try #require(H264ConfigurationTracker(avcC: avcc(sps: Self.baselineSPS, pps: Self.baselinePPS)))
+        #expect(observe(&tracker, [Self.hex(sps), Self.hex(pps), idr]) == nil)
+        #expect(observe(&tracker, [idr]) == nil)
+    }
+    @Test("A profile change at the same size still takes the compatible decoder")
+    func profileChange() throws {
+        var tracker = try #require(H264ConfigurationTracker(avcC: avcc(sps: Self.baselineSPS, pps: Self.baselinePPS)))
+        let high = Self.hex("6764001facb402802dd80b50202014000003000400000300c03c60ca80")
+        let result = observe(&tracker, [high, Self.hex("68ee0fcb"), idr])
+        #expect(result?.width == 1280)
+        #expect(result?.height == 720)
+    }
+    @Test("The decoder signature ignores VUI and level but not size or profile")
+    func decoderSignature() throws {
+        let base = try #require(H264SPS.decoderSignature(fromNAL: Self.baselineSPS))
+        #expect(H264SPS.decoderSignature(fromNAL: Self.hex("6742c01fda014016ec05a810102a000003000200000300601e306540")) == base)
+        #expect(H264SPS.decoderSignature(fromNAL: Self.hex("6742c029da014016ec0440000003004000000c03c60ca8")) == base)
+        #expect(H264SPS.decoderSignature(fromNAL: Self.hex("6764001facb402802dd80b50202014000003000400000300c03c60ca80")) != base)
+        #expect(H264SPS.decoderSignature(fromNAL: sps) != H264SPS.decoderSignature(fromNAL: changed))
+    }
     @Test("The new media verdict respects explicit route, host and once-only constraints")
     func escalationPolicy() {
         let domain = SoftwarePathEscalation.videoConfigurationErrorDomain
