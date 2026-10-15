@@ -82,10 +82,20 @@ struct DemuxerOpenProfile: Sendable {
     /// distinguished them. Defaults to the pump, since every other path builds its profile explicitly.
     var readerLabel: String = "pump"
     var sourceOpenPolicy: SourceOpenPolicy = .init()
+    /// AE#792: the session's live header set. A reader opened with one reads its headers from it per
+    /// request instead of keeping the `extraHeaders` it was opened with, so a session-scoped open (the
+    /// playback demuxer, the producer's reopens) follows `updateRequestHeaders(_:)`. Nil everywhere else.
+    var requestHeaders: RequestHeaderStore? = nil
 
     func withSourceOpenPolicy(_ policy: SourceOpenPolicy) -> DemuxerOpenProfile {
         var copy = self
         copy.sourceOpenPolicy = policy
+        return copy
+    }
+
+    func withRequestHeaders(_ store: RequestHeaderStore?) -> DemuxerOpenProfile {
+        var copy = self
+        copy.requestHeaders = store
         return copy
     }
 
@@ -782,7 +792,8 @@ public final class Demuxer: @unchecked Sendable {
             boundedInitialFetch: openProfile.boundedInitialFetch,
             sequentialOnly: openProfile.avioSequentialOnly,
             heldConnection: openProfile.avioHeldConnection,
-            sourceOpenPolicy: openProfile.sourceOpenPolicy
+            sourceOpenPolicy: openProfile.sourceOpenPolicy,
+            requestHeaderStore: openProfile.requestHeaders
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider

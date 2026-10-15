@@ -281,6 +281,39 @@ session sat in `.error`; it now throws what the rebuild threw, the way the URL b
 rebuild superseded by a newer `load` or `stop` is not a failure and still returns normally, because
 the newer load owns the session.
 
+### Rotating a credential without a rebuild
+
+A media server that requires a bearer token on every request, with tokens that expire while a title
+plays, needs the next request to carry a new header and nothing else to change.
+`updateRequestHeaders(_:)` does that without the teardown `reloadAtCurrentPosition(applying:)` pays
+(AE#792):
+
+```swift
+let outcome = player.updateRequestHeaders(["Authorization": "Bearer \(fresh)"])
+```
+
+The set replaces the session's headers, the way `LoadOptions.httpHeaders` sets them at `load`; it is
+not merged. The session's source readers (the playback demuxer, the producer's reopens and revives,
+the I-frame and embedded-subtitle side readers) read their headers per request from one store the
+session creates at `load`, so the next request any of them makes carries the new set. A request
+already in flight finishes with the headers it was sent with. A reconnect already backing off after
+a refusal sends the new set on its next attempt, so a session stalled over a lapsed credential
+(`.stalled(reconnecting: true)`) recovers without a rebuild once the host supplies a current one;
+renewing ahead of the expiry avoids the stall entirely. The set is also installed into the session's
+options, so every rebuild that replays them (an audio switch, a background return,
+`reloadAtCurrentPosition()`) opens with it. Redirect scoping is unchanged: a credential still does
+not follow a cross-origin redirect.
+
+The call returns a `RequestHeaderUpdateOutcome`:
+
+| Outcome | When |
+| --- | --- |
+| `.appliedToLiveRequests` | every source request is made by the session's own readers: the `.loopback`, `.software` and FFmpeg `.audio` routes, and a load still opening. |
+| `.installedForNextRebuild` | the requests are made by something that fixed its headers when the session was built: AVFoundation on `.remoteBypass` or an AVPlayer-hosted audio item, a custom `IOReader` the host built, a remote disc image. Call `reloadAtCurrentPosition()` if the set is needed now. |
+| `.noActiveSession` | nothing is loaded; nothing was installed. |
+
+The log names the header names it replaced, never their values.
+
 ### Overriding the decode path
 
 `LoadOptions.preferredDecodePath` is the per-session escape onto `SoftwarePlaybackHost` (#461).
