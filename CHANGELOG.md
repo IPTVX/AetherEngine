@@ -50,7 +50,20 @@ the public-API contract.
   preserving a pending seek or cold-resume position and the session transport. Repeated or unused
   parameter sets keep the native route; an explicitly selected route or disabled escalation is honored.
 
-
+- **A live HLS source refused for a while keeps its session.** An IPTV panel that limits an account's
+  connections answers a live playlist refresh with 509 while another device holds the last slot, and
+  goes on refusing a session it evicted, while a fresh session from the loaded URL is admitted at
+  once. The ingest retried 1, 2 and 4 s apart and went terminal at 12 s, which on the software path
+  ended the session, and each refusal armed the origin's request pacer, so the host's reload then
+  waited up to 10 s for its first request. A refused refresh (429, 503, 509) is now asked again every
+  second, or after the origin's Retry-After up to 5 s, for up to 60 s, and so is a refused segment; an
+  unreachable origin or any other 5xx keeps the 12 s budget, so a dead channel or a lost network still
+  reaches the host's reopen or fallback as soon as before. A
+  session URL the loaded URL led to through redirects is asked for afresh through the loaded URL once
+  it has been refused twice, or at once when it answers as gone (a 4xx other than 429 and 408); the
+  playlist tracker follows MEDIA-SEQUENCE, so the segments continue where they left off. The live
+  ingest's refusals no longer arm the pacer or lower the origin's request budget; its own steady retry
+  is its pacing, and a ceiling the host declares or another path learns still binds it.
 - **The Profile 7 dual-layer route recovers from a system session loss (#739).** A screen lock or sleep
   invalidates both VideoToolbox sessions; the host's recovery reached only `HardwareVideoDecoder`, so on
   the route audio played on over a frozen picture. `DualLayerVideoDecoder` now reports one loss per
@@ -139,6 +152,14 @@ the public-API contract.
   so a crafted `mapping_idc` could slip past, and its writer allocates about 0.5 GB to write such an id
   back). The guard knows these paths; it does not prove there are no others. Every RPU in dovi_tool's
   test corpus (2333, Profile 5, 7 MEL and FEL, 8, CM v2.9 and v4.0) passes it and converts as before.
+- **A refused live join says so, instead of reading as an unreadable source.** When the live HLS
+  ingest's playlist was refused at the join, the probe saw no bytes and the load published
+  `customSourceProbeFailed`, which a host reads as a stream it cannot play: one that falls back to
+  another route on it moved the channel there for the rest of its session over a 509 an IPTV panel
+  gives while another device holds the account's last slot. The load now publishes the origin's
+  answer, as an HTTP reader's failed open does: `sourceRateLimited` (429/503/509) or `sourceRefused`
+  with the status in `underlyingCode`, or `liveSourceUnavailable` when the playlist could not be
+  reached.
 
 ## [7.36.0] - 2026-10-13
 
