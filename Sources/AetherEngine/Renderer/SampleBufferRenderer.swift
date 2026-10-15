@@ -176,6 +176,14 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// 90 to 100 ms at a start and 0.3 to 0.9 s after a seek.
     static let felPrerollSeconds = 0.167
 
+    /// `felPrerollSeconds`, capped one frame inside the look-ahead window: with the clock held still,
+    /// `mayEnqueueAnotherFrame` admits nothing past `felVideoLookaheadFrames` frames ahead of it, so
+    /// at 60 fps (nine frames, 0.15 s) a 0.167 s preroll could never fill and every start waited out
+    /// `AudioOutput.prerollTimeout`.
+    static func felPrerollSeconds(frameRate: Double) -> Double {
+        min(felPrerollSeconds, Double(felVideoLookaheadFrames - 1) / frameRate)
+    }
+
     /// The FEL path's preroll gate for `AudioOutput.videoPrerollSatisfied`: true once frames up to
     /// `felPrerollSeconds` past `clock` (source seconds) are in the layer, nil off the FEL path. On
     /// the arrival-order path only the frontier counts, the newest timestamp with every earlier slot
@@ -186,7 +194,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         guard let rate = felFrameRate, clock.isFinite else { return nil }
         let handed = arrivalFloor != nil ? arrivalFloor?.frontier : _lastReleasedPtsSeconds
         guard let handed else { return false }
-        return handed + 1 / rate - clock >= Self.felPrerollSeconds
+        return handed + 1 / rate - clock >= Self.felPrerollSeconds(frameRate: rate)
     }
 
     /// Combined queue-readiness and look-ahead gate, called BEFORE decode so excess frames stay compressed.

@@ -67,6 +67,42 @@ struct VideoPrerollTests {
         #expect(renderer.felPrerollSatisfied(clock: target) == true)
     }
 
+    @Test("After a seek to a target between two frames the gate still opens without a running clock",
+          arguments: [0.1, 0.4, 0.6, 0.9])
+    @MainActor
+    func gateOpensAfterAnOffGridSeek(phase: Double) {
+        let renderer = SampleBufferRenderer()
+        renderer.setFELLookahead(enabled: true, frameRate: 24)
+        renderer.setArrivalOrderHandover(frameRate: 24)
+        let pixels = Self.makePixelBuffer()
+        let target = (100 + phase) / 24
+        renderer.setSkipThreshold(CMTime(seconds: target, preferredTimescale: 90000))
+        // Decode order from the GOP's anchor below the target, as the decoder delivers it after a seek.
+        for i in PresentationFloorTests.decodeOrder(gop: 8, frames: 24, startingAt: 96) {
+            renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i))
+        }
+        #expect(renderer.felPrerollSatisfied(clock: target) == true)
+        #expect(renderer.framesBelowFloor == 0)
+    }
+
+    @Test("At 60 fps the preroll fits inside the look-ahead window")
+    @MainActor
+    func prerollFitsTheLookaheadAt60() {
+        let renderer = SampleBufferRenderer()
+        renderer.setFELLookahead(enabled: true, frameRate: 60)
+        renderer.setArrivalOrderHandover(frameRate: 60)
+        let pixels = Self.makePixelBuffer()
+        // Everything the look-ahead admits with the clock held at 0.
+        var admitted = 0
+        while SampleBufferRenderer.mayEnqueueAnotherFrame(
+            rendererReady: true, felFrameRate: 60, framePTS: Double(admitted) / 60,
+            clockSeconds: 0, clockArmed: true) {
+            renderer.enqueue(pixelBuffer: pixels, pts: CMTime(value: Int64(admitted), timescale: 60))
+            admitted += 1
+        }
+        #expect(renderer.felPrerollSatisfied(clock: 0) == true, "\(admitted) frames admitted")
+    }
+
     // MARK: - Clock
 
     /// A gate the test opens by hand.
@@ -124,6 +160,21 @@ struct VideoPrerollTests {
         gate.set(true)
         let started = try await waitFor(upTo: .milliseconds(300)) { output.synchronizer.rate != 0 }
         #expect(!started)
+    }
+
+    @Test("A play after a seek landed while paused starts through the preroll", .timeLimit(.minutes(1)))
+    func playAfterAPausedSeekPrerolls() async throws {
+        let output = AudioOutput()
+        let gate = Gate()
+        output.videoPrerollSatisfied = { _ in gate.isOpen }
+        output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 0)
+        #expect(!output.prerollPending, "a paused seek does not ask the gate")
+        output.setRate(1)
+        #expect(output.synchronizer.rate == 0, "nothing is queued yet")
+        #expect(output.prerollPending, "the host must not read this clock as stalled")
+        gate.set(true)
+        try await waitFor { output.synchronizer.rate == 1 }
+        #expect(!output.prerollPending)
     }
 
     @Test("A gate that never opens starts the clock after the timeout", .timeLimit(.minutes(1)))

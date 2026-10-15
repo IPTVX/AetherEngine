@@ -1293,7 +1293,8 @@ final class SoftwarePlaybackHost {
         switch RendererClockResume.onPlay(
             hostPaused: pausedByHost,
             clockArmed: clockArmed,
-            synchronizerRate: audioOutput?.rate ?? 0,
+            // A clock a preroll holds (#774) is about to start, not stalled.
+            synchronizerRate: audioOutput?.prerollPending == true ? lastRate : audioOutput?.rate ?? 0,
             rebuffering: demuxDiag.snapshot.rebuffering,
             parkedAtEndOfMedia: didParkClockAtEnd
         ) {

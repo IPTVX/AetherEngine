@@ -50,9 +50,13 @@ struct PresentationFloor {
     /// Forgets everything (a flush). `start` is the lowest timestamp that can still arrive, when the
     /// caller knows it: after a seek the first frame past the skip threshold need not be the lowest
     /// one to come, since B-frames below it arrive after it in decode order, so the frontier starts
-    /// just below the threshold rather than at that frame.
+    /// just below the threshold rather than at that frame. Half a frame below, not a whole one: a seek
+    /// target is not on the frame grid, and from a whole frame below the first frame past it joins
+    /// only when it lies within half a frame of the target. Otherwise the frontier waited for the clock,
+    /// which a preroll holds still (#774), so about every second seek ran into the preroll timeout.
+    /// The floor this seeds is the threshold itself, which no admitted frame is below.
     mutating func reset(start: Double? = nil) {
-        frontier = start.map { $0 - interval }
+        frontier = start.map { $0 - 0.5 * interval }
         ahead.removeAll()
         floor = -.infinity
     }

@@ -172,6 +172,13 @@ final class AudioOutput: @unchecked Sendable {
         // A host resumes right after it arms the clock; while a preroll waits, that rate is the one
         // the preroll starts at, not a start of its own.
         if rate > 0, updatePrerollRate(rate) { return }
+        // A clock that stands still starts through the preroll on a session that has one: a seek
+        // landed while paused anchors at rate 0 and never asks the gate, so the play that follows
+        // would otherwise start it with nothing queued.
+        if rate > 0, synchronizer.rate == 0, videoPrerollSatisfied?(currentTime.seconds) != nil {
+            seekClock(to: currentTime, rate: rate)
+            return
+        }
         cancelPreroll()
         let at = synchronizer.currentTime()
         EngineLog.emit("[AudioOutput] setRate \(rate) at t=\(String(format: "%.3f", timeline.sourceSeconds(forRenderer: at.seconds)))", category: .swPlayback)
@@ -431,7 +438,21 @@ final class AudioOutput: @unchecked Sendable {
     private var prerollRate: Float?  // guarded by lock; non-nil while a preroll waits: the rate it starts at
     private let prerollQueue = DispatchQueue(label: "aether.audio.preroll", qos: .userInteractive)
 
+    /// Whether a preroll holds the clock at rate 0 to start it later. A host must not read that
+    /// standing clock as stalled (AE#549) and restart it.
+    var prerollPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return prerollRate != nil
+    }
+
     private func pollPreroll(gen: Int, time: CMTime, started: CFTimeInterval) {
+        // A pause, seek or stop since: this chain is over. Without the check every cancelled preroll
+        // polled on at 500 Hz, taking both locks, until its gate opened or it timed out.
+        lock.lock()
+        let current = prerollGeneration == gen && prerollRate != nil
+        lock.unlock()
+        guard current else { return }
         let ready = videoPrerollSatisfied?(time.seconds) != false
         let waited = CACurrentMediaTime() - started
         if !ready, waited < Self.prerollTimeout {
