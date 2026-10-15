@@ -30,7 +30,11 @@ A length-prefixed H.264 file can retain its original `avcC` while later samples 
 SPS/PPS, including a resolution change under the same parameter-set IDs. Native HLS can then play
 audio without displaying video, including after seeking or reopening at that position. The producer
 checks the parameter sets actually referenced by an IDR before writing it into the native segment;
-repeated sets and announcements that no IDR uses do not change the route.
+repeated sets and announcements that no IDR uses do not change the route. Only the part of the SPS a
+decoder session is built from counts (`H264SPS.decoderSignature`: profile, chroma format and bit
+depth, frame numbering and picture order, reference frames, size and cropping). A new PPS, VUI or
+level keeps the native route, since the native decoder takes those in band: on macOS such a change
+played through natively in every arm, while a profile or resolution change froze the picture.
 
 In automatic mode, with `escalatesToSoftwarePath` enabled, a confirmed mismatch uses the existing
 native-to-software takeover. The software decoder accepts the changing frame dimensions, while the
@@ -270,8 +274,10 @@ The label can also be taken back from the item itself, where the platform has no
 
 Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOptions.audioBridgeMode`):
 
-- **`.surroundCompat`** (default): the encoder is chosen per source, not per mode. A source with more than two channels is re-encoded to lossy EAC3 at 128 kbps per channel (768 kbps 5.1). AVPlayer hands the encoded bitstream to HDMI and the sink decodes its own 5.1 mix, so surround works on essentially every modern AVR and soundbar (Sonos Arc, Samsung HW-Q, Bose). Two channels or fewer have no surround to carry and take the FLAC encoder instead, which is lossless where EAC3 would have been 256 kbps lossy, and LPCM the route decodes on the routes that can only pass a Dolby bitstream through (AE#395: an AirPlay 2 optical adapter played one MPEG-TS program's stream-copied AC3 5.1 and was silent on the bridged EAC3 stereo of the same program, so which track `av_find_best_stream` happened to pick decided whether the viewer heard anything).
-- **`.lossless`** (opt-in): FLAC up to 7.1 lossless, which AVPlayer decodes to LPCM. Needs an AVR that accepts multichannel LPCM via HDMI (Denon, Marantz, NAD); on soundbars and basic AVRs that handle multichannel only via bitstream codecs the LPCM gets downmixed to stereo at the route.
+- **`.surroundCompat`** (default): the encoder is chosen per source, not per mode. A source with more than two channels is re-encoded to lossy EAC3 at 128 kbps per channel (768 kbps 5.1). AVPlayer hands the encoded bitstream to HDMI and the sink decodes its own 5.1 mix, so surround works on essentially every AVR and soundbar, including one behind legacy ARC. Two channels or fewer have no surround to carry and take the FLAC encoder instead, which is lossless where EAC3 would have been 256 kbps lossy, and LPCM the route decodes on the routes that can only pass a Dolby bitstream through (AE#395: an AirPlay 2 optical adapter played one MPEG-TS program's stream-copied AC3 5.1 and was silent on the bridged EAC3 stereo of the same program, so which track `av_find_best_stream` happened to pick decided whether the viewer heard anything).
+- **`.lossless`** (opt-in): FLAC up to 7.1 lossless, which AVPlayer decodes to LPCM. Needs a sink that takes multichannel LPCM: an AVR over HDMI, or an AVR or soundbar on eARC (a Sonos Arc on eARC takes 6-channel LPCM, so a 7.1 source arrives as lossless 5.1 there, folded by tvOS). Behind legacy ARC, which carries stereo LPCM or a Dolby bitstream only, the LPCM is downmixed to stereo, and `.surroundCompat` is the right mode.
+
+The engine does not pick between the two from the route (AE#794): with tvOS's Continuous Audio Connection on, every HDMI route reports 32 unlabelled channels whatever the sink takes, so an eARC soundbar and a legacy-ARC one look the same, and a wrong FLAC pick on the second plays stereo. The mode stays the host's choice.
 
 Either encoder opens at a sample rate it actually has, which is not always the source's (AE#548). E-AC-3 exists at 32 / 44.1 / 48 kHz only, so a 96 kHz TrueHD or DTS-HD master is resampled to 48 kHz on the `.surroundCompat` arm; opening the encoder at the source rate instead made `avcodec_open2` refuse the context and took the whole session to silent video-only. The rates come from `avcodec_get_supported_config`, so an FFmpeg bump that widens them needs no change here, and an encoder that advertises no list (FLAC) keeps the source rate untouched, which is what keeps `.lossless` bit-perfect at 96 and 192 kHz. The resampler is in the path on every bridged packet either way, so the conversion costs nothing that was not already being paid.
 

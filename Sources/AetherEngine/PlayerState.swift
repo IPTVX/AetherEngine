@@ -567,8 +567,8 @@ public struct LoadOptions: Sendable, Equatable {
 
     /// Bridge encoder for codecs that cannot stream-copy into fMP4 (TrueHD, DTS, DTS-HD MA, MP3, Opus, EAC3-from-MKV-without-dec3-extradata).
     ///
-    /// - `.surroundCompat` (default): EAC3 128 kbps/ch. Works on soundbars (Sonos Arc, Samsung HW-Q, Bose). Lossy; caps 7.1 to 5.1.
-    /// - `.lossless`: FLAC up to 7.1. Needs a sink that accepts multichannel LPCM (Denon / Marantz / NAD AVRs); stereo-only routes silently downmix.
+    /// - `.surroundCompat` (default): EAC3 128 kbps/ch. Surround on every sink, including a soundbar behind legacy ARC. Lossy; downmixes 7.1 to 5.1.
+    /// - `.lossless`: FLAC up to 7.1. Needs a sink that takes multichannel LPCM (an AVR over HDMI, or an AVR or soundbar on eARC); legacy-ARC routes silently downmix to stereo. The engine cannot tell the two apart from the route (AE#794).
     public var audioBridgeMode: AudioBridgeMode
 
     /// TrueHD Atmos and DTS:X delivery (#731). `.off` (default) keeps `audioBridgeMode`'s 7.1 channel
@@ -1277,6 +1277,12 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// Settable inside the module so `probeDetectingAtmos` can confirm it post-decode without rebuilding the struct field by field.
     public internal(set) var isAtmos: Bool
 
+    /// DTS:X. True from the probe when libavcodec labels the profile DTS:X, and set during playback when
+    /// LibDTSX confirms a track FFmpeg labelled plain DTS-HD MA (FFmpeg reads only two of DTS:X's
+    /// markers). Never cleared once set for a session's source, so a confirmed track keeps its name in a
+    /// track menu after a switch away from it.
+    public internal(set) var isDTSX: Bool
+
     /// ASS / SSA tracks only: `[Script Info]` + `[V4+ Styles]` + `[Events]` format line from codec extradata. Hosts rendering ASS styling themselves (see `LoadOptions.preserveASSMarkup`) need it to resolve style references. nil for all other track kinds.
     public let assHeader: String?
 
@@ -1301,7 +1307,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// nil when undeclared. This is where DTS:X and TrueHD Atmos show up; `isAtmos` covers E-AC-3 JOC only.
     public let profile: String?
 
-    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil) {
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate
         self.bitsPerSample = bitsPerSample
         self.sampleFormat = sampleFormat
@@ -1318,9 +1324,16 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
         self.isHearingImpaired = isHearingImpaired
         self.isCommentary = isCommentary
         self.isAtmos = isAtmos
+        self.isDTSX = isDTSX || Self.profileNamesDTSX(codec: codec, profile: profile)
         self.assHeader = assHeader
         self.isExternal = isExternal
         self.isNativelyRenderedSubtitle = isNativelyRenderedSubtitle
+    }
+
+    /// libavcodec's DTS:X profiles, "DTS-HD MA + DTS:X" and "DTS-HD MA + DTS:X IMAX". `dca` is the
+    /// decoder's name, `dts` the codec's, which a build without the decoder reports.
+    static func profileNamesDTSX(codec: String, profile: String?) -> Bool {
+        ["dca", "dts"].contains(codec.lowercased()) && (profile?.contains("DTS:X") ?? false)
     }
 }
 

@@ -64,6 +64,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A TrueHD track started or switched to mid-stream is no longer reported as a dead decoder** (#786,
+  thanks @ijuniorfu). TrueHD and MLP decode only from a major sync, so after a start, seek or track
+  switch past the opening the decoder skips up to about a hundred 40-frame access units before its
+  first frame. The channel bridge judged its decoder dead after 64 silent packets, about 53 ms of
+  TrueHD, so `AudioBridge` raised AE#396 / AE#641 and the session went to `.error`
+  (`.audioBridgeProducedNoOutput`) while it played, ignoring seeks after it. For these two codecs the
+  bound is now 1200 packets (one second of source), the bound `SpatialAudioBridge` already used for
+  the same wait; every other source keeps 64.
+
 - **Software VOD exposes retained cache ranges to host timelines.** `residentRanges` now covers
   compressed video packets together with the selected audio stream, including retained history,
   gaps and disk eviction. Cached seeks keep the same spans; cold seeks and teardown clear them.
@@ -103,7 +112,10 @@ the public-API contract.
   references SPS/PPS that differ from the AVC initialization, the producer stops before writing that
   sample into the stale native segment. Automatic routing uses the existing software-path takeover,
   preserving a pending seek or cold-resume position and the session transport. Repeated or unused
-  parameter sets keep the native route; an explicitly selected route or disabled escalation is honored.
+  parameter sets keep the native route, and so does a change confined to the PPS, the VUI or the
+  level, which the native decoder takes in band (a TS recording remuxed to MKV or MP4 carries those);
+  only the fields a decoder session is built from, profile through cropping, take the software path.
+  An explicitly selected route or disabled escalation is honored.
 
 - **A live HLS source refused for a while keeps its session.** An IPTV panel that limits an account's
   connections answers a live playlist refresh with 509 while another device holds the last slot, and

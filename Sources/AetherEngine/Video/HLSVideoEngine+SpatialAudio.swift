@@ -188,6 +188,7 @@ extension HLSVideoEngine {
                     // The verdict decoded the first packets; the bridge starts from the same ones again.
                     dtsx.reset()
                     decoder = dtsx
+                    audioIsConfirmedDTSX = true
                 case .refused(let reason):
                     EngineLog.emit(
                         "[HLSVideoEngine] DTS-HD MA track is not DTS:X LibDTSX renders (\(reason)); "
