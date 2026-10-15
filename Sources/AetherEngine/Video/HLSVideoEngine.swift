@@ -41,7 +41,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     // MARK: - State
 
     let sourceURL: URL
-    let sourceHTTPHeaders: [String: String]
+    /// AE#792: the session's live header set. Seeded from `sourceHTTPHeaders` at init; `AetherEngine`
+    /// installs its session store here before `start()`, so the opens below and the playback demuxer it
+    /// hands over read the same value, and `updateRequestHeaders(_:)` reaches both.
+    var requestHeaders: RequestHeaderStore
+    var sourceHTTPHeaders: [String: String] { requestHeaders.current }
     private let dvModeAvailable: Bool
 
     /// From `LoadOptions.keepDvh1TagWithoutDV`; default OFF, set only for misreporting DV panels.
@@ -1037,7 +1041,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         forwardBufferSegments: Int? = nil
     ) {
         self.sourceURL = url
-        self.sourceHTTPHeaders = sourceHTTPHeaders
+        self.requestHeaders = RequestHeaderStore(sourceHTTPHeaders)
         self.sequentialOrigin = sequentialOrigin
         self.heldSourceConnection = heldSourceConnection
         self.declaredDurationSeconds = declaredDurationSeconds
@@ -1197,6 +1201,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             .withSourceOpenPolicy(openProfile.sourceOpenPolicy)
             .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds)
             .withHeldSourceConnection(heldSourceConnection)
+            .withRequestHeaders(requestHeaders)
     }
 
     /// `LoadOptions.sequentialOrigin` for this session. Gates the VOD readError revive
@@ -1258,7 +1263,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         } else {
             dem = Demuxer()
             do {
-                try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: isLiveSession)
+                try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
+                             profile: openProfile.withRequestHeaders(requestHeaders), isLive: isLiveSession)
             } catch {
                 throw Self.openFailure(from: error)
             }
@@ -2843,7 +2849,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             codec: cfg.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC ? .hevc : .h264,
             extradata: cfg.codecpar.pointee.extradata.map { UnsafePointer($0) },
             size: Int(cfg.codecpar.pointee.extradata_size))
-        let url = sourceURL, headers = sourceHTTPHeaders, custom = customIFrameReader
+        let url = sourceURL, headers = sourceHTTPHeaders, headerStore = requestHeaders, custom = customIFrameReader
         // The side reader owns the clone from here; `stop()` must not close it a second time.
         customIFrameReader = nil
         let reader = IFrameSideReader(
@@ -2852,7 +2858,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     try dem.open(reader: custom.reader, formatHint: custom.formatHint,
                                  profile: .iFrameSideDemuxer)
                 } else {
-                    try dem.open(url: url, extraHeaders: headers, profile: .iFrameSideDemuxer, isLive: false)
+                    try dem.open(url: url, extraHeaders: headers,
+                                 profile: DemuxerOpenProfile.iFrameSideDemuxer.withRequestHeaders(headerStore),
+                                 isLive: false)
                 }
             },
             cleanup: { custom?.reader.close() },

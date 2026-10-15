@@ -2294,6 +2294,20 @@ public final class AetherEngine: ObservableObject {
     /// `load`, the custom-source branch reads these fields one by one). See `rebuildResumesPlaying`.
     func setLoadedAutoplay(_ autoplay: Bool) { loadedOptions.autoplay = autoplay }
 
+    /// AE#792: the fifth narrow write, for the same reason as the teletext page. A rotated credential
+    /// has to live where the session's own rebuilds replay it from, or the next audio switch, background
+    /// return or revive would reopen with the header the origin already refused.
+    func setLoadedHTTPHeaders(_ headers: [String: String]) { loadedOptions.httpHeaders = headers }
+
+    /// AE#792: the session's live request headers. One store per load, created from
+    /// `LoadOptions.httpHeaders`, handed to every reader the session opens on its source, and
+    /// replaced in place by `updateRequestHeaders(_:)`.
+    var sessionRequestHeaders = RequestHeaderStore([:])
+
+    /// AE#792: the audio-only session is an `AVPlayer` item, whose request headers AVFoundation fixed
+    /// at asset creation. Reset by every load.
+    var audioSessionRequestsOwnedByAVFoundation = false
+
     /// AE#460: the second narrow write into `loadedOptions` outside a load, for a host correction
     /// that a session-preserving reload is about to rebuild on. Installed before the rebuild rather
     /// than carried through it, because only the URL branch passes a struct into `load`: the
@@ -4183,6 +4197,10 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
+        // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
+        // this one through a reader that outlived it.
+        sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
+        audioSessionRequestsOwnedByAVFoundation = false
         // #377: register the host's concurrency ceiling for this origin before anything fetches
         // from it. Keyed on the origin rather than the load, so the subtitle side reader and any
         // later reopen of the same source are bound by it too.
@@ -4432,7 +4450,7 @@ public final class AetherEngine: ObservableObject {
             // AetherEngine#10: a @MainActor async body without a suspension point blocks the main thread
             // despite the async signature; a detached task's value introduces a real background hop,
             // and BlockingWork keeps that hop off the cooperative pool while the open blocks.
-            try await BlockingWork.detached(priority: .userInitiated) { [probe, source, options] in
+            try await BlockingWork.detached(priority: .userInitiated) { [probe, source, options, requestHeaders = sessionRequestHeaders] in
                 // Caller-bounded find_stream_info budget (#68); nil keeps the .playback default. This probe
                 // demuxer is reused as the session demuxer, so the cap lands on the open that actually pays it.
                 let probeProfile = DemuxerOpenProfile.playback.withProbeBudget(
@@ -4441,6 +4459,7 @@ public final class AetherEngine: ObservableObject {
                                           declaredDuration: options.declaredDurationSeconds)
                     .withHeldSourceConnection(options.heldSourceConnection)
                     .withSourceOpenPolicy(options.sourceOpenPolicy)
+                    .withRequestHeaders(requestHeaders)
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because
@@ -4792,6 +4811,7 @@ public final class AetherEngine: ObservableObject {
                     if probeOpened { probe.close() }
                     try await loadAudioNative(url: url, startPosition: startPosition, httpHeaders: options.httpHeaders, generation: gen)
                     try checkLoadCurrent(gen)
+                    audioSessionRequestsOwnedByAVFoundation = true
                     playbackBackend = .audio
                     activeVideoDecoder = nil
                     activeAudioDecoder = "AVPlayer"
