@@ -47,8 +47,9 @@ the public-API contract.
   keeps today's build. A host that cannot ship one of them turns its trait off
   (`.package(url:..., traits: [])`, or the package's traits in Xcode): the library is neither linked
   nor resolved, and its codec keeps the channel bridge whatever `objectAudioRendering` asks, with the
-  reason in the session log. The manifest moves to swift-tools-version 6.1, which traits need. CI also
-  builds with both traits off. See README › Package traits.
+  reason in the session log, and the automatic audio pick no longer prefers it. The manifest moves to
+  swift-tools-version 6.1, which traits need. CI also builds the engine and its tests with both traits
+  off. See README › Package traits.
 
 ### Fixed
 
