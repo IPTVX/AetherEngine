@@ -44,6 +44,18 @@ the public-API contract.
 
 ### Fixed
 
+- **A live HLS source refused for a while keeps its session.** An IPTV panel that limits an account's
+  connections answers a live playlist refresh with 509 while another device holds the last slot, and
+  goes on refusing a session it evicted, while a fresh session from the loaded URL is admitted at
+  once. The ingest retried 1, 2 and 4 s apart and went terminal at 12 s, which on the software path
+  ended the session, and each refusal armed the origin's request pacer, so the host's reload then
+  waited up to 10 s for its first request. A refused or unreachable refresh is now asked again every
+  second, or after the origin's Retry-After up to 5 s, for up to 60 s, and so is a refused segment. A
+  session URL the loaded URL led to through redirects is asked for afresh through the loaded URL once
+  it has been refused twice, or at once when it answers as gone (a 4xx other than 429 and 408); the
+  playlist tracker follows MEDIA-SEQUENCE, so the segments continue where they left off. The live
+  ingest's refusals no longer arm the pacer or lower the origin's request budget; its own steady retry
+  is its pacing, and a ceiling the host declares or another path learns still binds it.
 - **The Profile 7 dual-layer route recovers from a system session loss (#739).** A screen lock or sleep
   invalidates both VideoToolbox sessions; the host's recovery reached only `HardwareVideoDecoder`, so on
   the route audio played on over a frozen picture. `DualLayerVideoDecoder` now reports one loss per
