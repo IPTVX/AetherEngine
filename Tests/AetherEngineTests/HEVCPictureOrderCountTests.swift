@@ -310,6 +310,17 @@ struct HEVCPictureOrderCountTests {
         c.feedParameterSets([B.sps(pocLsbBits: 17), B.pps()])
         #expect(Self.feed(&c, B.slice(type: T.idrNLP, pocLsbBits: 17)) == nil)
     }
+
+    @Test("parameter set ids beyond the spec's 15 (SPS) and 63 (PPS) are not stored")
+    func rejectsOutOfRangeParameterSetIDs() {
+        var c = HEVCPictureOrderCount()
+        c.feedParameterSets([B.sps(id: 16, pocLsbBits: 8), B.pps(id: 1, spsID: 16), B.pps(id: 64, spsID: 0),
+                             B.sps(id: 0, pocLsbBits: 8)])
+        #expect(Self.feed(&c, B.slice(type: T.idrNLP, ppsID: 1, pocLsbBits: 8)) == nil, "PPS 1 names SPS 16")
+        #expect(Self.feed(&c, B.slice(type: T.idrNLP, ppsID: 64, pocLsbBits: 8)) == nil, "PPS 64 was not stored")
+        c.feedParameterSets([B.pps(id: 63, spsID: 15), B.sps(id: 15, pocLsbBits: 8)])
+        #expect(Self.feed(&c, B.slice(type: T.idrNLP, ppsID: 63, pocLsbBits: 8)) == .init(poc: 0, startsSequence: true))
+    }
 }
 
 private extension Array where Element == UInt8 {
