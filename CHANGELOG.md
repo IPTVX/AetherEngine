@@ -22,6 +22,18 @@ the public-API contract.
 
 ### Fixed
 
+- **FLAC with blocks under 192 samples plays instead of failing to open** (#764). An MKV whose FLAC used
+  small fixed blocks (`STREAMINFO` min = max = 144, 48 kHz stereo) died on the native path with
+  `-11829 "Cannot Open"` (underlying `-12848`), and the same stream in a plain `.flac` file failed the
+  audio-only route. CoreMedia's floor for `min_blocksize` is 192, not the specification's 16: measured on
+  macOS 26, a field of 191 drops the audio track even over real 4608-sample frames, and a field of 192 over
+  real 144-sample frames gets past that check and then hangs the decoder, so the field cannot simply be
+  raised. Such a stream is now decoded by libavcodec: the video route bridges it (bit-perfect for FLAC),
+  the audio-only route takes the FFmpeg host. A zeroed `min_blocksize` over a legal `max_blocksize` keeps
+  the AE#221 clamp and stays a stream copy. The stream-copy fallback packet duration for FLAC also uses
+  the block size `STREAMINFO` declares when min = max, instead of assuming 4096 samples. Covered by
+  `Issue764FLACSmallBlockTests`.
+
 - **`serveIFramePlaylist` shows scrub thumbnails for HDR10, HLG and Dolby Vision titles** (#682). The
   stock tvOS scrubber fetched the first keyframe of a PQ rendition and then left the thumbnail box empty,
   for Dolby Vision profile 5 and 8.1 as much as for plain HDR10, at 4K and at 1080p (measured on an Apple
