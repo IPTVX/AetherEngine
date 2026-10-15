@@ -114,6 +114,10 @@ final class SoftwarePlaybackHost {
     /// point it uses for `AVPlayerLayer`.
     var displayLayer: AVSampleBufferDisplayLayer { renderer.displayLayer }
 
+    /// Whether load selected VideoToolbox rather than libavcodec / dav1d for video decoding.
+    /// Only meaningful after load has returned successfully.
+    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder }
+
     /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
     /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
     /// newest frame enqueued, which a layer that is not on screen is all there is of.
@@ -1980,7 +1984,7 @@ final class SoftwarePlaybackHost {
         let onErrorForGeneration: @Sendable (String, UInt64) -> Void = { [weak self] msg, generation in
             Task { @MainActor [weak self] in
                 guard let self, self.admitsRead(generation: generation) else { return }
-                self.failure = PlaybackErrorInfo(kind: .softwarePipelineFailed, message: msg)
+                self.failure = PlaybackErrorInfo(kind: liveSession ? .liveSourceUnavailable : .softwarePipelineFailed, message: msg)
             }
         }
         let onEndForGeneration: @Sendable (UInt64) -> Void = { [weak self] generation in
@@ -2072,6 +2076,10 @@ final class SoftwarePlaybackHost {
                     videoTimeBaseSeconds: vTbSec,
                     audioTimeBaseSeconds: aTbSec,
                     noteEdge: noteEdge,
+                    readerMayAdvance: { [weak self] in
+                        guard let self else { return false }
+                        return !self.dvrRecoveryPending && !self.seekWindowOpen
+                    },
                     stopRequested: getStopRequested,
                     onError: onError,
                     onSourceEnded: setSourceEnded,
@@ -2165,7 +2173,7 @@ final class SoftwarePlaybackHost {
     // MARK: - Live reader loop (DVR sessions)
 
     /// Source -> ring (runs regardless of play/pause). Discontinuity reconciliation before ring append so the ring carries one continuous timeline.
-    nonisolated private static func runLiveReaderLoop(
+    nonisolated static func runLiveReaderLoop(
         demuxer: Demuxer,
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
@@ -2174,6 +2182,7 @@ final class SoftwarePlaybackHost {
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
         noteEdge: @Sendable (Double) -> Void,
+        readerMayAdvance: @Sendable () -> Bool = { true },
         stopRequested: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
         onSourceEnded: @Sendable () -> Void,
@@ -2190,6 +2199,17 @@ final class SoftwarePlaybackHost {
         var discontinuityOffsetSec = 0.0
         var loggedSWDiscontinuity = false
         var lastSeenExtradata: Data? = nil
+        let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
+            videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
+
+        func awaitReaderAdmission() -> Bool {
+            condition.lock()
+            while !readerMayAdvance() && !stopRequested() {
+                _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
+            }
+            condition.unlock()
+            return !stopRequested()
+        }
 
         defer {
             condition.lock()
@@ -2200,7 +2220,8 @@ final class SoftwarePlaybackHost {
         func readerIteration() -> Bool {
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
-                packet = try demuxer.readPacket()
+                guard awaitReaderAdmission() else { return false }
+                packet = try replayReader.read(isCurrent: { !stopRequested() }) { try demuxer.readPacket() }
             } catch {
                 // Audit SEG-104: a stop closes the demuxer, which aborts a parked read. That is the
                 // stop arriving, not a lost source.
@@ -2213,6 +2234,14 @@ final class SoftwarePlaybackHost {
             guard let packet else {
                 EngineLog.emit("[SWHost] live reader EOF (source lost)", category: .swPlayback)
                 onSourceEnded()
+                return false
+            }
+
+            // Keep the recovery target resident until its decoder/clock transition settles,
+            // including a source read that was already in flight when recovery began.
+            guard awaitReaderAdmission() else {
+                var stale: UnsafeMutablePointer<AVPacket>? = packet
+                av_packet_free(&stale)
                 return false
             }
 
@@ -2715,6 +2744,10 @@ final class SoftwarePlaybackHost {
         var frameIntervalSec = 0.0
         var discontinuityOffsetSec = 0.0
         var loggedSeamCount = 0
+        let replayReader = isLive ? LiveReplayPacketReader(videoIndex: videoStreamIndex,
+            audioIndex: audioStreamIndex, videoTimeBase: videoTimeBaseSeconds,
+            audioTimeBase: audioTimeBaseSeconds) : nil
+        var replayGeneration = seekGeneration()
 
         // Clock-arming fallback bookkeeping: a declared audio track whose
         // decoder never produces buffers (corrupt stream) must not leave
@@ -3003,7 +3036,17 @@ final class SoftwarePlaybackHost {
                 if let readAhead {
                     packet = try readAhead.read(isCurrent: { admitsRead(genBeforeRead) })?.makeAVPacket()
                 } else {
-                    packet = try demuxer.readPacket(isCurrent: { admitsRead(genBeforeRead) })
+                    if replayGeneration != genBeforeRead {
+                        replayReader?.reset()
+                        replayGeneration = genBeforeRead
+                    }
+                    if let replayReader {
+                        packet = try replayReader.read(isCurrent: { admitsRead(genBeforeRead) }) {
+                            try demuxer.readPacket(isCurrent: { admitsRead(genBeforeRead) })
+                        }
+                    } else {
+                        packet = try demuxer.readPacket(isCurrent: { admitsRead(genBeforeRead) })
+                    }
                 }
             } catch {
                 // Stop/seek cancellation is not a playback failure, including a normal .closed

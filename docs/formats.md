@@ -57,9 +57,15 @@ zero). A source is only repaired when every sampled pair is equal, the decode la
 picture order regresses, and the ranks it produces are distinct and fill the sampled window (or a
 decode-order prefix of at least nine pictures fills its own range exactly, which covers a
 hierarchical mini-GOP longer than the reorder delay, #699). Anything
-short of that (variable frame timing, a picture order that does not advance one rank per picture, a
+short of that (a picture order that does not advance one rank per picture, a
 sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it.
 Reported by @orut34iop; the HEVC case (#699) by @ijuniorfu.
+
+For H.264 only, a changing decode cadence can instead use the original-slot policy described below.
+This fallback requires a progressive IDR head with equal PTS/DTS, a container start/index lead that
+exactly matches the observed reorder head, and a complete, distinct picture-order prefix whose
+timestamps pass the slot policy. It assigns existing slots plus that lead rather than fitting a
+frame rate; DTS, audio and the keyframe index remain unchanged. An ambiguous head stays untouched.
 
 ### Matroska with presentation slots in coding order
 
@@ -104,10 +110,9 @@ offsets. Seeking into that region can produce persistent judder despite normal
 aggregate FPS and sufficient network buffering.
 
 When a healthy origin picture corroborates the container's edit/index lead, the
-demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. One
-bounded, complete IDR-to-IDR progressive sequence is parsed for picture order.
-If every selected packet has valid equal PTS/DTS and its distinct even POC fills
-the complete sequence, a proven permutation assigns its original DTS slots plus
+demuxer keeps a zero-hold healthy path and watches for zero-offset IDRs. Progressive
+pictures are parsed as they arrive. Valid equal PTS/DTS and distinct even POC let
+the streaming slot ladder assign original DTS slots plus
 the corroborated presentation lead by display rank. Original DTS, audio and the
 already published keyframe index never move. Actual timestamp slots, rather than
 an average-FPS clock, preserve interval changes and quantization within a sequence.
@@ -115,8 +120,11 @@ an average-FPS clock, preserve interval changes and quantization within a sequen
 The slot a picture needs is a packet away, not a plan away, exactly as in the Matroska
 policy above: a picture coded ahead of its own slot waits the mini-GOP the reorder
 created, so nothing waits for the end of a sequence and no sequence is too long to
-repair. The wait is bounded by the reorder delay the container declares, believed up
-to **16 pictures**, and the packets held behind it by **1024 interleaved packets and
+repair. Backward displacement remains bounded by the declared reorder delay. A forward-coded
+anchor farther ahead needs a bounded, complete decode-prefix proof, as in #700: distinct ranks
+fill a prefix, the backward delay still fits, and the observed slots plus lead pass a dry run.
+Only the measured forward distance is then allowed, limited to **16 pictures**; that proof resets
+at each candidate IDR. The packets held behind it remain bounded by **1024 interleaved packets and
 32 MiB**, which is a ceiling on a container's interleaving rather than on its GOP.
 A candidate sequence has to show its reordering within **64 pictures** before a single
 picture is rewritten.
@@ -127,7 +135,8 @@ not guessed at. **Every refusal hands the held packets back exactly as they arri
 and lets the rest of that sequence stream through, so a shape this policy does not own
 costs the repair and never the session; the next IDR is a fresh candidate. Seek and
 teardown release both unpublished input and pending output. No decoder-route or host-UI
-change is needed. The existing whole-file missing-offset policy above remains separate.
+change is needed. The uniform whole-file policy above is unchanged; its strictly proven
+variable-cadence H.264 fallback reuses this same slot ladder.
 
 See the [partial-composition regression and reproduction](partial-composition-regression.md)
 for generated fixtures, original numeric evidence and verification limits.
@@ -320,7 +329,7 @@ Apple TV cannot bitstream TrueHD, and no Apple platform hands a third-party app 
 
 The renderer is allocentric, the model Atmos metadata is authored in: the room is a unit cube, and an object is balanced constant-power between the two speaker planes that bracket its height, the two rows that bracket its depth and the two speakers that bracket its width, so moving an object never changes its loudness. Ceiling speakers sit where ETSI TS 103 448 puts them, a quarter of the room in from each wall rather than in its corners, so an object on the ceiling a third of the way back plays mostly from the front tops, as Apple's own Atmos render places it. A 5.1 bed's surrounds sit halfway down the side walls, also as TS 103 448 places them, so on 5.1.2 and 5.1.4 an object at the back wall stays on them. Object size spreads it over a grid of points summed by power, snap sends it to the nearest speaker, zone masks keep it off the speakers they exclude, and an object without elevation stays off the ceiling. Bed channels the layout has route discretely, LFE goes to the LFE channel, and metadata updates ramp gains sample-accurately as the stream specifies. After a seek, decoding resumes at the next major sync, and the stream's first object metadata follows it up to 32 ms later; the decoder holds the audio in between and plays it at that metadata's positions, rather than leaving every object silent until it arrives (it waits at most 100 ms).
 
-**Track choice.** With the option on, the automatic audio pick prefers a TrueHD Atmos track over the other tracks of the same language: of the `preferredAudioLanguages` match, or of the session's default track when no preference decides it. It never crosses a language or a dub (a region or script both tags state and disagree on), never picks a commentary for it, applies only where the bed can be rendered (a VOD video session off the software path), and an explicit `audioSourceStreamIndexOverride` still wins. Without that, a film carrying DTS-HD and TrueHD Atmos in one language usually opened on whichever the container listed first.
+**Track choice.** With the option on, the automatic audio pick prefers a TrueHD Atmos track over the other tracks of the same language: of the `preferredAudioLanguages` match, or of the session's default track when no preference decides it. It never crosses a language or a dub (a region or script both tags state and disagree on), never picks a commentary for it, applies only where the bed can be rendered (a VOD video session off the software path, on OS 26 or later), and an explicit `audioSourceStreamIndexOverride` still wins. Without that, a film carrying DTS-HD and TrueHD Atmos in one language usually opened on whichever the container listed first.
 
 It is opt-in because it is a trade: APAC is lossy, at several Mbit/s, in place of the lossless 7.1 the channel bridge delivers. It applies only to TrueHD that FFmpeg marks as Atmos, at 48 kHz, on OS 26 or later where the APAC encoder exists; anything else, and any failure to start, keeps `audioBridgeMode` with the audio intact. Silo built the first implementation in its fork and offered it as the reference this one is ported from.
 
@@ -328,9 +337,23 @@ It is opt-in because it is a trade: APAC is lossy, at several Mbit/s, in place o
 
 A linked peak limiter sits between the renderer and the encoder: the APAC encoder carries samples over full scale through unchanged (a tone at amplitude 4.0 decodes back at 4.001), and a rendered bed can get there, since object gains reach +15 dB and up to sixteen elements sum into one speaker. One gain for every channel, so no object moves; instant attack, so nothing leaves above −0.18 dBFS without a lookahead delay that would shift the audio against the picture; a 250 ms release. A bed under the threshold passes bit for bit.
 
-**Cost.** Decoding the object presentation and encoding APAC each take about one core: on Dolby's Unfold demo (27 s, M1, release build) the TrueHD decode took 1.36 s (0.92 s since LibTrueHD 2.2.0), the APAC encode 1.26 s and rendering plus limiting 0.06 s. Apple's encoder runs on one thread, so the bridge hands each rendered 2048-frame chunk to a serial encode queue and decodes the next one meanwhile (`APACEncodePipeline`), which took the whole sample from 2.73 s to 1.75 s, and with LibTrueHD 2.2.0's faster decode to 1.40 s, 19x real time against 10x in series. The encoder is now the slower half, so the decoder no longer sets the pace. That time is what a seek past the produced range waits for before its first segment, so it is the one place the trade shows. The queue inherits the producer's QoS, a pool of three chunk buffers holds the producer at most two chunks ahead of the encoder, and the producer waits for the queue (`settle()`) before a keyframe advances its segment cutter or a write cuts the open segment, so every packet is routed as the encode in series routed it and every segment carries the same audio, byte for byte. Those waits cost about 0.1 s of the sample's overlap.
+**Cost.** Decoding the object presentation and encoding APAC each take about one core: on Dolby's Unfold demo (27 s, M1, release build) the TrueHD decode took 1.36 s (0.92 s since LibTrueHD 2.2.0, 0.60 s through its C API since 2.3.0), the APAC encode 1.26 s and rendering plus limiting 0.06 s. Apple's encoder runs on one thread, so the bridge hands each rendered 2048-frame chunk to a serial encode queue and decodes the next one meanwhile (`APACEncodePipeline`), which took the whole sample from 2.73 s to 1.75 s, and with LibTrueHD 2.2.0's faster decode to 1.40 s, 19x real time against 10x in series. The encoder is now the slower half, so the decoder no longer sets the pace. That time is what a seek past the produced range waits for before its first segment, so it is the one place the trade shows. The queue inherits the producer's QoS, a pool of three chunk buffers holds the producer at most two chunks ahead of the encoder, and the producer waits for the queue (`settle()`) before a keyframe advances its segment cutter or a write cuts the open segment, so every packet is routed as the encode in series routed it and every segment carries the same audio, byte for byte. Those waits cost about 0.1 s of the sample's overlap.
 
 **What the session log says.** `[SpatialAudioBridge] object configuration` names the presentation (`LFE + 15 objects` for Dolby's Unfold demo). A `bed levels` line gives each bed channel's RMS and peak with its CoreAudio name, how many objects were active and how many elevated, the LFE element's level and gain, and the limiter's work over the same window when it had any; it comes after the first 5 s of audio (and again after every seek), then every 30 s. The decoder waits for a major sync after a start or seek, so a decoder that returns nothing for 1200 packets in a row, a second of TrueHD, is reported as one that produces nothing, the same failure the channel bridge reports.
+
+### DTS\:X with heights
+
+DTS:X reaches the bridge the same way TrueHD Atmos does: Apple TV cannot bitstream DTS-HD, so `audioBridgeMode` decodes the lossless 7.1, and on a DTS:X track that 7.1 is a compatible downmix into which the encoder folded the four height channels and any objects. `objectAudioRendering = .apac(layout)` keeps them: a DTS-HD Master Audio track goes through [LibDTSX](https://github.com/superuser404notfound/LibDTSX) (the `dca` crate from harletty-bridge behind a C API, packaged like LibTrueHD) into the same renderer, limiter and APAC encoder. LibDTSX does the DTS-specific work, so the engine side is a speaker mapping (`DTSXObjectAudioDecoder`): it subtracts every fold the frame states (or that `dca`'s fold renderer recomputes for an object the encoder panned into the bed) from the bed, so the bed, the heights and the objects play side by side without anything playing twice, and it places DTS:X's angular object positions in LibTrueHD's room coordinates. The reference sphere is projected onto the room's boundary through the speakers' angles (centre 0°, front ±30°, wide ±60°, side ±90°, rear ±145°), the ceiling reached at the 45° of a height speaker and its centre straight overhead, so the dual-balance panner places a sound between two speakers in the same proportion an angular panner would.
+
+The standard presentation, which every DTS:X film in SpatialAudioBridge's library census used in every frame, is a 7.1 bed and four fixed heights (top front and top back pairs), all routed discretely: rendered into 7.1.4, *8 Mile*, *The Bourne Identity* and the DTS:X Object Emulator demo give each speaker exactly its channel, bit for bit what SpatialAudioBridge's DTS:X renderer gives. The alternate presentations add one to five objects; `dca` classifies them from a corpus and calls them experimental. *Independence Day* (FFmpeg: "DTS-HD MA + DTS:X IMAX") is one: two static objects at ±34.5° and 12° up, which pan mostly into the front pair, a little into the sides and the front heights. Against SpatialAudioBridge's renderer, which pans DTS:X by angle over a bed ring and a height ring, the 7.1.4 render of a minute of it points the sound the same way within 0.07° (median of 200 ms windows, energy-weighted; 90th percentile 0.39°), and of the D4 trailer's five moving objects within 0.23° (2.3°); the floor channels correlate at 1.0000, and the ceiling's share of the energy is 0.1 to 0.2 points lower. These figures were taken against the panner before #742 moved its top speakers from the room's corners a quarter in, so the object renders now differ from them slightly; the standard presentation routes discretely and is unaffected.
+
+**Which tracks.** FFmpeg names only two of DTS:X's markers, so it labels some DTS:X plain "DTS-HD MA" (Trinnov's "Experience" trailer, with five moving objects, is one), and a track it does label DTS:X can carry a presentation LibDTSX refuses. Every 48 kHz DTS-HD MA track is therefore offered to LibDTSX, which decides on the track's first three frames. The engine shows them to it through the demuxer's peek (`peekPackets`), which holds what it reads for the producer, so deciding costs no extra read and no seek: on a resume the demuxer is put where the first producer starts before the peek, not after it, and the frames there decide. The peek holds at most 512 packets or 24 MiB, every stream's included, and gives up without a verdict past either. A refused track, or one without a verdict, keeps `audioBridgeMode` with its lossless 7.1 as before, and a stream that turns out not to be 48 kHz is refused on its first block. Lossy DTS (core, ES, 96/24, High Resolution) is never offered. The automatic audio pick prefers a track FFmpeg labels DTS:X the way it prefers TrueHD Atmos; a plain-labelled DTS:X track is rendered when it is the track that plays, but cannot be ranked before playback.
+
+**Seeks.** A DTS-HD Master Audio frame is lossless only against the core decoder's filter and predictor history, which a stream entered mid-way does not have: the first frame after a seek decodes distorted (over 120 seeks into five DTS:X streams, its error a median 2.7 dB below the signal) and the next can still err by -16 dBFS. LibDTSX decodes the first two frames after a start or seek without output and counts them on its input timeline, so the bridge's first encoded frame sits 21 ms after the segment's start, where those frames end, and nothing fills the gap; the first block then differs from a continuous decode by at most -33 dBFS, and the output is bit-identical again within about ten frames.
+
+**On the receiver.** Over Jellyfin on an Apple TV 4K (tvOS 27.2), *8 Mile*, *The Bourne Identity* and *Independence Day* played as APAC with the soundbar showing Atmos, from the middle of the film and across seeks (back to playing in 0.7 to 2.2 s), with the same `AtmosOutputActivator` TrueHD Atmos uses; *Arrival*, plain DTS-HD MA, was refused on its first frame and showed PCM.
+
+**What the session log says.** `[HLSVideoEngine] DTS-HD MA track is DTS:X 7.1.4 (LibDTSX, 3 ms)` names the presentation the verdict found (`7.1.4+2` for *Independence Day*), and a refusal names its reason (`lossless DTS-HD Master Audio without a DTS:X extension`). The `object configuration` and `bed levels` lines are the same as for TrueHD Atmos. The 1200-packet silence report is too: at 512 samples a DTS frame that is 12.8 s of DTS, against a second of TrueHD.
 
 ## Subtitles
 
@@ -509,6 +532,8 @@ Both: no decryption (CSS / AACS retail discs must be ripped decrypted first), no
 A remote `.iso` / `.img` / `.udf` needs an origin that honours HTTP `Range`, because a disc image is a filesystem that only random access can walk. The range probe is judged at the response head: an origin that answers it with a 200 fails the load with an error naming the cause (the body is never downloaded), and a range answered wider than asked is cut where the range ends.
 
 **Blu-ray folders.** A disc that was ripped as a `BDMV` folder rather than an image plays the same way through `MediaSource.custom` with a `DiscDirectoryReader`: the host lists the folder's files (path relative to the disc root, and size) and opens any one of them on request. `HTTPDiscDirectoryReader` is the ready-made one, with one URL per file, so an origin serves the disc as plain files over `Range` and never remuxes it. Recognition is the image path with files in place of UDF extents: the same bounded playlist scan and title selection, the selected title's `.m2ts` files concatenated in playlist order as one MPEG-TS, the same multi-clip timeline, chapters and STN track languages, and the same seek by the clips' EP maps when the folder carries `BDMV/CLIPINF`. A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The concatenating reader opens a clip's file when the read reaches it and keeps at most three open. A controlled probe (`limits` or `cancellation`) does not recognize a folder yet; an uncontrolled `probe(source:)` and `load(source:)` do.
+
+**DVD-Video folders.** A listing that holds `VIDEO_TS/` files and no playable Blu-ray title is read as DVD-Video instead, by the same title-set code as an image: the selected title set's VOBs are concatenated in part order, which is the same run of bytes as their sectors on a disc, so the cell timeline and the VTS time map apply unchanged. `preferredPlaylist` does not apply.
 
 **Title selection.** `engine.discTitles` (`@Published [TitleInfo]`) lists the disc's titles (id, name, duration, chapter count) and `engine.selectedDiscTitle` is the active one; `engine.selectTitle(id:)` switches title, rebuilding the pipeline from the new title's head. The selection survives audio-track switches and background-resume reloads, and a fresh `load` defaults to the main title (an out-of-range id clamps to it). Blu-ray enumerates all playlists; a DVD enumerates its title sets (the VMGI TT_SRPT title list, resolved whole-VTS, with the duration read from each VTS's main program chain; per-cell / episodic splitting is deferred).
 
