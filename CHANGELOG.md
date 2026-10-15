@@ -70,6 +70,18 @@ the public-API contract.
   a fresh seal; the consumer item swaps to it in place, keeping source, cache, position (also behind
   live) and play/pause intent. A media playlist failure no longer counts as evidence against the HDR
   master (#748, thanks @yucelokan).
+- **A CRC-valid but hostile Dolby Vision RPU no longer aborts the process on any path found so far,
+  in parse, convert or write (#765, thanks @pkajaba).** libdovi is built panic=abort, so one panic ends
+  the process. `DoviRpuGuard` checks the CRC and pre-scans each RPU for the inputs that make libdovi 3.4
+  panic or allocate unbounded: a polynomial piece with linear interpolation (`unimplemented!` in the
+  parser and the writer), a reshaping curve that mixes polynomial and MMR pieces (it parses, and a MEL
+  or residual-free RPU keeps its mapping through the mode 2 conversion, so `dovi_write_unspec62_nalu`
+  then indexes out of bounds), pivot and block counts the payload cannot hold, and display-management
+  block lengths the spec does not define (`unreachable!`). It also refuses an Exp-Golomb value of
+  2^32 - 1 or more anywhere it reads one (libdovi reads 64 leading zeros differently from a plain shift,
+  so a crafted `mapping_idc` could slip past, and its writer allocates about 0.5 GB to write such an id
+  back). The guard knows these paths; it does not prove there are no others. Every RPU in dovi_tool's
+  test corpus (2333, Profile 5, 7 MEL and FEL, 8, CM v2.9 and v4.0) passes it and converts as before.
 
 ## [7.36.0] - 2026-10-13
 
@@ -487,7 +499,6 @@ the public-API contract.
 - **A play or pause pressed during any session rebuild decides how it comes back.** An audio or disc-title switch, `reloadAtCurrentPosition()` or an engine-raised rebuild came back in the transport state it started from, so a pause pressed while it ran was lost. `play()` and `pause()` now write the transport the rebuild settles from, `transportIntentUnderReconstruction` (#464 round 3), while one runs. #711 had added this for audio picks in a field of its own; the two are one now.
 - **Video routing asks for the AV1 hardware decoder only for AV1 sources (#708).** It registered the supplemental decoder on every first load, H.264 and HEVC included. Contributed by yucelokan.
 - **The #243 fetch-tally test tolerates a parallel session start.** A session start zeroes the process-wide tally, so an engine test loading in parallel failed it on CI. Test-only.
-- **A CRC-valid but hostile Dolby Vision RPU no longer aborts the process on any path found so far, in parse, convert or write.** libdovi is built panic=abort, so one panic ends the process. `DoviRpuGuard` checks the CRC and pre-scans each RPU for the inputs that make libdovi 3.4 panic or allocate unbounded: a polynomial piece with linear interpolation (`unimplemented!` in the parser and the writer), a reshaping curve that mixes polynomial and MMR pieces (it parses, and a MEL or residual-free RPU keeps its mapping through the mode 2 conversion, so `dovi_write_unspec62_nalu` then indexes out of bounds), pivot and block counts the payload cannot hold, and display-management block lengths the spec does not define (`unreachable!`). It also refuses an Exp-Golomb value of 2^32 - 1 or more anywhere it reads one (libdovi reads 64 leading zeros differently from a plain shift, so a crafted `mapping_idc` could slip past, and its writer allocates about 0.5 GB to write such an id back). The guard knows these paths; it does not prove there are no others.
 
 ## [7.28.3] - 2026-10-07
 
