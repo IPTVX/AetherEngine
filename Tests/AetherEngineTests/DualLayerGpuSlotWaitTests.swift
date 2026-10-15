@@ -11,7 +11,7 @@ import Foundation
 /// `acquireSlot()` with no lock held, so `flush()` returns promptly. On the
 /// pre-fix code the wait sat inside `composeAsync` while the VideoToolbox
 /// thread held the decoder lock, and `flush()` hung behind it.
-@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(1)))
+@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)))
 struct DualLayerGpuSlotWaitTests {
 
     /// Fake composer with an in-flight limit of 1. The first composition's

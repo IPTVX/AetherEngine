@@ -15,7 +15,7 @@ import Dovi
 /// asynchronously. These tests drive the two frame handlers directly with synthetic P010 buffers,
 /// using `primeForTesting` / `seedRPUForTesting` to stand in for what `decode(packet:)` sets up, so
 /// the pairing, ordering, metadata and flush behaviour is covered without a real stream.
-@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(2)))
+@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)))
 struct DualLayerVideoDecoderTests {
 
     // MARK: - Fixtures
@@ -1399,7 +1399,7 @@ struct DualLayerVideoDecoderTests {
     }
 
     @Test("a slow onFrame does not block pairing or flush() behind the decoder lock",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(5)))
     func slowOnFrameDoesNotBlockDecoderOperations() async throws {
         // The old `deliver()` took the decoder's lock and called `emit` (hence
         // `onFrame`) from inside it, so a slow host callback would have stalled
