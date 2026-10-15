@@ -16,13 +16,15 @@ import AetherLibswresample
 /// produces no JOC, FLAC has no object channel concept). EAC3+JOC sources stay lossless via the stream-copy path
 /// that bypasses this bridge; only non-stream-copyable sources enter here.
 ///
-/// Encoder choice. Public so LoadOptions / the host pass it through; default `.surroundCompat` (soundbar /
-/// LPCM-stereo-only install base is the consumer majority).
+/// Encoder choice. Public so LoadOptions / the host pass it through; default `.surroundCompat`, the one mode
+/// that keeps surround on every sink.
 ///   - `.surroundCompat`: EAC3 128 kbps/channel (256 stereo, 768 5.1), AVPlayer -> HDMI bitstream tunnel. Lossy,
-///     caps at 5.1 (7.1 loses SL/SR), but surround works on essentially every AVR + soundbar including LPCM-stereo-
-///     only routes (Sonos Arc, Samsung HW-Q, Bose) where FLAC falls down.
-///   - `.lossless`: FLAC up to 7.1, AVPlayer -> LPCM HDMI route. Needs a multichannel-LPCM sink (Denon/Marantz/NAD);
-///     a stereo-LPCM route downmixes to stereo.
+///     caps at 5.1 (a 7.1 source is downmixed, its back surrounds folded into the sides), but surround works on
+///     every AVR and soundbar, including one behind legacy ARC (stereo LPCM or a Dolby bitstream only).
+///   - `.lossless`: FLAC up to 7.1, AVPlayer -> LPCM HDMI route. Needs a multichannel-LPCM sink: an AVR over
+///     HDMI, or an AVR or soundbar on eARC (a Sonos Arc there takes 6 channels, so lossless 5.1). A legacy-ARC
+///     route downmixes to stereo. Not picked from the route: with Continuous Audio Connection on, tvOS reports
+///     32 channels for every HDMI sink (AE#794).
 public enum AudioBridgeMode: String, Sendable, CaseIterable {
     case surroundCompat
     case lossless
