@@ -894,6 +894,168 @@ struct DualLayerVideoDecoderTests {
         #expect(CMTimeCompare(deliveries.snapshot.first?.pts ?? .invalid, Self.pts(1)) == 0)
     }
 
+    @Test("the end-of-stream drain delivers the frames the sessions still owe, paired or alone, in order")
+    func endOfStreamDrainDeliversOwedFrames() async throws {
+        let primary = FlushEmittingFakeDecoder()
+        let enhancement = FlushEmittingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        let deliveries = Deliveries()
+        decoder.onFrame = { buffer, pts, hdr10 in deliveries.record(buffer, pts, hdr10) }
+        decoder.primeForTesting(enhancementLayer: true)
+        defer { decoder.close() }
+
+        let bl: [SendableFrameBuffer] = try (0..<3).map { _ in
+            guard let b = Self.baseLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: b)
+        }
+        let el: [SendableFrameBuffer] = try (0..<2).map { _ in
+            guard let e = Self.enhancementLayer() else { throw CancellationError() }
+            return SendableFrameBuffer(value: e)
+        }
+        for i in 0..<3 {
+            decoder.seedRPUForTesting(pts: Self.pts(Int64(i)), params: Self.params(), displayMetadataNAL: nil)
+        }
+        // The last frames of a stream, still inside the sessions after the last packet was fed: three
+        // base-layer frames, and enhancement-layer frames for the first two only.
+        primary.emitFromInsideFlush = {
+            for i in 0..<3 {
+                decoder.handleBaseLayerFrame(baseBuffer: bl[i].value, pts: Self.pts(Int64(i)), hdr10Data: nil)
+            }
+        }
+        enhancement.emitFromInsideFlush = {
+            for i in 0..<2 {
+                decoder.handleEnhancementLayerFrame(elBuffer: el[i].value, pts: Self.pts(Int64(i)))
+            }
+        }
+
+        decoder.drainForEndOfStream()
+        // No wait: the drain returns once its frames have reached `onFrame`.
+        let frames = deliveries.snapshot
+        #expect(frames.count == 3)
+        #expect(frames.map { ObjectIdentifier($0.buffer) } == bl.map { ObjectIdentifier($0.value) })
+        #expect(Self.isStrictlyIncreasing(frames))
+        #expect(decoder.composedFrameCount == 2, "the two frames with an enhancement layer are composed")
+        #expect(decoder.stateSnapshotForTesting.blQueueCount == 0)
+
+        // The host's flush that follows has nothing left to drop or deliver.
+        primary.emitFromInsideFlush = nil
+        enhancement.emitFromInsideFlush = nil
+        decoder.flush()
+        decoder.quiesceForTesting()
+        #expect(deliveries.count == 3)
+    }
+
+    // MARK: - Session loss (AE#739)
+
+    @Test("the session-loss handler reaches both layers' decoders, once per loss, and clearing it clears both")
+    func sessionLostHandlerReachesBothLayers() {
+        let primary = HardwareVideoDecoder()
+        let enhancement = HardwareVideoDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        defer { decoder.close() }
+        let calls = SessionLossCount()
+        decoder.onSessionLost = { calls.bump() }
+        // A screen lock loses both sessions and each layer reports it: one recovery, not two.
+        primary.onSessionLost?()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 1)
+        // After a rebuild (refused here: neither decoder was opened) the next loss is reported again.
+        _ = decoder.rebuildSession()
+        enhancement.onSessionLost?()
+        #expect(calls.value == 2)
+        decoder.onSessionLost = nil
+        #expect(primary.onSessionLost == nil)
+        #expect(enhancement.onSessionLost == nil)
+    }
+
+    @Test("a closed decoder refuses a session rebuild")
+    func closedDecoderRefusesRebuild() {
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: FlushEmittingFakeDecoder(),
+            enhancementDecoder: FlushEmittingFakeDecoder()
+        )
+        #expect(decoder.rebuildSession())
+        decoder.close()
+        #expect(!decoder.rebuildSession())
+    }
+
+    @Test("after a session rebuild both layers are back on the decoder's epoch, so later packets are accepted")
+    func rebuildAdoptsFeedEpoch() {
+        let primary = EpochRecordingFakeDecoder()
+        let enhancement = EpochRecordingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: enhancement
+        )
+        defer { decoder.close() }
+        decoder.flush()
+        let epoch = decoder.feedEpoch
+        #expect(epoch > 0)
+        // A rebuilt hardware decoder moves its own epoch; the dual decoder must put it back.
+        primary.epoch = epoch &+ 7
+        enhancement.epoch = epoch &+ 9
+        #expect(decoder.rebuildSession())
+        #expect(primary.epoch == epoch)
+        #expect(enhancement.epoch == epoch)
+        #expect(decoder.feedEpoch == epoch)
+    }
+
+    @Test("the host's drain reaches the dual-layer decoder through the pipeline protocol; a plain decoder's is a no-op")
+    func drainDispatchesThroughProtocol() {
+        let primary = FlushEmittingFakeDecoder()
+        let decoder = DualLayerVideoDecoder(
+            composer: ImmediateFakeComposer(),
+            primaryDecoder: primary,
+            enhancementDecoder: nil
+        )
+        defer { decoder.close() }
+        var flushedByDrain = 0
+        primary.emitFromInsideFlush = { flushedByDrain += 1 }
+        let pipeline: any VideoDecodingPipeline = decoder
+        pipeline.drainForEndOfStream()
+        #expect(flushedByDrain == 1)
+        // A decoder whose flush delivers needs no drain.
+        let plain: any VideoDecodingPipeline = FlushEmittingFakeDecoder()
+        plain.drainForEndOfStream()
+    }
+
+    private final class EpochRecordingFakeDecoder: SingleLayerVideoDecoder, @unchecked Sendable {
+        var onFrame: DecodedFrameHandler?
+        var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+        var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
+        var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
+        var skipUntilPTS: CMTime?
+        var epoch: UInt64 = 0
+        var feedEpoch: UInt64 { epoch }
+        func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
+            self.onFrame = onFrame
+        }
+        func open(parameterSets: [[UInt8]], timeBase: AVRational, onFrame: @escaping DecodedFrameHandler) throws {
+            self.onFrame = onFrame
+        }
+        func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64?) {}
+        func flush() {}
+        func adoptFeedEpoch(_ epoch: UInt64) { self.epoch = epoch }
+        func close() { onFrame = nil }
+    }
+
+    private final class SessionLossCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
     // MARK: - Thread safety
 
     /// Synchronous composer so the stress test needs no GPU: every composition

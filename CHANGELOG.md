@@ -20,7 +20,14 @@ the public-API contract.
   the same run of bytes as their sectors. A listing without `VIDEO_TS/` is read as Blu-ray, as before,
   and one with both trees plays its Blu-ray title, the order an image is recognized in.
 - **Dolby Vision Profile 7 FEL plays as Dolby Vision on the software path.** Opt-in: with `LoadOptions.preferDualLayerDolbyVision` set to `true` (default `false`) and `dolbyVisionHandling` `.automatic`, `SoftwarePlaybackHost` routes a Profile 7 file whose enhancement layer is FEL through `DualLayerVideoDecoder`: the base layer and the enhancement layer (typically 4K and 1080p) decode on VideoToolbox, `DoviFelComposer` rebuilds the 12-bit picture on Metal, and each frame carries its RPU converted to Profile 8.1 (`DolbyVisionRPUData`, `DolbyCompatibilityID`, the latter a `CFString` `"1"`: tvOS parses it with `CFStringGetIntValue` and a `CFNumber` aborts the render server). A MEL enhancement layer keeps the native route. An `hev1` source whose `hvcC` carries no VPS / SPS / PPS (the usual Dolby Vision MP4 recipes) is classified from the parameter sets at the head of the stream, the rebuild the native path already does for its init.mp4 (#19). What the route gives up against the native one (system Picture in Picture, the I-frame playlist's scrub thumbnails, WebVTT renditions, AirPlay picture) is listed in the document. Details in [docs/dolby-vision-fel.md](docs/dolby-vision-fel.md).
-- **The Profile 7 dual-layer route is FEL only and capability gated, and says why.** `DualLayerRouteDecision` adds a real-time budget to the route: the base and enhancement layers together may need at most UHD 3840x2160 at 30 fps plus a 1920x1080 enhancement layer at 30 fps (a 24p UHD master uses 80%), otherwise the file keeps the native route, as MEL does and as does a box without hardware HEVC decode (8.1 where the display takes Dolby Vision, the HDR10 base layer where it does not). Every Profile 7 load logs one `DV P7 dual-layer route: taken (...)` or `not taken (<reason>)` line; the line is new, and with the preference off it is the only change.
+- **The Profile 7 dual-layer route is FEL only and capability gated, and says why.**
+  `DualLayerRouteDecision` adds a real-time budget to the route: the base and enhancement layers
+  together may need at most UHD 3840x2160 at 30 fps plus a 1920x1080 enhancement layer at 30 fps (a 24p
+  UHD master uses 80%), otherwise the file keeps the native route, as MEL does and as does a box without
+  hardware HEVC decode (8.1 where the display takes Dolby Vision, the HDR10 base layer where it does
+  not). Every Profile 7 load logs one `DV P7 dual-layer route: taken (...)` or `not taken (<reason>)`
+  line; the line is new, and with the preference off it is the only change.
+
 - **`aetherctl play --fel`, `--surface`, `--cycle-el`; `aetherctl dvsurvey`, `feltest`.** Flip the residual on a timer over a visible surface, report a title's L1 display-metadata distribution, and check the FEL decode against real files. The probes behind them are `@_spi(Diagnostics)`, outside the SemVer contract. `play` runs the dual-layer route only with `--fel` (off by default, like the engine option); `--no-fel` is accepted and does nothing.
 - **`AETHER_FEL_MEASURE` reports the signed FEL-minus-MEL mean per plane and luma band.** The diagnostic composes every Nth frame a second time with the residual off and compares the two; the signed mean says whether the residual brightens or darkens, which the absolute difference could not. It runs one sample at a time and skips a frame that arrives while one is in flight. Off by default; it is an environment-variable diagnostic, not API.
 - **The dual-layer decoder pairs the two layers by picture order.** `DualLayerPictureAlignment` derives each layer's display slot from its POC (`HEVCPictureOrderCount`, no decoding) and stamps each enhancement-layer packet with the time of the base-layer picture in the same slot, so a stream whose enhancement layer is coded with B-frames over a base layer without them pairs the right pictures. A stream whose layers share one GOP keeps every packet's own time. After a seek a layer pairs by access unit until its next sequence-opening IRAP.
@@ -36,6 +43,21 @@ the public-API contract.
 - **`reloadAtCurrentPosition(applying:)` refuses a `preferDualLayerDolbyVision` change, or a `dolbyVisionHandling` change while the preference is on, on a custom `IOReader` source playing Profile 7**, with the new public case `SessionReloadRefusal.dualLayerRouteNeedsFreshLoad`, before any teardown. A host that switches over `SessionReloadRefusal` exhaustively has to handle the new case. The in-place rebuild of a custom source keeps the route the session was loaded with, so the change would have been logged as applied and ignored; `load()` again with the new option. URL sources re-run `load()` and are unaffected.
 
 ### Fixed
+
+- **The Profile 7 dual-layer route recovers from a system session loss (#739).** A screen lock or sleep
+  invalidates both VideoToolbox sessions; the host's recovery reached only `HardwareVideoDecoder`, so on
+  the route audio played on over a frozen picture. `DualLayerVideoDecoder` now reports one loss per
+  event, rebuilds both sessions and re-adopts its feed epoch; the host reaches it through the new
+  internal `VideoSessionRebuilding` protocol.
+
+- **The Profile 7 dual-layer route shows the last frames at end of stream.** The end-of-source flush
+  dropped what VideoToolbox still owed, the base frames waiting for an enhancement layer and the
+  compositions in flight. `VideoDecodingPipeline.drainForEndOfStream()` (a no-op where `flush()` already
+  delivers) drains both sessions with pairing live, sends a waiting base frame out alone, and waits for
+  the composer; the host calls it before that flush. Seeks still discard.
+
+- **A failed `CMBlockBuffer` creation around a packet's payload no longer releases the packet reference
+  twice** when CoreMedia has already freed the block source from inside the failing call.
 
 - **The software path no longer drops frames on tvOS while it downloads.** Its compressed packet
   cache was a temporary disk file; on an Apple TV 4K appends to it took 100 to 600 ms while a download

@@ -150,6 +150,10 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     final class CustomBlockSource {
         var avBuf: UnsafeMutablePointer<AVBufferRef>?
         let dataPtr: UnsafeMutableRawPointer
+        /// Set by the block source's `FreeBlock`, which releases the retain the refCon carries. CoreMedia
+        /// may call it from inside a failed `CMBlockBufferCreateWithMemoryBlock` (after `AllocateBlock`),
+        /// and `makeBlockBuffer` must then not release that retain a second time.
+        var freeBlockRan = false
 
         /// `data` is the packet's own payload pointer. It is not always `buf->data`: the Matroska
         /// demuxer hands out packets whose `data` sits inside a larger buffer (observed at +4 on P7
@@ -188,6 +192,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             FreeBlock: { refCon, _memoryBlock, _size in
                 guard let refCon else { return }
                 let holder = Unmanaged<CustomBlockSource>.fromOpaque(refCon).takeRetainedValue()
+                holder.freeBlockRan = true
                 holder.releaseBuffer()
             },
             refCon: Unmanaged.passRetained(blockSource).toOpaque()
@@ -204,7 +209,10 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             flags: kCMBlockBufferAssureMemoryNowFlag,
             blockBufferOut: &blockBuffer
         )
-        if status != kCMBlockBufferNoErr, let refCon = source.refCon {
+        // `blockSource` is still held by this frame, so reading the flag is safe even after FreeBlock
+        // dropped the refCon's retain. On a failure CoreMedia calls FreeBlock synchronously or not at
+        // all; release here only in the second case.
+        if status != kCMBlockBufferNoErr, !blockSource.freeBlockRan, let refCon = source.refCon {
             Unmanaged<CustomBlockSource>.fromOpaque(refCon).takeRetainedValue().releaseBuffer()
         }
         return (blockBuffer, status)
