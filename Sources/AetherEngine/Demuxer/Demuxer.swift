@@ -922,6 +922,10 @@ public final class Demuxer: @unchecked Sendable {
     /// AE#585: ends the bracket above. Safe to call without a matching `beginIndexPass`.
     func endIndexPass() { avioProvider?.endIndexPass() }
 
+    /// AE#782: a producer restart just seeked here, so the reader anchors its connection at the next
+    /// read it cannot serve from memory instead of detouring.
+    func notePlaybackRepositioned() { avioProvider?.notePlaybackRepositioned() }
+
     /// Default 5 MB/5s budgets miss sparse PGS/DVB tracks on 10-20 GB Blu-ray rips.
     /// 50 MB/60 s ensures codec params are populated without noticeably slowing open.
     private func applyProbeBudget(_ ctx: UnsafeMutablePointer<AVFormatContext>) {

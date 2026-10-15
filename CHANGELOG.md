@@ -44,6 +44,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A jump back opens one connection at the landing instead of three serial detour fetches** (#782,
+  thanks @tweakapps). On the native path a producer restart behind the reader's window was served the
+  way a parse read is: one 4 MB detour block per request, serially, until 8 MB had gone by, while the old
+  connection kept streaming ahead. A restart now tells the reader it repositioned playback, so the first
+  read it cannot serve from memory anchors the streaming connection there (a resident detour block still
+  serves first). Against a 400 ms, 40 Mbit/s origin a 64 s jump back landed in 3.3 s instead of 6.7 s,
+  with its first segment in 1.8 s instead of 4.2 s, the same cost as a long jump forward.
 - **A live HLS source refused for a while keeps its session.** An IPTV panel that limits an account's
   connections answers a live playlist refresh with 509 while another device holds the last slot, and
   goes on refusing a session it evicted, while a fresh session from the loaded URL is admitted at
