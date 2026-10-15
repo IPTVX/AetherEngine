@@ -72,6 +72,18 @@ struct DoviRpuConverterTests {
         #expect(nalTypes(pkt) == [1])
     }
 
+    @Test("A packet of only a refused RPU and an EL is left untouched and reports the failure")
+    func refusedRPUWithoutBaseLayerReportsFailure() {
+        let nals = [hevcNAL(type: 62, payload: [0x00]), hevcNAL(type: 63, payload: [0xCC])]
+        let bytes = framed(nals, .lengthPrefixed(size: 4))
+        let pkt = packet(from: bytes)
+        defer { free(pkt) }
+
+        // Nothing is left to rebuild a packet from, so it stays as it was, but the dropped RPU still counts.
+        #expect(DoviRpuConverter.convertPacketToProfile81(pkt) == false)
+        #expect(packetBytes(pkt) == bytes)
+    }
+
     /// CRC-valid RPUs that reach a panic or an unbounded allocation in libdovi, and one with a wrong CRC.
     /// Handing any of them to libdovi aborts the test process, so passing is the point.
     typealias Hostile = (name: String, rpu: [UInt8])
