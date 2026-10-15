@@ -175,16 +175,12 @@ struct DoviComposeAsyncTests {
         // inside composeAsync is what stops the loop from running away, so a
         // deadlock or a lost completion hangs here rather than passing quietly.
         //
-        // The semaphore bounds compositions on the GPU, and the slot is released
-        // when the command buffer retires rather than when the completion has
-        // run, so "issued minus completed" is looser than the semaphore's value:
-        // it also covers the call entering `wait` and the retired frames sitting
-        // on the delivery queue. What this asserts is that backpressure exists at
-        // all - without it the loop runs to `frames` before anything completes.
+        // The bound is on the GPU slots, read from the composer's own counter. "Issued minus
+        // delivered" is not bounded: a retired frame waits on the delivery queue, which a loaded
+        // runner can starve (CI measured 18 outstanding against a bound of 7).
         //
         // The loop runs on a thread of its own: `composeAsync` parks in a semaphore, which the
         // `.timeLimit` trait cannot interrupt on the test's own thread.
-        let bound = DoviFelComposer.maxFramesInFlight * 2 + 1
         let buffers = Buffers(bl: bl, el: el)
         Thread.detachNewThread {
             for i in 0..<frames {
@@ -198,7 +194,9 @@ struct DoviComposeAsyncTests {
         try await waitFor { counter.completed == frames }
         #expect(counter.completed == frames)
         #expect(counter.nonNil == frames)
-        #expect(counter.peakOutstanding <= bound)
+        let peakSlots = composer.takePeakSlotsInUse()
+        #expect(peakSlots >= 1)
+        #expect(peakSlots <= DoviFelComposer.maxFramesInFlight)
     }
 
     /// The decoder calls `composeAsync` with its own recursive lock held, and the
