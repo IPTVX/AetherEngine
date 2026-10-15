@@ -24,6 +24,11 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("Quarantine is bounded to 96 MiB and 10,000 packets", try documentation())
     }
 
+    func testSoftwarePositioningBudgetMatchesDocumentation() throws {
+        XCTAssertEqual(SoftwarePlaybackHost.seekBudgetSeconds, 30)
+        assertDocumented("**30 s positioning\nbudget**", try documentation())
+    }
+
     func testItemDiagnosticBoundsMatchDocumentation() throws {
         let docs = try documentation()
         XCTAssertEqual(ItemDiagnosticReadPool.maximumConcurrentReads, 2)

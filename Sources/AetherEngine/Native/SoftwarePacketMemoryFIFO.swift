@@ -71,6 +71,7 @@ final class SoftwarePacketMemoryFIFO: @unchecked Sendable {
 
     private let chunkTargetBytes: Int
     private let historyCapBytes: Int
+    var retainsConsumedPackets: Bool { historyCapBytes > 0 }
     private let lock = NSLock()
     /// Contiguous ids, oldest first. `chunks[i].id == oldestChunkID + i`.
     private var chunks: [Chunk] = []

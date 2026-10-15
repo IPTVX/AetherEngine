@@ -53,6 +53,17 @@ the public-API contract.
 
 ### Fixed
 
+- **Software VOD exposes retained cache ranges to host timelines.** `residentRanges` now covers
+  compressed video packets together with the selected audio stream, including retained history,
+  gaps and disk eviction. Cached seeks keep the same spans; cold seeks and teardown clear them.
+  Sampling continues while paused and runs off the main actor, with stale seek/stop results
+  discarded. Hosts no longer need to infer a cache band's start from the moving playhead.
+  VC-1 uses verified successor timestamps rather than rounded packet-duration islands. Valid
+  committed packets remain seekable after a source read error, which is still reported after drain;
+  storage failures remain unusable. Failed resume/seek positioning can no longer publish a false
+  successful landing. Bounded cold probes avoid speculative detour fetches, and foreground software
+  positioning has a finite 30 s budget for slow multi-probe remote keyframe searches.
+
 - **A remuxed title declares a `BANDWIDTH` its densest segment fits under** (#783, thanks @hp561). The
   master declared twice the container's average, and a VBR ending in an HEVC Matroska file with three
   Opus tracks bridged to FLAC ran past it: AVPlayer logged -12318 "Segment exceeds specified bandwidth

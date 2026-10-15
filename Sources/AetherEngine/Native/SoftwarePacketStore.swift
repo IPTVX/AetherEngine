@@ -5,6 +5,8 @@ import Foundation
 /// purgeable memory, which is what tvOS uses (see there).
 protocol SoftwarePacketStore: AnyObject, Sendable {
     var snapshot: SoftwarePacketDiskFIFO.Snapshot { get }
+    /// Whether consumed records stay readable as history (cached seeks, published residency).
+    var retainsConsumedPackets: Bool { get }
     @discardableResult func append(_ data: Data) throws -> SoftwarePacketDiskFIFO.Cursor
     func pop() throws -> Data?
     func restore(to cursor: SoftwarePacketDiskFIFO.Cursor) throws

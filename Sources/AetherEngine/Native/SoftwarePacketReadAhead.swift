@@ -63,6 +63,17 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var started = false
     private var ended = false
     private var failure: Error?
+    private enum FailureOrigin: Int {
+        case none = 0, sourceRead = 1024, storage = 2048, envelope = 4096
+    }
+    private var failureOrigin: FailureOrigin = .none
+    // Called under condition. An upstream read failure says nothing about the integrity of
+    // envelopes already committed to the FIFO. Keep those usable; read() still throws the
+    // original failure after they drain, and the producer stays parked until a cold seek.
+    private var retainedPacketsUsableLocked: Bool {
+        failure == nil || failureOrigin == .sourceRead
+    }
+    private var lastCoverageDiagnosticFlags: Int?
     private var count = 0
     private var bytes = 0
     private var residentBytes = 0
@@ -84,6 +95,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
     private var keyframes: [Keyframe] = []
     private let maximumKeyframes = 65_536
+    private var residency = SoftwarePacketResidency()
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
@@ -136,6 +148,56 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                         cacheSeekMisses: cacheSeekMisses)
     }
 
+    /// Called only by a background sampler. Copy bounded metadata under the short state lock;
+    /// timestamp conversion/intersection and keyframe selection happen after releasing it. No I/O.
+    var residentRanges: [ClosedRange<Double>] {
+        condition.lock()
+        // Fixed numeric state only, emitted on edges by this background sampler. No URLs,
+        // error descriptions or packet content. Bits: closed/reposition/reset/failure,
+        // nonretaining/invalid-video/EOF/empty-audio/no-keyframe/unknown-floor,
+        // source-failure/storage-failure/envelope-failure/empty-video.
+        var flags = failureOrigin.rawValue
+        if closed { flags |= 1 }
+        if sourceRepositioning { flags |= 2 }
+        if resetPending { flags |= 4 }
+        if failure != nil { flags |= 8 }
+        if !fifo.retainsConsumedPackets { flags |= 16 }
+        if presentationCoverage?.isInvalidated == true { flags |= 32 }
+        if ended { flags |= 64 }
+        if audio != nil && audioCoverage.rangeCount == 0 { flags |= 128 }
+        if keyframes.isEmpty { flags |= 256 }
+        if residency.videoFloor == .infinity || residency.audioFloor == .infinity { flags |= 512 }
+        if (presentationCoverage?.rangeCount ?? videoCoverage.rangeCount) == 0 { flags |= 8192 }
+        let changed = lastCoverageDiagnosticFlags != flags
+        lastCoverageDiagnosticFlags = flags
+        defer {
+            if changed { EngineLog.emit("[SWCacheCoverage] flags=\(flags)", category: .swPlayback) }
+        }
+        guard !closed, !sourceRepositioning, !resetPending, retainedPacketsUsableLocked,
+              fifo.retainsConsumedPackets else { condition.unlock(); return [] }
+        let videoCoverage = self.videoCoverage
+        let presentationCoverage = self.presentationCoverage
+        let audioCoverage = self.audioCoverage
+        let keyframes = self.keyframes
+        let videoFloor = residency.videoFloor
+        let audioFloor = residency.audioFloor
+        condition.unlock()
+        let videoRanges = presentationCoverage?.rangesSeconds ?? videoCoverage.rangesSeconds(
+            timeBaseNumerator: video.numerator, timeBaseDenominator: video.denominator)
+        let ranges: [ClosedRange<Double>]
+        if let audio {
+            ranges = SoftwarePacketCoverage.intersection(videoRanges, audioCoverage.rangesSeconds(
+                timeBaseNumerator: audio.numerator, timeBaseDenominator: audio.denominator))
+        } else { ranges = videoRanges }
+        guard let keyframe = keyframes.lazy.map(\.seconds)
+            .filter({ $0 >= videoFloor }).min() else { return [] }
+        let floor = max(keyframe, audio == nil ? -.infinity : audioFloor)
+        return ranges.compactMap { range in
+            let start = max(range.lowerBound, floor)
+            return start < range.upperBound ? start...range.upperBound : nil
+        }
+    }
+
     /// Main-thread safe: metadata only. Decode/render backpressure still belongs to the old loop.
     func updatePlayhead(_ seconds: Double) {
         guard seconds.isFinite else { return }
@@ -180,7 +242,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard token == generation, seeking, !closed else {
             condition.unlock(); throw ReadError.interrupted
         }
-        let hasCoverage = !sourceRepositioning && !resetPending && failure == nil
+        let hasCoverage = !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && seconds.isFinite && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let candidates = hasCoverage ? keyframes.filter { $0.seconds <= seconds }
             .sorted { $0.seconds < $1.seconds } : []
@@ -244,7 +306,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard seconds.isFinite, maxPackets > 0, isCancelled?() != true else { return nil }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         condition.lock()
-        let eligible = !closed && !sourceRepositioning && !resetPending && failure == nil
+        let eligible = !closed && !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let anchor = eligible
             ? keyframes.filter { $0.seconds <= seconds }.max { $0.seconds < $1.seconds } : nil
@@ -403,11 +465,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     private func clearSourceMetadataLocked() {
         count = 0; bytes = 0; residentBytes = 0
-        ended = false; failure = nil
+        ended = false; failure = nil; failureOrigin = .none
         videoCoverage.reset(); audioCoverage.reset(); presentationCoverage?.reset()
         storedVideoSeconds = nil; consumedVideoSeconds = nil
         lastAudioPTS = nil
         keyframes.removeAll(keepingCapacity: true)
+        residency = SoftwarePacketResidency()
     }
 
     /// Presentation seconds of a stored packet, or nil when this stream cannot express them.
@@ -423,6 +486,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         residentBytes = state.residentByteCount
         if let floor = state.oldestRetainedChunkID {
             keyframes.removeAll { $0.cursor.chunkID < floor }
+            residency.evict(before: floor)
         } else { keyframes.removeAll(keepingCapacity: true) }
     }
 
@@ -458,7 +522,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     if token == sourceEpoch { resetPending = false }
                     condition.broadcast()
                     condition.unlock()
-                } catch { recordFailure(error, token: token) }
+                } catch { recordFailure(error, token: token, origin: .storage) }
                 operations.unlock()
                 continue
             }
@@ -470,6 +534,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
 
     private func producePacket(token: UInt64) {
+        var failureOrigin: FailureOrigin = .sourceRead
         do {
             let packet = try readSource { [self] in
                 condition.lock(); defer { condition.unlock() }
@@ -485,6 +550,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                 condition.unlock()
                 return
             }
+            failureOrigin = .envelope
             let data = try packet.encoded()
             operations.lock()
             condition.lock()
@@ -500,6 +566,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     condition.lock()
                     if token == sourceEpoch, !closed, !sourceRepositioning {
                         copyDiskStateLocked(state)
+                        if packet.streamIndex == video.index || packet.streamIndex == audio?.index {
+                            let stream = packet.streamIndex == video.index ? video : audio!
+                            residency.insert(chunkID: cursor.chunkID, pts: packet.pts,
+                                duration: packet.duration, numerator: stream.numerator,
+                                denominator: stream.denominator, isVideo: packet.streamIndex == video.index)
+                        }
                         if packet.streamIndex == video.index {
                             if presentationCoverage != nil {
                                 if presentationCoverage?.isFull == true, let tick = playheadTick(video) {
@@ -528,10 +600,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     }
                     condition.broadcast()
                     condition.unlock()
-                } catch { recordFailure(error, token: token) }
+                } catch { recordFailure(error, token: token, origin: .storage) }
             }
             operations.unlock()
-        } catch { recordFailure(error, token: token) }
+        } catch { recordFailure(error, token: token, origin: failureOrigin) }
     }
 
     /// Widest gap between two duration-less audio packets that still counts as contiguous. Real
@@ -575,10 +647,11 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         return frontierLocked().map { $0 - sourceClock >= forwardSeconds } ?? false
     }
 
-    private func recordFailure(_ error: Error, token: UInt64) {
+    private func recordFailure(_ error: Error, token: UInt64, origin: FailureOrigin) {
         condition.lock(); defer { condition.unlock() }
         guard token == sourceEpoch, !closed else { return }
         failure = error
+        failureOrigin = origin
         resetPending = false
         condition.broadcast()
     }
@@ -664,5 +737,56 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             + "blocked=\(String(format: "%.2f", consumerBlockedSeconds))s "
             + "reservoir=\(reservoirSecondsLocked().map { String(format: "%.1f", $0) } ?? "n/a")s "
             + "qos=\(QoSClass.name(reportedProducerQoS))"
+    }
+}
+
+/// Constant-size summaries per retained disk chunk, never per packet. The cumulative discarded
+/// high-water marks also cover reordered PTS: clipping at the first packet in the new chunk alone
+/// could otherwise claim an evicted B picture or audio packet still exists. Metadata pressure may
+/// conservatively shorten a displayed range; it never changes disk retention or seek policy.
+struct SoftwarePacketResidency: Sendable {
+    private struct Chunk: Sendable {
+        let id: UInt64
+        var videoEnd = -Double.infinity
+        var audioEnd = -Double.infinity
+    }
+    private var chunks: [Chunk] = []
+    private(set) var videoFloor = -Double.infinity
+    private(set) var audioFloor = -Double.infinity
+    private let maximumChunks: Int
+
+    init(maximumChunks: Int = 4096) { self.maximumChunks = max(1, maximumChunks) }
+
+    mutating func insert(chunkID: UInt64, pts: Int64, duration: Int64,
+                         numerator: Int32, denominator: Int32, isVideo: Bool) {
+        if chunks.last?.id != chunkID {
+            if chunks.count == maximumChunks { discardFirst(1) }
+            chunks.append(Chunk(id: chunkID))
+        }
+        // A successor-duration video with no packet duration still excludes the evicted PTS.
+        let (end, overflow) = pts.addingReportingOverflow(max(1, duration))
+        let seconds: Double
+        if pts == Int64.min || overflow || numerator <= 0 || denominator <= 0
+            || Int64(exactly: Double(end)) != end {
+            seconds = .infinity // unknown discarded timestamps cannot prove later residency
+        } else {
+            seconds = Double(end) * Double(numerator) / Double(denominator)
+        }
+        let index = chunks.count - 1
+        if isVideo { chunks[index].videoEnd = max(chunks[index].videoEnd, seconds) }
+        else { chunks[index].audioEnd = max(chunks[index].audioEnd, seconds) }
+    }
+
+    mutating func evict(before chunkID: UInt64) {
+        discardFirst(chunks.prefix { $0.id < chunkID }.count)
+    }
+
+    private mutating func discardFirst(_ count: Int) {
+        guard count > 0 else { return }
+        for chunk in chunks.prefix(count) {
+            videoFloor = max(videoFloor, chunk.videoEnd)
+            audioFloor = max(audioFloor, chunk.audioEnd)
+        }
+        chunks.removeFirst(count)
     }
 }

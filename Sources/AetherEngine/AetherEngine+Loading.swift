@@ -1999,6 +1999,13 @@ extension AetherEngine {
         // #353: the settled picture size, wired next to the frame times because a host laying out an
         // overlay needs the rectangle as well as the clock, and both come off this renderer.
         mirrorSoftwareDisplaySize(from: host.$videoDisplaySize, storeIn: &softwareCancellables)
+        host.$residentRanges
+            .sink { [weak self, weak host] ranges in
+                guard let self, let host, self.softwareHost === host,
+                      self.loadGeneration == generation, !self.isLive else { return }
+                self.residentRanges = ranges
+            }
+            .store(in: &softwareCancellables)
         // SW-PiP: publish the bridge once the session owns its layer (the layer object is stable for
         // the session; the host attaches it to the view and, on PiP start, to the system window).
         softwarePiPSource = SoftwarePiPSource(layer: host.displayLayer, isLive: isLive, engine: self)

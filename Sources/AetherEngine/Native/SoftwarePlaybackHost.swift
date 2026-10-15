@@ -14,11 +14,14 @@ final class SoftwarePlaybackHost {
     /// Codecs whose presentation reordering has an established bound get the read-ahead's
     /// successor-PTS coverage; every other codec keeps strict packet-duration coverage. HEVC's bound
     /// is FFmpeg's own: `sps_max_num_reorder_pics > HEVC_MAX_DPB_SIZE - 1` (15) is rejected
-    /// (n8.1.2 hevc/ps.c:1397-1403), inside the 32-timestamp queue. On the duration model a Matroska
+    /// (n8.1.2 hevc/ps.c:1397-1403), inside the 32-timestamp queue. VC-1's max_b_frames is at most
+    /// 7 (n8.1.2 vc1.c:346,426), also within that queue including a field-picture margin. Its
+    /// 33 ms packet durations over 33/34 ms timestamps otherwise create the same tiny holes.
+    /// On the duration model a Matroska
     /// file muxed with 41 ms durations against 41/42 ms deltas split at every 42 ms step (#613).
     nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
         switch codecID {
-        case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue: return 32
+        case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue, AV_CODEC_ID_VC1.rawValue: return 32
         default: return nil
         }
     }
@@ -172,6 +175,8 @@ final class SoftwarePlaybackHost {
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
     /// #687: this host's entries in the process-wide retention ledger, released on `stop()`.
     private var retentionClaims: [RetentionClaims.Claim] = []
+    @Published private(set) var residentRanges: [ClosedRange<Double>] = []
+    private let residentRangePublication = SoftwareResidentRangePublication()
 
     /// The same public buffered-position axis as the live and native hosts, but backed by
     /// actual compressed A/V packet coverage. nil when no continuous cache span contains the clock.
@@ -207,8 +212,12 @@ final class SoftwarePlaybackHost {
     /// the wrong thread for it. Serial and separate from `demuxQueue`, whose block never returns.
     private let seekQueue = DispatchQueue(label: "engine.sw.seek", qos: .userInitiated)
 
-    /// Read-deadline budget for a reposition (#254). Matches the side reader's positioning budget.
-    private static let seekBudgetSeconds: TimeInterval = 8.0
+    /// Bound foreground VOD positioning independently of speculative side-reader work.
+    /// Index-less containers can require several remote keyframe probes; cloud-mounted
+    /// sources may take 2-3 seconds per successful range response. The former 8-second
+    /// side-reader budget aborted these progressing seeks. Keep a finite total bound;
+    /// repositioning still runs off-main and failed/cancelled results remain failures.
+    static let seekBudgetSeconds: TimeInterval = 30.0
 
     /// True while a reposition is awaiting `seekQueue`. Gates the 0.25 s time tick: the synchronizer
     /// still carries the pre-seek anchor, so an ungated tick would walk the OLD position forward for
@@ -778,7 +787,16 @@ final class SoftwarePlaybackHost {
 
     // MARK: - Init
 
-    init(videoGravity: AVLayerVideoGravity = .resizeAspect) {
+    typealias Reposition = @Sendable (Demuxer, Double, TimeInterval, DispatchQueue,
+                                      @escaping @Sendable () -> Bool) async -> Demuxer.RepositionOutcome
+    private let reposition: Reposition
+
+    init(videoGravity: AVLayerVideoGravity = .resizeAspect,
+         reposition: @escaping Reposition = { dem, target, budget, queue, superseded in
+             await dem.seekBounded(to: target, timeout: budget, on: queue,
+                                   isSuperseded: superseded)
+         }) {
+        self.reposition = reposition
         self.renderer = SampleBufferRenderer(videoGravity: videoGravity)
         // Default to the software decoder; load() swaps it for the
         // VT-backed one when the source's video codec is HEVC.
@@ -1227,11 +1245,16 @@ final class SoftwarePlaybackHost {
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            _ = await dem.seekBounded(to: sourceStart, timeout: Self.seekBudgetSeconds, on: seekQueue)
+            let outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
+                                           { [weak self] in self?.stopRequested ?? true })
             // Besides the in-band record completion above, this is load()'s only suspension point, so it
             // is the other place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
-            guard !stopRequested else { return }
+            guard !stopRequested, !Task.isCancelled, outcome != .superseded else {
+                throw CancellationError()
+            }
+            EngineLog.emit("[SWReposition] flags=\(outcome == .landed ? 0 : 1)", category: .swPlayback)
+            guard outcome == .landed else { throw HostError.repositionFailed }
             // Mirror seek() skip-PTS + clock alignment so demux drops pre-keyframe frames and synchronizer starts at the resume offset.
             let startTime = CMTime(seconds: sourceStart, preferredTimescale: 90000)
             videoDecoder.skipUntilPTS = startTime
@@ -1317,6 +1340,7 @@ final class SoftwarePlaybackHost {
     // MARK: - Transport
 
     func play() {
+        guard !stopRequested, failure == nil else { return }
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
@@ -1631,11 +1655,12 @@ final class SoftwarePlaybackHost {
     @discardableResult
     func seek(to seconds: Double) async -> Demuxer.RepositionOutcome {
         guard !stopRequested else { return .superseded }
-        guard let dem = demuxer else { return .stalled }
+        guard failure == nil, let dem = demuxer else { return .stalled }
         // Stop loop + bump generation to invalidate in-flight packets. Captured right after, so the
         // reposition can tell on `seekQueue` whether a newer seek has already taken over.
         bumpSeekGeneration()
         let generation = seekGeneration
+        residentRangePublication.invalidate()
         didReachEnd = false
         didParkClockAtEnd = false
         didEmitParkedDiag = false
@@ -1701,6 +1726,7 @@ final class SoftwarePlaybackHost {
             switch preparation {
             case .success(let hit):
                 cacheHit = hit
+                if !hit { residentRanges = [] }
                 EngineLog.emit(
                     "[SWHost] packet cache seek generation=\(generation) "
                     + "result=\(hit ? "hit" : "miss") "
@@ -1716,6 +1742,7 @@ final class SoftwarePlaybackHost {
                 // a normal cache miss. Leave playback parked and publish an explicit failure.
                 seekInFlight = false
                 packetSource.close()
+                residentRanges = []
                 noteSeekSettled(generation)
                 EngineLog.emit("[SWHost] packet cache seek generation=\(generation) result=error",
                                category: .swPlayback)
@@ -1730,23 +1757,31 @@ final class SoftwarePlaybackHost {
             // existing frontier; seeking it too would duplicate or skip already retained packets.
             outcome = .landed
         } else {
-            outcome = await dem.seekBounded(
-                to: sourceSeconds, timeout: Self.seekBudgetSeconds, on: seekQueue,
-                isSuperseded: { [weak self] in
+            outcome = await reposition(dem, sourceSeconds, Self.seekBudgetSeconds, seekQueue,
+                { [weak self] in
                     self?.seekGeneration != generation || (self?.stopRequested ?? true)
                 })
         }
         // A newer seek owns the state from here: it published its own target and clears the hold itself.
         // stop() can also land in the await now that this suspends, and re-arming the clock or flipping
         // isPlaying on a torn-down session would resurrect a loop that has already been told to quit.
-        guard seekGeneration == generation, !stopRequested else { return .superseded }
+        guard seekGeneration == generation, !stopRequested, outcome != .superseded else { return .superseded }
         seekInFlight = false
-        if outcome == .stalled {
-            EngineLog.emit(
-                "[SWHost] reposition to \(String(format: "%.2f", seconds))s did not complete within "
-                + "\(String(format: "%.0f", Self.seekBudgetSeconds))s; read position is undefined",
-                category: .swPlayback
-            )
+        EngineLog.emit("[SWReposition] flags=\(outcome == .landed ? 2 : 3)", category: .swPlayback)
+        guard outcome == .landed else {
+            // No target clock, decoder run or cache producer may follow an undefined read position.
+            // Keep the last observed clock; the engine must not finalize this request as a landing.
+            isPlaying = false
+            pausedByHost = true
+            audioOutput?.setRate(0)
+            currentTime = clockSessionZero > 0
+                ? max(0, sourceClockSeconds - clockSessionZero) : sourceClockSeconds
+            packetSource?.close()
+            residentRanges = []
+            noteSeekSettled(generation)
+            failure = PlaybackErrorInfo(kind: .softwarePipelineFailed,
+                                       message: "Playback source could not reposition.")
+            return .stalled
         }
 
         // Re-armed after the landing: a pre-seek frame PAST the target (a backward seek) clears the
@@ -2005,6 +2040,8 @@ final class SoftwarePlaybackHost {
         noteSeekSettled(seekGeneration)
         timeTimer?.cancel()
         timeTimer = nil
+        residentRangePublication.invalidate()
+        residentRanges = []
         vodPacketReadAhead?.close()
         vodPacketReadAhead = nil
         renderer.subtitleCompositor.reset()
@@ -3511,6 +3548,32 @@ final class SoftwarePlaybackHost {
 
     // MARK: - Time updates
 
+    nonisolated static func displayResidentRanges(_ ranges: [ClosedRange<Double>],
+                                                  sessionZeroSeconds: Double) -> [ClosedRange<Double>] {
+        guard sessionZeroSeconds.isFinite else { return [] }
+        let zero = max(0, sessionZeroSeconds)
+        return ranges.compactMap { range in
+            let start = max(0, range.lowerBound - zero), end = range.upperBound - zero
+            return start.isFinite && end.isFinite && start < end ? start...end : nil
+        }
+    }
+
+    /// Also runs while paused, independently of rendered-time events. At most one bounded
+    /// metadata calculation is pending. Cached seeks keep the last valid spans; a miss clears
+    /// them at the actual discard decision. Seek/stop invalidate any pre-operation result.
+    private func sampleResidentRanges() {
+        guard !isLive, !stopRequested, !seekInFlight,
+              let source = vodPacketReadAhead else { return }
+        let zero = clockSessionZero
+        residentRangePublication.sample {
+            Self.displayResidentRanges(source.residentRanges, sessionZeroSeconds: zero)
+        } publish: { [weak self] ranges in
+            guard let self, self.vodPacketReadAhead === source, !self.stopRequested,
+                  self.clockSessionZero == zero else { return }
+            if self.residentRanges != ranges { self.residentRanges = ranges }
+        }
+    }
+
     private func startTimeUpdates() {
         timeTimer = Timer.publish(every: 0.25, on: .main, in: .common)
             .autoconnect()
@@ -3518,10 +3581,11 @@ final class SoftwarePlaybackHost {
                 guard let self else { return }
                 // Independent of the clock below: a seek in flight must not defer the one check.
                 self.checkSurfaceVisibilityIfDue()
+                self.sampleResidentRanges()
                 guard let aOut = self.audioOutput else { return }
                 // #254: a reposition in flight holds `currentTime` at its target; the synchronizer is
                 // still on the pre-seek anchor and would drag the published position backwards.
-                guard !self.seekInFlight else { return }
+                guard !self.seekInFlight, self.failure == nil else { return }
                 let raw = aOut.currentTimeSeconds
                 self.emitDiagIfDue(clock: raw)
                 // AE#724: until the first sample arms it, the synchronizer still reads 0, and a paused
@@ -3688,11 +3752,12 @@ final class SoftwarePlaybackHost {
     // MARK: - Errors
 
     enum HostError: Error, LocalizedError {
-        case noVideoStream
+        case noVideoStream, repositionFailed
 
         var errorDescription: String? {
             switch self {
             case .noVideoStream: return "Source has no video stream"
+            case .repositionFailed: return "Playback source could not resume at the requested position."
             }
         }
     }
@@ -3800,5 +3865,33 @@ extension SoftwarePlaybackHost: LiveRecordingHost {
             duration: packet.pointee.duration,
             isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
         )
+    }
+}
+
+/// A single background snapshot at a time. Invalidating at seek/stop prevents a delayed snapshot
+/// from restoring a discarded range or from clearing a newer request. Main never waits for work.
+@MainActor
+final class SoftwareResidentRangePublication {
+    private var task: Task<Void, Never>?
+    private var revision: UInt64 = 0
+
+    func invalidate() {
+        revision &+= 1
+        task?.cancel()
+        task = nil
+    }
+
+    @discardableResult
+    func sample(_ read: @escaping @Sendable () async -> [ClosedRange<Double>],
+                publish: @escaping @MainActor ([ClosedRange<Double>]) -> Void) -> Task<Void, Never>? {
+        guard task == nil else { return nil }
+        let token = revision
+        task = Task { [weak self] in
+            let ranges = await BlockingWork.detached(priority: .utility, operation: read).value
+            guard let self, !Task.isCancelled, self.revision == token else { return }
+            self.task = nil
+            publish(ranges)
+        }
+        return task
     }
 }

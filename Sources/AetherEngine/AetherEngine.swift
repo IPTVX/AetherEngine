@@ -83,7 +83,8 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputePlaybackPhase() }
     }
 
-    /// Where the loopback segment cache holds picture right now, on the same 0-based display axis as
+    /// Where the loopback segment cache or software VOD packet cache holds picture right now,
+    /// with selected audio coverage required for software A/V, on the same 0-based display axis as
     /// `currentTime`, `duration` and `seek(to:)`. An empty array is the nil-equivalent, and live
     /// sessions publish one always: their rewind depth is `clock.seekableLiveRange`, a different
     /// contract. Residency is not a promise that a seek inside a range will be instant; the player may
@@ -6341,6 +6342,19 @@ public final class AetherEngine: ObservableObject {
         // A superseding seek owns the final state.
         guard loadGeneration == gen, seekGeneration == seekGen else { return }
         setPendingRecoverySeekTarget(nil)
+        if softwareHost != nil, hostReposition != .landed {
+            setProgrammaticSeek(inFlight: false, target: nil)
+            closeSeekTicket(&programmaticSeekTicket,
+                            with: hostReposition == .superseded ? .superseded : .stalled)
+            // Host failure sinks may already have published .error. Never overwrite it with
+            // .playing/.paused or publish the requested position as though it was reached.
+            if hostReposition == .stalled {
+                if case .error = state {} else {
+                    publishError(.softwarePipelineFailed, "Playback source could not reposition.")
+                }
+            }
+            return
+        }
         // Publish the measured native landing, not the optimistic request. The two can differ
         // slightly even after a successful callback; subtitle anchors and SeekEvent must agree.
         let landedClock = nativeOnly ? (nativeHost?.currentTime ?? clockTarget) : clockTarget
