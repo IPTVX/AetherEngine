@@ -202,7 +202,7 @@ reproduces the exact lock shape; against the old handler it hung past a 300 s ti
 
 ### 4.5 Consumption test assets
 
-`aetherctl dvsurvey` (in the tooling PR that follows this one) ranks frames by L1 distance from the title's median so that the pin test can
+`aetherctl dvsurvey` ranks frames by L1 distance from the title's median so that the pin test can
 pin a frame whose metadata is a large lie. On the three local test clips: a CMv4.0 4000-nit clip pins
 frame 247 (`max_pq` 4095 against a median of 2081, distance 3876, the best asset); a scene clip gives
 distance 1391, usable; a credits clip has static L1 (distance 0) and is correctly rejected as `WEAK`.
@@ -583,7 +583,7 @@ swift test --filter "Dovi|DualLayer|OrderedDelivery|FrameSideDataRing"
 | `DoviShaderSyncTests` | every kernel present, parameter block size, one pipeline per process |
 | `DoviRpuConverterTests` | NAL surgery, framing, degradation to HDR10 |
 
-**CLI** ([cli.md](cli.md); these subcommands arrive with the tooling PR that follows this one): `aetherctl feltest` (pixel and metadata verdicts, exit codes 0–5),
+**CLI** ([cli.md](cli.md)): `aetherctl feltest` (pixel and metadata verdicts, exit codes 0–5),
 `dvsurvey`, `dovitest`, and `play --cycle-el` to flip the residual on a timer.
 
 **Device.** With `DEVELOPER_DIR` pointing at an Xcode that has `devicectl`:
@@ -601,9 +601,9 @@ log stream --predicate 'subsystem == "de.superuser404.AetherEngine" AND category
 `info files` takes `--subdirectory` and accepts `--username`; `copy from` takes `--source` and rejects
 `--username`. The absence of a `JetsamEvent` for the day rules out a memory kill.
 
-**Consumption test** (the tooling and the pin hook arrive with the tooling PR that follows this one). Pick a pin with `aetherctl dvsurvey`, arm a DEBUG build with
+**Consumption test.** Pick a pin with `aetherctl dvsurvey`, arm a DEBUG build with
 `AetherEngine.armDolbyVisionPinTest("maxpq>=4095,period:2")` (an `@_spi(Diagnostics)` hook; on the
-Mac, `aetherctl play --dv-pin`) against that asset, and watch the panel with its own dynamic
+Mac, `aetherctl play --fel --surface --dv-pin`) against that asset, and watch the panel with its own dynamic
 picture processing switched off. The substitution happens after composition, so a visible pulse can
 only come from the metadata.
 
@@ -664,4 +664,4 @@ bit depths, and the display metadata (carried into the converted Profile 8.1 RPU
 | this file | design, implementation, evidence, verification |
 | [formats.md](formats.md#dolby-vision-signaling) | Profile 7 behaviour as a host sees it |
 | [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling` |
-| [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el` (with the tooling PR) |
+| [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el` |
