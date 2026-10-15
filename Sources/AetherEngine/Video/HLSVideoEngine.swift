@@ -634,6 +634,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Source bitrate in bps for HLS BANDWIDTH/AVERAGE-BANDWIDTH. 0 when libavformat can't
     /// compute it; callers fall back to an over-declared estimate to avoid CoreMediaErrorDomain -12318.
     private var sourceBitrate: Int64 = 0
+    /// AE#783: the highest per-segment source bitrate the keyframe index measures, nil when it cannot.
+    private var sourcePeakBitrate: Int64?
 
     /// Fires on each gate open (initial + restart) so AetherEngine keeps its shift in step
     /// for subtitle cue lookup.
@@ -1296,6 +1298,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceStartSeconds = formatStart == Int64.min ? 0 : max(0, Double(formatStart) / Double(AV_TIME_BASE))
         let durationSeconds = dem.duration
         var plan: [Segment]
+        var keyframeBytePositions: [Int64: Int64] = [:]
         if isLiveSession {
             sourceBitrate = dem.bitRate
             self.firstKeyframePts = 0
@@ -1353,7 +1356,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // 3. Build the segment plan. Uses the same cut algorithm as libavformat's hls muxer
             //    (first IDR at-or-after `(segIdx+1) * hls_time`); falls back to uniform stride
             //    if the index has < 2 entries (restart machinery handles any plan/muxer drift).
-            let keyframes = dem.indexedKeyframes(streamIndex: videoIndex)
+            let keyframeEntries = dem.indexedKeyframeEntries(streamIndex: videoIndex)
+            let keyframes = keyframeEntries.map(\.pts)
             let indexTrustworthy = Self.keyframeIndexIsTrustworthy(
                 keyframes: keyframes,
                 videoTimeBase: videoTimeBase,
@@ -1392,6 +1396,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     sourceDurationSeconds: durationSeconds
                 )
                 planBoundariesClaimRandomAccess = true
+                keyframeBytePositions = Dictionary(keyframeEntries.map { ($0.pts, $0.pos) },
+                                                   uniquingKeysWith: { first, _ in first })
                 // AE#561: these boundaries ARE this container's index entries, so they carry its
                 // stamping. Read from the demuxer that produced them, never from the URL or the
                 // host's metadata: on a remux session the delivered container is the one indexed.
@@ -1688,6 +1694,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // share these boundaries, so the merge fixes both at once).
         plan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
         self.segmentPlan = plan
+        if !keyframeBytePositions.isEmpty {
+            sourcePeakBitrate = Self.peakSegmentBitrate(plan: plan, keyframeBytePositions: keyframeBytePositions)
+            EngineLog.emit(
+                "[HLSVideoEngine] peak segment bitrate: "
+                + (sourcePeakBitrate.map { "\($0) bps (source average \(sourceBitrate) bps)" }
+                   ?? "not measurable from the index byte positions"),
+                category: .session
+            )
+        }
 
         // #93 residual: anchor the FIRST producer at the session's start position instead of seg0.
         // A resume start otherwise produces seg0 (torn down and discarded seconds later when
@@ -2073,6 +2088,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             frameRate: frameRate,
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
+            sourcePeakBitrate: sourcePeakBitrate,
+            bridgedAudioPeakBitrate: savedAudioConfig?.bridge?.peakOutputBitRate ?? 0,
             audioLanguage: servedAudioLanguage,
             audioChannelCount: servedAudioChannels,
             audioIsAtmosStreamCopy: servedAudioIsAtmosStreamCopy,

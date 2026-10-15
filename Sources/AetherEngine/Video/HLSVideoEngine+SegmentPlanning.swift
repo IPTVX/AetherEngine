@@ -384,6 +384,27 @@ extension HLSVideoEngine {
         return plan
     }
 
+    /// AE#783: the highest source bitrate of any planned segment, from the byte positions the container
+    /// index records at the segment boundaries. Those bytes hold every interleaved track, including the
+    /// ones the session drops, so the figure errs high. Nil unless the positions rise across every
+    /// measurable boundary: two IRAPs in one Matroska Cluster share a position, a disc folds several
+    /// files onto one axis, and either one makes a byte span mean nothing. The final segment has no
+    /// indexed end and is not measured.
+    ///
+    /// Pure for offline testing.
+    static func peakSegmentBitrate(plan: [Segment], keyframeBytePositions: [Int64: Int64]) -> Int64? {
+        guard plan.count > 1 else { return nil }
+        var peak: Double = 0
+        for segment in plan.dropLast() {
+            guard let start = keyframeBytePositions[segment.startPts], start >= 0,
+                  let end = keyframeBytePositions[segment.endPts], end > start,
+                  segment.durationSeconds > 0
+            else { return nil }
+            peak = max(peak, Double(end - start) * 8 / segment.durationSeconds)
+        }
+        return peak > 0 && peak < Double(Int64.max) ? Int64(peak) : nil
+    }
+
     /// Segments shorter than this are folded into a neighbour by `collapseShortSegments`. A keyframe
     /// cluster (several IRAPs within a few frames) otherwise makes `buildKeyframeSegmentPlan` emit
     /// sub-frame segments whose narrow [start,end) window can miss every demuxed keyframe, so the producer

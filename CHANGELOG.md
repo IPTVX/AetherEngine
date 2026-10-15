@@ -53,6 +53,18 @@ the public-API contract.
 
 ### Fixed
 
+- **A remuxed title declares a `BANDWIDTH` its densest segment fits under** (#783, thanks @hp561). The
+  master declared twice the container's average, and a VBR ending in an HEVC Matroska file with three
+  Opus tracks bridged to FLAC ran past it: AVPlayer logged -12318 "Segment exceeds specified bandwidth
+  for variant". When the plan's boundaries are container index entries, the byte positions the index
+  records at them now give each segment's source bitrate, and the highest of them (with 20% headroom,
+  plus the bridged track's ceiling: FLAC at its PCM rate, E-AC-3 and APAC at their configured rate)
+  raises the declaration, up to four times the average and never past 160 Mbit/s, so an implausible
+  measurement cannot leave a variant AVPlayer refuses to pick. Twice the average stays the floor, so no
+  declaration goes down. On a 60 s HEVC file averaging 20.1 Mbit/s whose densest served segment carried
+  55.6 Mbit/s, the declaration went from 40.2 to 68.2 Mbit/s. The I-frame variant keeps reusing the
+  main figure, which bounds any keyframe of it.
+
 - **The package builds again on toolchains before Swift 6.4** (#787). `H264MatroskaSlotPermutation.CFRRewriter` (from #762) relied on Swift 6.4 leaving private stored properties with a default out of the memberwise initializer; earlier compilers make that initializer private, so `swift build` failed on Xcode 26. The initializer is now written out. No behavior change.
 
 - **A jump back opens one connection at the landing instead of three serial detour fetches** (#782,

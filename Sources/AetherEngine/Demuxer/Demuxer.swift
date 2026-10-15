@@ -1831,6 +1831,12 @@ public final class Demuxer: @unchecked Sendable {
     /// during avformat_find_stream_info. Empty = no usable index, fall back to
     /// uniform-stride plan. AVINDEX_KEYFRAME checked defensively.
     func indexedKeyframes(streamIndex: Int32) -> [Int64] {
+        indexedKeyframeEntries(streamIndex: streamIndex).map(\.pts)
+    }
+
+    /// `indexedKeyframes` with each entry's byte position in the source (AE#783), -1 where the index
+    /// has none. Matroska stores the position of the Cluster that holds the keyframe.
+    func indexedKeyframeEntries(streamIndex: Int32) -> [(pts: Int64, pos: Int64)] {
         accessLock.lock()
         defer { accessLock.unlock() }
         let compositionOffset = compositionRepair?.decodeTimestampOffset
@@ -1843,7 +1849,7 @@ public final class Demuxer: @unchecked Sendable {
         let count = avformat_index_get_entries_count(stream)
         guard count > 0 else { return [] }
         let tb = stream.pointee.time_base
-        var result: [Int64] = []
+        var result: [(pts: Int64, pos: Int64)] = []
         for i in 0..<count {
             // AVINDEX_KEYFRAME = 0x0001. Fold each entry onto the contiguous timeline (multi-clip disc)
             // so the segment plan built from these IRAP positions matches the normalized packets
@@ -1854,7 +1860,7 @@ public final class Demuxer: @unchecked Sendable {
                   let folded = normalizedTimestamp(entry.pointee.timestamp, pos: entry.pointee.pos, timeBase: tb),
                   let placed = Self.offsetIndexTimestamp(folded, by: compositionOffset)
             else { continue }
-            result.append(placed)
+            result.append((pts: placed, pos: entry.pointee.pos))
         }
         return result
     }
