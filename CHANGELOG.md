@@ -146,6 +146,14 @@ the public-API contract.
   so a crafted `mapping_idc` could slip past, and its writer allocates about 0.5 GB to write such an id
   back). The guard knows these paths; it does not prove there are no others. Every RPU in dovi_tool's
   test corpus (2333, Profile 5, 7 MEL and FEL, 8, CM v2.9 and v4.0) passes it and converts as before.
+- **A refused live join says so, instead of reading as an unreadable source.** When the live HLS
+  ingest's playlist was refused at the join, the probe saw no bytes and the load published
+  `customSourceProbeFailed`, which a host reads as a stream it cannot play: one that falls back to
+  another route on it moved the channel there for the rest of its session over a 509 an IPTV panel
+  gives while another device holds the account's last slot. The load now publishes the origin's
+  answer, as an HTTP reader's failed open does: `sourceRateLimited` (429/503/509) or `sourceRefused`
+  with the status in `underlyingCode`, or `liveSourceUnavailable` when the playlist could not be
+  reached.
 
 ## [7.36.0] - 2026-10-13
 
