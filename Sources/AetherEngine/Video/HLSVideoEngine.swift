@@ -1869,7 +1869,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     frameSize: acpForHE.frame_size,
                     hasASC: hasASC
                 )
-            if compat.requiresBridge || isHEAAC {
+            // AE#764: CoreMedia refuses a FLAC min_blocksize under 192 and hangs on frames smaller than the
+            // field claims, so a stream with small blocks cannot be copied, only decoded.
+            let flacBlocksTooSmall = compat == .flac
+                && FLACStreamInfo.coreMediaRejectsStreamCopy(UnsafePointer(audioStream.pointee.codecpar))
+            if flacBlocksTooSmall {
+                bridgePreferred = true
+                let sizes = FLACStreamInfo.blockSizes(UnsafePointer(audioStream.pointee.codecpar))
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: FLAC STREAMINFO min_blocksize=\(sizes?.min ?? 0) "
+                    + "max_blocksize=\(sizes?.max ?? 0) is below CoreMedia's floor of "
+                    + "\(FLACStreamInfo.coreMediaMinimumBlockSize), bridging instead of stream-copy",
+                    category: .session
+                )
+            } else if compat.requiresBridge || isHEAAC {
                 bridgePreferred = true
                 EngineLog.emit(
                     isHEAAC
@@ -1920,6 +1933,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let sampleRate = Int64(acp.sample_rate)
                 let frameSamples: Int64 = {
                     if acp.frame_size > 0 { return Int64(acp.frame_size) }
+                    if let declared = FLACStreamInfo.fixedBlockSize(UnsafePointer(audioStream.pointee.codecpar)) {
+                        return declared
+                    }
                     switch acp.codec_id {
                     case AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3: return 1536
                     case AV_CODEC_ID_AAC: return 1024

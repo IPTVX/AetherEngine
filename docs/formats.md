@@ -247,7 +247,7 @@ The label can also be taken back from the item itself, where the platform has no
 
 | | |
 | --- | --- |
-| Stream-copy (lossless into fMP4) | AAC-LC, AC3, EAC3, FLAC, ALAC. HE-AAC / HE-AACv2 stream-copy when the source carries an AudioSpecificConfig (any movie container) and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR). LATM/LOAS-framed AAC (DVB broadcast framing) always bridges |
+| Stream-copy (lossless into fMP4) | AAC-LC, AC3, EAC3, FLAC, ALAC. HE-AAC / HE-AACv2 stream-copy when the source carries an AudioSpecificConfig (any movie container) and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR). LATM/LOAS-framed AAC (DVB broadcast framing) always bridges. FLAC whose `STREAMINFO` `min_blocksize` is below 192 bridges too (AE#764): CoreMedia drops a track that declares less, and hangs on frames smaller than the field claims, so such a stream cannot be copied (the bridge is bit-perfect for FLAC). The same field sends an audio-only FLAC to the FFmpeg host instead of AVPlayer |
 | Bridged (`AudioBridge`) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, PCM (raw shapes plus G.711 A-law / mu-law), WMA (Standard, Pro, Lossless, Voice), and the Flash tail Nellymoser Asao / ADPCM-SWF / Speex: decoded to PCM and re-encoded |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` preserved through the wrapper |
 

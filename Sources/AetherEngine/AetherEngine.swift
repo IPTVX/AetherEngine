@@ -4745,8 +4745,14 @@ public final class AetherEngine: ObservableObject {
             let audioCodecID: AVCodecID = (probeOpened && resolvedInitialAudio >= 0)
                 ? (probe.stream(at: resolvedInitialAudio)?.pointee.codecpar.pointee.codec_id ?? AV_CODEC_ID_NONE)
                 : AV_CODEC_ID_NONE
-            let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID)
-            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")", category: .engine)
+            // AE#764: AVPlayer reads the source's own STREAMINFO here, so a FLAC with blocks under
+            // CoreMedia's floor goes to libavcodec rather than failing to open.
+            let flacBlocksTooSmall = probeOpened && resolvedInitialAudio >= 0
+                && (probe.stream(at: resolvedInitialAudio).map {
+                    FLACStreamInfo.coreMediaRejectsSource(UnsafePointer($0.pointee.codecpar))
+                } ?? false)
+            let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID) && !flacBlocksTooSmall
+            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
             if nativeHost != nil {
