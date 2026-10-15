@@ -18,13 +18,10 @@ class RangeHandler(http.server.SimpleHTTPRequestHandler):
             return super().send_head()
         m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip())
         size = os.path.getsize(path)
-        if not m:
-            self.send_error(416)
-            return None
-        a, b = m.groups()
-        if a == "" and b == "":
-            # `bytes=-` names no range at all: RFC 9110 says to ignore an unparsable Range header.
+        if not m or m.groups() == ("", ""):
+            # A multi-range, `bytes=-` or otherwise unparsable header: RFC 9110 says to ignore it.
             return super().send_head()
+        a, b = m.groups()
         if a == "":
             start, end = max(0, size - int(b)), size - 1
         else:
