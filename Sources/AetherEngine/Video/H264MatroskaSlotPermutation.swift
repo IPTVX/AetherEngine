@@ -225,6 +225,13 @@ enum H264MatroskaSlotPermutation {
         private var anchorPTS: Int64?
         private var decodeIndex: Int64 = 0
 
+        // Spelled out: before Swift 6.4 the private stored properties made the memberwise init private (#787).
+        init(step: Int64, pocStep: Int64, videoDelay: Int) {
+            self.step = step
+            self.pocStep = pocStep
+            self.videoDelay = videoDelay
+        }
+
         mutating func noteSeek() {
             anchorPTS = nil
             decodeIndex = 0
