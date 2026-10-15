@@ -92,7 +92,10 @@ the public-API contract.
   references SPS/PPS that differ from the AVC initialization, the producer stops before writing that
   sample into the stale native segment. Automatic routing uses the existing software-path takeover,
   preserving a pending seek or cold-resume position and the session transport. Repeated or unused
-  parameter sets keep the native route; an explicitly selected route or disabled escalation is honored.
+  parameter sets keep the native route, and so does a change confined to the PPS, the VUI or the
+  level, which the native decoder takes in band (a TS recording remuxed to MKV or MP4 carries those);
+  only the fields a decoder session is built from, profile through cropping, take the software path.
+  An explicitly selected route or disabled escalation is honored.
 
 - **A live HLS source refused for a while keeps its session.** An IPTV panel that limits an account's
   connections answers a live playlist refresh with 509 while another device holds the last slot, and
