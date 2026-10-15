@@ -41,6 +41,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// HLS `CODECS` value for the track.
     let hlsCodecs: String
     var servedChannelCount: Int? { layout.channelCount }
+    let peakOutputBitRate: Int64
 
     private let srcTimeBase: AVRational
     private let decoder: ObjectAudioDecoding
@@ -114,6 +115,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         levelMeter = BedLevelMeter(layout: layout, sampleRate: Self.sampleRate)
         limiter = PeakLimiter(sampleRate: Self.sampleRate)
         let rate = bitRate ?? layout.channelCount * Self.bitRatePerChannel
+        peakOutputBitRate = Int64(rate)
         let encoder = try APACEncoder(layout: layout, sampleRate: Double(Self.sampleRate), bitRate: rate)
         let pipeline = APACEncodePipeline(
             encoder: encoder, channels: layout.channelCount, bufferFrames: Self.encodeChunkFrames * 4)
