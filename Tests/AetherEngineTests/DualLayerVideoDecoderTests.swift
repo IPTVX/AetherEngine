@@ -15,7 +15,7 @@ import Dovi
 /// asynchronously. These tests drive the two frame handlers directly with synthetic P010 buffers,
 /// using `primeForTesting` / `seedRPUForTesting` to stand in for what `decode(packet:)` sets up, so
 /// the pairing, ordering, metadata and flush behaviour is covered without a real stream.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(2)))
 struct DualLayerVideoDecoderTests {
 
     // MARK: - Fixtures
@@ -2552,8 +2552,6 @@ struct DualLayerVideoDecoderTests {
 
     @Test("DualLayerVideoDecoder reports streamClassification accurately and balances packets")
     func fel22StreamClassificationAndPacketBalance() throws {
-        let aliveBefore = PacketBalanceTracker.alive
-
         let primary = CountingFakeDecoder()
         let enhancement = CountingFakeDecoder()
         let decoder = DualLayerVideoDecoder(
@@ -2565,27 +2563,31 @@ struct DualLayerVideoDecoderTests {
 
         #expect(decoder.streamClassification == .undetermined)
 
-        // Feed a MEL packet
+        // Feed MEL packets
         let vps = Self.hevcNAL(type: 32, payload: [0x0c, 0x01, 0xff, 0xff])
         let sps = Self.hevcNAL(type: 33, payload: [0x01, 0x02, 0x20, 0x00])
         let pps = Self.hevcNAL(type: 34, payload: [0xc0, 0x73])
         let bl = Self.hevcNAL(type: 1, payload: [0x11, 0x22, 0x33, 0x44])
         let melRpu = Self.makeMelRpuBytes()
 
-        guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000) else {
-            Issue.record("Failed to make MEL packet")
-            return
+        // PacketBalanceTracker is process-wide and other suites allocate packets concurrently, so an
+        // exact baseline is a race. A packet leaked per decode shows up as one per iteration instead,
+        // far above what the rest of the run keeps in flight.
+        let iterations = 256
+        let aliveBefore = PacketBalanceTracker.alive
+        for i in 0..<iterations {
+            guard let melPkt = Self.makeAvccPacket([vps, sps, pps, bl, melRpu], pts: 1000 + Int64(i) * 1001) else {
+                Issue.record("Failed to make MEL packet")
+                return
+            }
+            decoder.decode(packet: melPkt)
+            var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
+            trackedPacketFree(&optMel)
         }
-
-        decoder.decode(packet: melPkt)
-
-        var optMel: UnsafeMutablePointer<AVPacket>? = melPkt
-        trackedPacketFree(&optMel)
 
         // Classification must be MEL, not FEL
         #expect(decoder.streamClassification == .mel)
 
-        // PacketBalanceTracker must return to baseline
-        #expect(PacketBalanceTracker.alive == aliveBefore)
+        #expect(PacketBalanceTracker.alive - aliveBefore < iterations / 2)
     }
 }

@@ -15,6 +15,7 @@ import CoreVideo
 /// What it settles: arithmetic, piece selection, MMR term layout, NLQ, clamps. What it cannot: the
 /// spec readings the shader and the model share by construction (the chroma-site luma filter, the
 /// half-step NLQ reconstruction); those were settled against DoViBaker, an independent implementation.
+@Suite(.offCooperativePoolOneLane)
 struct DoviCpuModelTests {
 
     // MARK: - Planes
