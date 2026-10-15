@@ -23,6 +23,23 @@ final class SoftwarePlaybackHost {
         }
     }
 
+    /// The software VOD packet store's bounds on tvOS, which keeps it in purgeable memory
+    /// (`SoftwarePacketMemoryFIFO`) instead of session files; nil elsewhere, where the disk store and
+    /// the session retention budget apply. On an Apple TV 4K (A12) the disk store's appends took
+    /// 100 to 600 ms while a download ran and the demux thread stalled behind them, so video it had
+    /// parked was decoded late and dropped: 22 to 42 drops in a 150 s soak of a 4K title, against
+    /// 0 to 3 in 8 of 9 runs with the store in memory (one run had 26, not seen again). The forward window is 96 MB (about 8 s of a 95 Mbit/s
+    /// title, on top of the forward-seconds limit); played history up to 128 MB stays volatile, so
+    /// the kernel may take it back and a seek into what it took refetches. Peak footprint of a 4K
+    /// FEL session on the A12: ~655 MB against ~580 MB with the disk store.
+    nonisolated static let memoryPacketStoreBudget: (forwardBytes: Int, historyBytes: Int)? = {
+        #if os(tvOS)
+        return (forwardBytes: 96 << 20, historyBytes: 128 << 20)
+        #else
+        return nil
+        #endif
+    }()
+
 
     // MARK: - Published state (mirrors NativeAVPlayerHost surface)
 
@@ -1238,19 +1255,30 @@ final class SoftwarePlaybackHost {
                 } : nil
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
-            let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim)? in
-                let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
-                    .volumeAvailableCapacity.map(Int64.init)
+            let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
-                let capRelaxed = HLSVideoEngine.retentionCapRelaxed(forwardWindowSegments: segments)
-                let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
-                    HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: $0, capRelaxed: capRelaxed)
+                let fifo: any SoftwarePacketStore
+                let bytes: Int
+                var claim: RetentionClaims.Claim?
+                if let memory = Self.memoryPacketStoreBudget {
+                    bytes = memory.forwardBytes
+                    fifo = SoftwarePacketMemoryFIFO(historyCapBytes: memory.historyBytes)
+                    EngineLog.emit("[SWHost] packet cache in memory: forward \(memory.forwardBytes >> 20) MB, "
+                                   + "history \(memory.historyBytes >> 20) MB", category: .swPlayback)
+                } else {
+                    let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                    let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+                        .volumeAvailableCapacity.map(Int64.init)
+                    let capRelaxed = HLSVideoEngine.retentionCapRelaxed(forwardWindowSegments: segments)
+                    let diskClaim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
+                        HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: $0, capRelaxed: capRelaxed)
+                    }
+                    bytes = diskClaim.bytes
+                    guard bytes > 0 else { return nil }
+                    fifo = try SoftwarePacketDiskFIFO(
+                        chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true)
+                    claim = diskClaim
                 }
-                let bytes = claim.bytes
-                guard bytes > 0 else { return nil }
-                let fifo = try SoftwarePacketDiskFIFO(
-                    chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true)
                 let readAhead = SoftwarePacketReadAhead(
                     video: video, audio: audio, byteBudget: bytes,
                     forwardSeconds: Double(segments) * 4,
@@ -1261,14 +1289,14 @@ final class SoftwarePlaybackHost {
                     defer { av_packet_unref(packet); av_packet_free_safe(packet) }
                     return try SoftwareStoredPacket(copying: packet)
                 }
-                claim.track { [weak readAhead] in readAhead?.snapshot.residentBytes ?? 0 }
+                claim?.track { [weak readAhead] in readAhead?.snapshot.residentBytes ?? 0 }
                 return (readAhead, claim)
             }.result
             let readAhead: SoftwarePacketReadAhead?
             switch cacheResult {
             case .success(let cache):
                 readAhead = cache?.0
-                if !stopRequested, let claim = cache?.1 { retentionClaims.append(claim) }
+                if !stopRequested, let claim = cache?.1 ?? nil { retentionClaims.append(claim) }
             case .failure:
                 // A cache-directory failure must not stop a source that the old direct loop can
                 // still play. Runtime spool corruption is explicit, never silently skipped.

@@ -28,7 +28,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// Never acquired by a main-thread API. Serializes reset with append/pop, including the
     /// generation check, so an old consumer cannot pop and discard the first NEW-generation packet.
     private let operations = NSLock()
-    private let fifo: SoftwarePacketDiskFIFO
+    private let fifo: any SoftwarePacketStore
     private let readSource: @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?
     private let beforeConsumerOperation: (@Sendable () -> Void)?
     private let video: Stream
@@ -87,7 +87,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
-         initialSourceClock: Double, fifo: SoftwarePacketDiskFIFO,
+         initialSourceClock: Double, fifo: any SoftwarePacketStore,
          videoReorderDepth: Int? = nil,
          coverageRangeCap: Int = 4096,
          beforeConsumerOperation: (@Sendable () -> Void)? = nil,

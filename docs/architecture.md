@@ -238,6 +238,15 @@ cleanup uses session leases without following symlinks or deleting live stores.
 If creating the store fails, the original direct playback loop remains available.
 Runtime cache corruption is a reported playback failure, not silently skipped data.
 
+On tvOS the same records live in purgeable memory instead
+(`SoftwarePacketMemoryFIFO`, bounds in `SoftwarePlaybackHost.memoryPacketStoreBudget`):
+a 96 MB forward window, and up to 128 MB of played history kept volatile, so the
+kernel may reclaim it under pressure and a seek into reclaimed history is a normal
+cache miss. On an Apple TV 4K the disk store's appends took 100 to 600 ms while a
+download ran, the demux thread stalled behind them, and video it had already
+parked reached the decoder late; AVPlayer keeps its progressive-download cache in
+memory on tvOS too. No session files and no disk retention claim are made there.
+
 The cache frontier is the intersection of selected audio and video presentation
 coverage containing the playhead. Unknown intervals remain unknown; byte counts
 are not converted to guessed seconds. H.264 and HEVC use a bounded presentation

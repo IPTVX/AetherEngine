@@ -37,6 +37,13 @@ the public-API contract.
 
 ### Fixed
 
+- **The software path no longer drops frames on tvOS while it downloads.** Its compressed packet
+  cache was a temporary disk file; on an Apple TV 4K appends to it took 100 to 600 ms while a download
+  ran, the demux thread waited behind them, and video it had already parked reached the decoder late.
+  On tvOS the cache now lives in purgeable memory (96 MB forward, up to 128 MB of reclaimable played
+  history), as AVPlayer's own cache does there: a 4K title's 150 s soak went from 22 to 42 drops to
+  0 to 3. macOS, iOS and visionOS keep the disk cache.
+
 - **Seeks on Matroska TrueHD titles hit the software packet cache again.** TrueHD packets carry no
   duration and repeat their millisecond timestamps, so the cache never counted the audio as stored,
   and every seek on the software path, even back to a spot just played, refetched from the source.
@@ -83,6 +90,7 @@ the public-API contract.
 - **`activeVideoDecoder` names the decoder used by the software host (#753).** HEVC decoded by
   VideoToolbox now reports `VideoToolbox HEVC (HW)` on initial load and reload, instead of
   `libavcodec HEVC (SW)`. Decoder selection and playback routing are unchanged.
+
 - **A live GOP longer than the sealed target duration no longer breaks the playlist.** RFC 8216 keeps
   `TARGETDURATION` fixed for a playlist's life, so a later segment above it made the playlist invalid
   for AVPlayer (-12642). The engine now retires that playlist URL with its original target and an
