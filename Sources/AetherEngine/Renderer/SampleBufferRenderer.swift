@@ -61,6 +61,99 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return reorderBuffer.count
     }
 
+    /// How many frame intervals of compressed video may be admitted ahead of the playback clock on
+    /// the FEL path. The gate runs BEFORE decode, so the decode + EL + compose latency (a few frames)
+    /// comes out of this budget: 5 left a displayed lead of ~0 and the layer dropped 9 frames/s
+    /// on device, against 0.5 s and no drops with no cap. A composed 4K frame costs ~25 MB, and
+    /// Apple's readiness gate alone allowed ~12 of them. Includes frames held in our reorder buffer, which is
+    /// `hardwareDecoderReorderDepth` deep on this path too: the held frames sit inside the window, so a
+    /// composer output pool sized from this cap does not grow with the reorder depth, but they
+    /// are frames the display layer has not been handed, so the lead it holds is that much smaller.
+    static let felVideoLookaheadFrames = 9
+    private var felFrameRate: Double?  // guarded by reorderLock; nil leaves non-FEL pacing unchanged
+    /// Highest compressed-packet PTS the gate has seen, and the largest amount any later packet's PTS
+    /// fell below it. Packets arrive in decode order, so with B-frames a packet's PTS runs ahead of the
+    /// frames still waiting to be displayed; measured on the real fixtures that lead is up to 7 frames
+    /// (a hierarchical-B GOP of 8), 2 to 4 on other clips, 0 on a third. The gate subtracts it so the cap bounds
+    /// display-order look-ahead rather than swinging with the position in the GOP. Guarded by
+    /// `reorderLock`; reset on flush.
+    private var gateMaxPacketPTS: Double?
+    private var gateReorderLead: Double = 0
+    /// HEVC's ceiling on `sps_max_num_reorder_pics`; a bigger PTS gap than this many frames is not reordering.
+    static let maxReorderPictures: Double = 16
+    /// Ceiling on the learned reorder lead, in frames. A hierarchical-B GOP of 8 makes a packet trail the
+    /// highest PTS seen by up to 7 frames in decode order (measured on a UHD Blu-ray FEL remux; other
+    /// clips measured 2 to 4); 8 leaves one frame to spare. It is unrelated to `hardwareDecoderReorderDepth`,
+    /// which sizes the buffer behind the decoder. Without a ceiling one backward timestamp glitch inside
+    /// the 16-picture window would raise the lead, and so the admitted look-ahead, for the whole session.
+    static let maxLearnedReorderFrames: Double = 8
+
+    /// Display-order PTS estimate for a packet in decode order. Pure; the state is passed in.
+    ///
+    /// A gap below the highest PTS seen that is larger than `maxLead` cannot be B-frame reordering
+    /// (HEVC allows at most 16 pictures of it), so it is a timestamp discontinuity: the highest PTS
+    /// restarts from this packet and the learned lead is left alone, instead of absorbing the jump
+    /// into the lead and switching the look-ahead cap off for the rest of the session.
+    ///
+    /// The learned lead is also capped at `maxLearnedLead`: a backward step inside the 16-picture
+    /// window that is still a glitch (a 12-frame one, say) would otherwise raise the lead for the whole
+    /// session, and with it the look-ahead the gate admits. The gate passes `maxLearnedReorderFrames`.
+    static func displayOrderPTS(packetPTS: Double, maxSeenPTS: Double?, reorderLead: Double,
+                                maxLead: Double = .infinity, maxLearnedLead: Double = .infinity)
+        -> (pts: Double, maxSeen: Double, lead: Double) {
+        let seen = maxSeenPTS ?? packetPTS
+        if seen - packetPTS > maxLead {
+            return (packetPTS - reorderLead, packetPTS, reorderLead)
+        }
+        let maxSeen = max(seen, packetPTS)
+        let lead = min(maxLearnedLead, max(reorderLead, maxSeen - packetPTS))
+        return (packetPTS - lead, maxSeen, lead)
+    }
+
+    func setFELLookahead(enabled: Bool, frameRate: Double?) {
+        reorderLock.lock()
+        // Container avg_frame_rate -> r_frame_rate; use 24 fps if both are unavailable.
+        felFrameRate = enabled ? (frameRate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 24) : nil
+        // Whatever was learned belonged to the previous stream or setting.
+        gateMaxPacketPTS = nil
+        gateReorderLead = 0
+        reorderLock.unlock()
+    }
+
+    /// Combined queue-readiness and look-ahead gate, called BEFORE decode so excess frames stay compressed.
+    func mayEnqueueVideoFrame(ptsSeconds: Double, clockSeconds: Double, clockArmed: Bool) -> Bool {
+        reorderLock.lock()
+        let rate = felFrameRate
+        let frontier = _newestEnqueuedPtsSeconds
+        var gatePTS = ptsSeconds.isFinite ? ptsSeconds : frontier ?? .nan
+        if rate != nil, ptsSeconds.isFinite {
+            let d = Self.displayOrderPTS(packetPTS: ptsSeconds, maxSeenPTS: gateMaxPacketPTS,
+                                         reorderLead: gateReorderLead,
+                                         maxLead: Self.maxReorderPictures / (rate ?? 24),
+                                         maxLearnedLead: Self.maxLearnedReorderFrames / (rate ?? 24))
+            gateMaxPacketPTS = d.maxSeen
+            gateReorderLead = d.lead
+            gatePTS = d.pts
+        }
+        reorderLock.unlock()
+        return Self.mayEnqueueAnotherFrame(
+            rendererReady: isReadyForMoreMediaData, felFrameRate: rate,
+            framePTS: gatePTS,
+            clockSeconds: clockSeconds, clockArmed: clockArmed)
+    }
+
+    /// Pure admission decision. Before clock arming there is no meaningful lead: preserve startup
+    /// and the existing broken-audio arming fallback. Late frames remain eligible for catch-up.
+    static func mayEnqueueAnotherFrame(
+        rendererReady: Bool, felFrameRate: Double?, framePTS: Double,
+        clockSeconds: Double, clockArmed: Bool
+    ) -> Bool {
+        guard rendererReady else { return false }
+        guard let rate = felFrameRate, rate.isFinite, rate > 0,
+              clockArmed, clockSeconds.isFinite, framePTS.isFinite else { return true }
+        return framePTS - clockSeconds <= Double(felVideoLookaheadFrames) / rate
+    }
+
     /// Drop frames before this PTS after a seek (prevents keyframe-to-target fast-forward). Cleared after the first passing frame.
     private var skipUntilPTS: CMTime?
 
@@ -435,6 +528,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
         // however far the seek travelled.
         _newestEnqueuedPtsSeconds = nil
+        gateMaxPacketPTS = nil
+        gateReorderLead = 0   // a seek relearns the lead from the new position
         // #311: everything reported before this point describes frames that are now gone.
         _flushGeneration = SampleBufferRenderer.flushGenerations.next()
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
