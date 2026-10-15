@@ -215,8 +215,8 @@ static inline int dovi_select_piece(constant struct DoviPolynomialParams &curve,
 
 // Polynomial piece, evaluated on the input normalised by `bl_max`. Callers pass
 // bl_max + 1 (= 2^bl_bit_depth), the same normaliser as the y/u/v inputs.
-// Returns the prediction in normalised units; dovi_denormalize floors it at 0 before the residual is
-// added (DoViBaker clamps `vv`/`rr` at 0 there), and the sum is clamped again afterwards.
+// Returns the prediction in normalised units; dovi_denormalize clamps it to [0, vdr_max] before the
+// residual is added (DoViBaker clamps `vv`/`rr` to [0, 0xffff] there), and the sum is clamped again afterwards.
 static inline float dovi_eval_poly(
     constant struct DoviPolynomialParams &curve,
     int piece,
@@ -321,10 +321,11 @@ static inline float dovi_eval_curve(
 // Normalised prediction back into VDR code units. Callers pass bl_max + 1, so the
 // scale is (bl_max + 1) * vdr_scale = 2^vdr_bit_depth rather than vdr_max, which is
 // what makes an identity curve bit-exact end to end.
-static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale) {
-    // The prediction is floored at 0 before the residual is added, as DoViBaker does for both the
-    // polynomial and the MMR result, so a negative prediction cannot be pulled back up by the residual.
-    return max(int(rint(pred_norm * float(bl_max) * float(vdr_scale))), 0);
+static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale, uint vdr_max) {
+    // The prediction is clamped to the VDR range before the residual is added, as DoViBaker does for both
+    // the polynomial and the MMR result, so a prediction outside it cannot be pulled back in by the
+    // residual: a negative one starts from 0, one above full scale from vdr_max.
+    return clamp(int(rint(pred_norm * float(bl_max) * float(vdr_scale))), 0, int(vdr_max));
 }
 
 /* ============================================================================
@@ -468,7 +469,7 @@ kernel void dovi_compose_luma(
                                params.poly_y, params.poly_cb, params.poly_cr, bl_y,
                                y_norm, u_norm, v_norm, params.bl_max + 1u);
     }
-    int vdr_y = dovi_denormalize(pred, params.bl_max + 1u, params.vdr_scale);
+    int vdr_y = dovi_denormalize(pred, params.bl_max + 1u, params.vdr_scale, params.vdr_max);
 
     if ((params.flags & DOVI_FLAG_DISABLE_RESIDUAL) == 0u &&
         params.nlq_y.nlq_method == DOVI_NLQ_METHOD_LINEAR &&
@@ -546,8 +547,8 @@ kernel void dovi_compose_chroma(
                                     params.poly_y, params.poly_cb, params.poly_cr, bl_cr,
                                     y_norm, u_norm, v_norm, params.bl_max + 1u);
 
-    int vdr_cb = dovi_denormalize(pred_cb, params.bl_max + 1u, params.vdr_scale);
-    int vdr_cr = dovi_denormalize(pred_cr, params.bl_max + 1u, params.vdr_scale);
+    int vdr_cb = dovi_denormalize(pred_cb, params.bl_max + 1u, params.vdr_scale, params.vdr_max);
+    int vdr_cr = dovi_denormalize(pred_cr, params.bl_max + 1u, params.vdr_scale, params.vdr_max);
 
     if ((params.flags & DOVI_FLAG_DISABLE_RESIDUAL) == 0u) {
         bool cb_active = (params.nlq_cb.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cb.nlq_scale != 0);
