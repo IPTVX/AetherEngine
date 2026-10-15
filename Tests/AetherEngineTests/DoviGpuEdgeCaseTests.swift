@@ -11,6 +11,7 @@ import Metal
 /// 12-bit VDR (vdr_scale 4), and an NLQ with `scale = 2048`, `shift = 11`, which is
 /// what the real P7 streams carry, so that one EL code of residual is exactly one
 /// VDR code. Dither is off so every expectation is exact.
+@Suite(.offCooperativePool)
 struct DoviGpuEdgeCaseTests {
 
     typealias H = DoviGpuCurveSweepTests

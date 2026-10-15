@@ -6,6 +6,7 @@ import CoreVideo
 /// Hostile parameter blocks and content thrown at the composition kernels. The RPU guard and the
 /// parser should never let such values through, but the kernels are the last line: whatever arrives,
 /// they must neither hang nor write outside the legal output range, and must be deterministic.
+@Suite(.offCooperativePool)
 struct DoviGpuAdversarialTests {
 
     typealias H = DoviGpuCurveSweepTests

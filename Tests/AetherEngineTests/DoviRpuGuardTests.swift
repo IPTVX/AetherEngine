@@ -5,6 +5,7 @@ import Dovi
 
 /// libdovi aborts the process on a polynomial piece with linear interpolation. The guard must
 /// see that coming for an RPU whose CRC is perfectly valid, and must not flag real ones.
+@Suite(.offCooperativePool)
 struct DoviRpuGuardTests {
 
     struct BitWriter {
