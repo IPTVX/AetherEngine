@@ -6,17 +6,17 @@ import Dovi
 /// metadata, optionally toggling back to the live RPU on a fixed period.
 ///
 /// ## What the test proves
-/// Everything up to the `CVPixelBuffer` is verified on the host — the attachment is set, it carries
+/// Everything up to the `CVPixelBuffer` is verified on the host: the attachment is set, it carries
 /// the right bytes, it propagates to the `IOSurface`, it survives into the `CMSampleBuffer`. What no
 /// host test can reach is the last link: whether the tvOS compositor *reads* it off a client-supplied
 /// buffer on the `AVSampleBufferDisplayLayer` path (see `dolby-vision-fel.md §4.1`).
 ///
 /// So: hold the pixels constant and change only the metadata. This substitution happens after the GPU
-/// composer has already run and *only* touches the attachment — `rpuCache`, the reshaping
+/// composer has already run and *only* touches the attachment: `rpuCache`, the reshaping
 /// coefficients, the composed frame itself are all untouched, so the decoded pixels stay bit-identical
 /// whichever phase the toggle is in. Any brightness or saturation shift visible on the panel therefore
-/// came from the metadata and nothing else. Pinned to a frame with extreme L1 statistics — the darkest
-/// or brightest frame in the title, which `aetherctl dvsurvey` finds — the TV's display mapping is
+/// came from the metadata and nothing else. Pinned to a frame with extreme L1 statistics, the darkest
+/// or brightest frame in the title, which `aetherctl dvsurvey` finds, the TV's display mapping is
 /// told the wrong thing about the scene and should visibly misjudge it.
 ///
 /// A steady, in-sync 2-second pulse on the panel while the pixels are provably unchanged is the
@@ -26,20 +26,21 @@ import Dovi
 /// `AetherEngine.armDolbyVisionPinTest(_:)` from the host app (a debug menu), or `aetherctl play
 /// --dv-pin`. Grammar is comma-separated `key:value`, in any order:
 ///
-/// - `darkest:N` / `brightest:N` — watch the first `N` frames, keep the one with the lowest
+/// - `darkest:N` / `brightest:N`: watch the first `N` frames, keep the one with the lowest
 ///   (`darkest`) or highest (`brightest`) L1 `avg_pq`, pin to it. Self-calibrating and robust to
 ///   starting playback anywhere in the title.
-/// - `avgpq<=V` / `avgpq>=V` / `maxpq<=V` / `maxpq>=V` — pin to the first frame whose L1 `avg_pq`
+/// - `avgpq<=V` / `avgpq>=V` / `maxpq<=V` / `maxpq>=V`: pin to the first frame whose L1 `avg_pq`
 ///   or `max_pq` crosses `V` (a 12-bit PQ code). Use when `dvsurvey` has already told you the
-///   title's range and you want a specific frame.
-/// - `period:S` — seconds per phase, alternating pinned/live. `period:0` pins permanently. Defaults
+///   title's range and you want a specific frame. Gives up after `thresholdScanLimit` frames
+///   without a match.
+/// - `period:S`: seconds per phase, alternating pinned/live. `period:0` pins permanently. Defaults
 ///   to 2. A positive value below `minimumPeriod` (a pulse faster than a panel can show) is raised
 ///   to it, and a value that is not a finite number is ignored.
 ///
 /// `darkest:240,period:2` is the usual starting point: scan ten seconds, pin the
 /// darkest frame found, pulse every two seconds.
 ///
-/// Never reachable in Release — the whole file is `#if DEBUG`, and a private-framework-adjacent
+/// Never reachable in Release: the whole file is `#if DEBUG`, and a private-framework-adjacent
 /// diagnostic that rewrites what the display sees has no business in a shipping build.
 ///
 /// The state lives in a `DoviPinTest` instance. The engine uses one process-wide instance
@@ -57,6 +58,11 @@ final class DoviPinTest: @unchecked Sendable {
     /// Shortest phase `period:` may name. Below this the toggle is not visible on a panel anyway, and
     /// a tiny value would only make `elapsed / period` overflow an `Int`.
     static let minimumPeriod: TimeInterval = 0.1
+
+    /// Frames a threshold rule (`avgpq<=V` and friends) scans before it gives up. Without it a value
+    /// the title never reaches parses every frame for the rest of the session. 7200 is five minutes
+    /// at 24 fps.
+    static let thresholdScanLimit = 7200
     /// Longest phase `period:` may name (an hour); beyond it the pulse would never be seen.
     static let maximumPeriod: TimeInterval = 3600
 
@@ -115,8 +121,8 @@ final class DoviPinTest: @unchecked Sendable {
 
     /// Returns the RPU NAL that should actually be attached to this frame.
     ///
-    /// Called on the decode thread for every emitted frame. Returns `nal` unchanged — the only
-    /// behaviour that exists in an unarmed build — until a pin has been captured and the toggle is in
+    /// Called on the decode thread for every emitted frame. Returns `nal` unchanged, the only
+    /// behaviour that exists in an unarmed build, until a pin has been captured and the toggle is in
     /// its pinned phase.
     func substitute(_ nal: [UInt8]?) -> [UInt8]? {
         // Lines are collected under the lock and emitted after it: a log handler is arbitrary host
@@ -178,7 +184,9 @@ final class DoviPinTest: @unchecked Sendable {
             case .darkest(let frames), .brightest(let frames):
                 if st.scanned >= frames { commit(&st) }
             case .atMost, .atLeast:
-                if st.unparseableCount >= 300 && st.bestL1 == nil { commit(&st) }
+                if (st.unparseableCount >= 300 && st.bestL1 == nil) || st.scanned >= Self.thresholdScanLimit {
+                    commit(&st)
+                }
             }
             return
         }
@@ -194,15 +202,16 @@ final class DoviPinTest: @unchecked Sendable {
             if st.bestL1 == nil || l1.avg > st.bestL1!.avg { keep() }
             if st.scanned >= frames { commit(&st) }
         case .atMost(let f, let v):
-            if field(f) <= v { keep(); commit(&st) }
+            if field(f) <= v { keep(); commit(&st) } else if st.scanned >= Self.thresholdScanLimit { commit(&st) }
         case .atLeast(let f, let v):
-            if field(f) >= v { keep(); commit(&st) }
+            if field(f) >= v { keep(); commit(&st) } else if st.scanned >= Self.thresholdScanLimit { commit(&st) }
         }
     }
 
     private func commit(_ st: inout State) {
         guard let best = st.best, let l1 = st.bestL1 else {
-            st.pendingLogs.append("dv-pin: scan of \(st.scanned) frame(s) (\(st.unparseableCount) unparseable) found no parseable L1; test not armed")
+            let found = st.unparseableCount < st.scanned ? "no frame matching the rule" : "no parseable L1"
+            st.pendingLogs.append("dv-pin: scan of \(st.scanned) frame(s) (\(st.unparseableCount) unparseable) found \(found); test not armed")
             st.isDisarmed = true
             return
         }
@@ -210,7 +219,7 @@ final class DoviPinTest: @unchecked Sendable {
         st.pinnedL1 = l1
         st.pinnedSourceIndex = st.bestIndex
         st.armedAt = CFAbsoluteTimeGetCurrent()
-        st.pendingLogs.append(String(format: "dv-pin: captured frame %d after %d scanned — L1 min %d max %d avg %d (%.1f / %.1f nits max/avg), %d byte NAL; toggling every %.1fs",
+        st.pendingLogs.append(String(format: "dv-pin: captured frame %d after %d scanned, L1 min %d max %d avg %d (%.1f / %.1f nits max/avg), %d byte NAL; toggling every %.1fs",
                               st.bestIndex, st.scanned, Int(l1.min), Int(l1.max), Int(l1.avg),
                               DoviRpuSurvey.pqCodeToNits(l1.max), DoviRpuSurvey.pqCodeToNits(l1.avg),
                               best.count, st.config.period))
@@ -219,7 +228,7 @@ final class DoviPinTest: @unchecked Sendable {
     struct L1: Equatable { let min: UInt16; let max: UInt16; let avg: UInt16 }
 
     /// L1 statistics out of an `unspec62` NAL. Only called during the capture scan, which ends
-    /// after at most `frames` parses — the steady state does no libdovi work per frame.
+    /// after at most `frames` parses; the steady state does no libdovi work per frame.
     private static func parseL1(ofNAL nal: [UInt8]) -> L1? {
         nal.withUnsafeBufferPointer { buf -> L1? in
             guard let base = buf.baseAddress else { return nil }

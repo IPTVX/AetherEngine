@@ -8,7 +8,7 @@ import Dovi
 ///
 /// This is the *other half* of an RPU from what `DoviMetalParams` carries. `DoviMetalParams` has
 /// the reshaping coefficients the GPU composer needs to rebuild pixels; this has the display
-/// metadata a Dolby Vision TV acts on — L1 frame statistics and L2 creative trims. Nothing here
+/// metadata a Dolby Vision TV acts on: L1 frame statistics and L2 creative trims. Nothing here
 /// feeds playback; it exists so `aetherctl dvsurvey` can tell an operator which frame of a title
 /// carries the most extreme metadata, which is the frame worth pinning for the on-device
 /// consumption test (see `DoviDisplayMetadataDebug`).
@@ -54,14 +54,14 @@ public struct DoviRpuSurveyResult: Sendable {
     public let rpuFailures: Int
     public let enhancementLayerType: String?
 
-    /// Frame with the lowest L1 `avg_pq` — the darkest frame in the survey. Ranked on `avg_pq`
+    /// Frame with the lowest L1 `avg_pq`, the darkest frame in the survey. Ranked on `avg_pq`
     /// rather than `max_pq` because `avg_pq` is what anchors the display-mapping curve's mid-tone,
     /// and because it is typically the field with the widest range in a title: a frame can hold a
     /// bright specular highlight (high `max_pq`) while being almost entirely black. Pinning this
     /// one while a bright scene plays tells the TV the scene is nearly dark, which should visibly
     /// crush it if the metadata is reaching the panel.
     public var darkestFrame: DoviRpuFrameSurvey? { frames.min { $0.l1AvgPQ < $1.l1AvgPQ } }
-    /// Frame with the highest L1 `avg_pq` — the brightest. The complementary poison: pinned over a
+    /// Frame with the highest L1 `avg_pq`, the brightest. The complementary poison: pinned over a
     /// dark scene the TV should stop protecting shadows and lift them.
     public var brightestFrame: DoviRpuFrameSurvey? { frames.max { $0.l1AvgPQ < $1.l1AvgPQ } }
 
@@ -101,7 +101,7 @@ public enum DoviRpuSurvey {
     /// Parses the display metadata out of one `unspec62` NAL.
     ///
     /// The NAL is converted to Profile 8.1 first, so what comes back is what would actually be
-    /// attached to the frame rather than what the Profile 7 bitstream held — the two agree on
+    /// attached to the frame rather than what the Profile 7 bitstream held; the two agree on
     /// L1/L2 by construction (`dovi_convert_rpu_with_mode` rewrites only the profile container),
     /// and surveying the converted form means a surprise there shows up here instead of on the TV.
     public static func parse(nal: UnsafePointer<UInt8>, length: Int, frameIndex: Int) -> DoviRpuFrameSurvey? {
@@ -170,7 +170,7 @@ extension AetherEngine {
 
     /// Walks a title's video stream and surveys every frame's Dolby Vision display metadata.
     ///
-    /// Runs the demuxer and `DoviRpuConverter` only — no decoders, no GPU — so it is fast enough to
+    /// Runs the demuxer and `DoviRpuConverter` only, no decoders, no GPU, so it is fast enough to
     /// sweep thousands of frames. Its purpose is picking the pin for the on-device consumption test:
     /// the operator arms `AetherEngine.armDolbyVisionPinTest(_:)` with `strongestPoison`'s frame.
     @_spi(Diagnostics)
@@ -199,7 +199,7 @@ extension AetherEngine {
             if packet.pointee.stream_index == videoIdx {
                 packetsProcessed += 1
                 if elType == nil { elType = DoviRpuConverter.enhancementLayerType(packet) }
-                // extractEL: false — the survey never touches pixels, so the EL is dead weight.
+                // extractEL: false; the survey never touches pixels, so the EL is dead weight.
                 let layers = DoviRpuConverter.separateDualLayers(packet, extractEL: false)
                 if let raw = layers.rpuData {
                     let idx = frames.count

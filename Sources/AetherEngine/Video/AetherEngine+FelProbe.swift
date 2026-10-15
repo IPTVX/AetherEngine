@@ -35,8 +35,8 @@ public struct FelProbeResult: Sendable {
     public let distinctDVPayloads: Int
     /// Byte length of the first RPU payload attached, for eyeballing against the bitstream.
     public let firstDVPayloadBytes: Int
-    /// Leading bytes of the first RPU payload, hex. A well-formed payload starts `19` — the
-    /// Dolby Vision RPU prefix — because the `unspec62` NAL's 2-byte header has been stripped.
+    /// Leading bytes of the first RPU payload, hex. A well-formed payload starts `19`, the
+    /// Dolby Vision RPU prefix, because the `unspec62` NAL's 2-byte header has been stripped.
     public let firstDVPayloadPrefix: String
 }
 

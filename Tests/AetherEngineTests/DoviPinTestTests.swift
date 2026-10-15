@@ -41,6 +41,25 @@ struct DoviPinTestTests {
         #expect(failures.count == 1, "Expected exactly 1 disarm log line, got: \(failures)")
     }
 
+    @Test("a threshold rule the title never reaches gives up after the scan limit", .offCooperativePoolOneLane)
+    func thresholdRuleGivesUpAfterScanLimit() throws {
+        let nal = DoviComposedFrameRpuTests.felNAL
+        let hit = DoviPinTest(emit: { _ in })
+        hit.configure(try #require(DoviPinTest.parse(spec: "maxpq>=0,period:2")))
+        _ = hit.substitute(nal)
+        #expect(hit.isPinned, "the fixture must parse, or the rest of this test proves nothing")
+
+        let sink = Sink()
+        let pin = DoviPinTest(emit: { sink.append($0) })
+        pin.configure(try #require(DoviPinTest.parse(spec: "maxpq>=4096,period:2")))
+        for _ in 1..<DoviPinTest.thresholdScanLimit { _ = pin.substitute(nal) }
+        #expect(pin.isArmed)
+        _ = pin.substitute(nal)
+        #expect(!pin.isArmed)
+        #expect(!pin.isPinned)
+        #expect(sink.lines.filter { $0.contains("found no frame matching the rule") }.count == 1)
+    }
+
     @Test("an unarmed pin test returns every frame's RPU unchanged")
     func unarmedIsTransparent() {
         let pin = DoviPinTest(emit: { _ in })

@@ -16,7 +16,7 @@ extension AetherEngine {
     ///
     /// - Parameter spec: e.g. `"darkest:240,period:2"`, or nil to disarm.
     /// - Returns: false if `spec` carried no recognisable capture rule, in which case nothing was
-    ///   armed — a typo leaves playback alone rather than pinning something arbitrary.
+    ///   armed, a typo leaves playback alone rather than pinning something arbitrary.
     @discardableResult
     @_spi(Diagnostics)
     public static func armDolbyVisionPinTest(_ spec: String?) -> Bool {
@@ -25,7 +25,7 @@ extension AetherEngine {
             return true
         }
         guard let config = DoviDisplayMetadataDebug.parse(spec: spec) else {
-            EngineLog.emit("dv-pin: could not parse '\(spec)' — expected something like "
+            EngineLog.emit("dv-pin: could not parse '\(spec)', expected something like "
                            + "'darkest:240,period:2' or 'avgpq<=1200,period:2'. Not armed.",
                            category: .engine)
             return false

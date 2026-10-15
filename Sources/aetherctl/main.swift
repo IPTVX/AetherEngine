@@ -714,8 +714,8 @@ if first == "play" {
     // `--cycle-el <seconds>`: flip the FEL residual off and on every N seconds (starting with full FEL), so a
     // `--surface` window shows MEL-equivalent output (base layer + RPU mapping) against the full result.
     if let spec = takeStringFlag("--cycle-el", from: &rest) {
-        guard let period = Double(spec), period.isFinite, period > 0 else {
-            print("ERROR: --cycle-el takes a period in seconds, got '\(spec)'")
+        guard let period = Double(spec), period.isFinite, period >= 0.1 else {
+            print("ERROR: --cycle-el takes a period of at least 0.1 seconds, got '\(spec)'")
             exit(64)
         }
         if !playFel {
