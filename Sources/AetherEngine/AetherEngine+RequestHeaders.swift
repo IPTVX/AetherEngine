@@ -60,6 +60,20 @@ extension AetherEngine {
     }
 }
 
+extension AetherEngine {
+    /// AE#792 part 2: the software path reports a source that stopped answering as a pipeline
+    /// failure. When the reader's last answer was a credential refusal, that is what the host is
+    /// told, with the status, the way an open-time 401 already arrives.
+    nonisolated static func reclassifiedForCredentialRefusal(
+        _ info: PlaybackErrorInfo, refusal: RequestHeaderStore.CredentialRefusal?
+    ) -> PlaybackErrorInfo {
+        guard info.kind == .softwarePipelineFailed, let refusal else { return info }
+        return PlaybackErrorInfo(kind: .sourceRefused,
+                                 message: "Source refused the session's credentials (HTTP \(refusal.status))",
+                                 underlyingCode: refusal.status)
+    }
+}
+
 /// What `updateRequestHeaders(_:)` did (AE#792).
 public enum RequestHeaderUpdateOutcome: Sendable, Equatable {
     /// The session's source readers send the new set on their next request, a reconnect already

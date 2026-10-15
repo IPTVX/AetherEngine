@@ -64,6 +64,20 @@ the public-API contract.
 
 ### Fixed
 
+- **A credential refused mid-session is reported as one, in seconds, and heals when the host renews it
+  (#792).** A 401 or 403 after the session started was handled as a dropped connection: twelve
+  unproductive reconnects with the same refused header (about 80 s of `.stalled(reconnecting: true)`),
+  two revives that reopened with it again, and then `vodSourceFailed` / "Source read failed". The reader
+  now gives a credential refusal a short ladder of its own (about 3 s, the first retry re-resolving an
+  expired signed redirect through the source) and stamps it on the session's header store with the
+  header revision it was sent with. The first refusal of a header set is published on the new
+  `sourceAuthorizationRefused` (the status), so a host can renew and call `updateRequestHeaders(_:)`
+  while the reader is still retrying, which gives it a fresh ladder. Once the reader has given up, the
+  loopback session waits up to 10 s for new headers and rebuilds the producer at the playhead when they
+  arrive (up to three times); otherwise, and on the software path, the session ends with
+  `sourceRefused` and the status as `underlyingCode`. A revive is never spent on the header that was
+  just refused.
+
 - **A TrueHD track started or switched to mid-stream is no longer reported as a dead decoder** (#786,
   thanks @ijuniorfu). TrueHD and MLP decode only from a major sync, so after a start, seek or track
   switch past the opening the decoder skips up to about a hundred 40-frame access units before its

@@ -313,6 +313,29 @@ The call returns a `RequestHeaderUpdateOutcome`:
 | `.installedForNextRebuild` | the requests are made by something that fixed its headers when the session was built: AVFoundation on `.remoteBypass` or an AVPlayer-hosted audio item, a custom `IOReader` the host built, a remote disc image. Call `reloadAtCurrentPosition()` if the set is needed now. |
 | `.noActiveSession` | nothing is loaded; nothing was installed. |
 
+**When the credential lapses anyway.** A 401 or 403 mid-session is not treated as a dropped
+connection. The reader gives it a short ladder of its own (the refused request, then two retries, about
+3 s; the first retry re-resolves an expired signed redirect through the source), where the twelve
+unproductive reconnects used to take about 80 s with the same refused header. The first refusal of a
+header set is published on `sourceAuthorizationRefused` (`AnyPublisher<Int, Never>`, the status), so a
+host can renew right away instead of waiting on a timer derived from the token's expiry, which does not
+cover a token an admin revoked early. A renewal that arrives while the reader is still retrying gives it
+a fresh ladder. Once the reader has given up, the native loopback session waits up to 10 s for new
+headers: a renewal within that time rebuilds the producer at the playhead (up to three times per
+session), and otherwise the session ends with `PlaybackErrorKind.sourceRefused` and the status as
+`underlyingCode`, not `vodSourceFailed`. The software path has no producer to rebuild and reports the
+same `sourceRefused` when its reader's last answer was a refusal.
+
+```swift
+player.sourceAuthorizationRefused
+    .sink { _ in
+        Task { @MainActor in
+            if let fresh = try? await auth.renewedHeaders() { player.updateRequestHeaders(fresh) }
+        }
+    }
+    .store(in: &cancellables)
+```
+
 The log names the header names it replaced, never their values.
 
 ### Overriding the decode path
@@ -735,6 +758,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | `$errorInfo` | `PlaybackErrorInfo?`, the machine-readable half of `.error`: a `PlaybackErrorKind` token, plus the underlying `NSError` domain and code where one is involved. Non-nil exactly while `state` is `.error`, assigned before it. Classify on this, never on the message. |
 | `$playbackPhase` | The derived one-source-of-truth status, and **the only one of these that tracks motion**: `state` is transport INTENT and turns `.playing` the moment the engine has called `play()`, which on a live join can be seconds before the rate rolls (AE#440). Until the transport has moved once in a load, the phase stays `.loading`, and it turns `.playing` on the roll itself. Adds `.rebuffering` and `.stalled(reconnecting:)`. Prefer it over stitching `state` + `isBuffering` + `isSeeking`, and over matching log text. Precedence, highest first: `error > ended > idle > loading > stalled > seeking > rebuffering > playing/paused` - a source that stopped delivering stays visible while a seek is in flight, because no seek can land over it and `isSeeking` / `seekEvents` still carry the seek (#410). `.stalled(reconnecting: true)` is a reader that is retrying, `false` a reader whose ladder is spent and whose recovery has passed to the producer's reopen; both mean the source is down. `.rebuffering` is published on the AVPlayer-backed paths: the native loopback session, direct remote HLS, and the bare-AVPlayer audio host (a starved progressive stream, once the item has played), where `.stalled` cannot occur because there is no reader. The FFmpeg-backed hosts (software video, FFmpeg audio) have no AVPlayer to wait, so a starving source reads as `.stalled` there instead. |
 | `$isBuffering`, `$isSeeking`, `$seekTarget` | The raw axes `playbackPhase` folds. |
+| `sourceAuthorizationRefused` | `AnyPublisher<Int, Never>`: the origin answered 401 or 403 to the session's request headers mid-session; one value per header set, the status. Renew and call `updateRequestHeaders(_:)`; see [Rotating a credential without a rebuild](#rotating-a-credential-without-a-rebuild). |
 | `seekEvents` | `AnyPublisher<SeekEvent, Never>`: `.began`, `.landed(renderedTime:)`, `.stalled`, `.superseded`, `.rejected(SeekEvent.Rejection)`, each with its `target`, an `id` that spans the seek, and a `SeekEvent.Origin` (`.programmatic`, `.nativeScrub`, `.deferred`; a deferred seek is one the session could not take yet, which is where the engine publishes an optimistic `currentTime` for a position nothing has reached). Use it where the falling edge of `$isSeeking` matters: a level cannot say whether a seek landed, gave up, or was superseded, and a `.stalled` seek can still land later under the same id. |
 | `$isSessionReady` | The session is ready in the AVFoundation sense. Not the edge a black cover comes off on. |
 | `$hasFirstFrameReadyForDisplay` | The picture for **this** load is up. A picture, not motion: a live join presents its first frame and can then hold it bit-static for seconds while AVPlayer decides whether to start (AE#440), so a host dropping a spinner here drops it onto a frozen frame. Use `$playbackPhase` for "it is moving". Latched for the load, cleared at the next `load()` / `stop()`. Audio-only sessions never arm it. On an external screen (`isExternalPlaybackActive`) the local layer never reaches readiness, so the item's readiness is the honest edge and the flag latches there (#315). |
