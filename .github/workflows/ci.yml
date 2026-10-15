@@ -39,7 +39,7 @@ jobs:
 
       # The object-audio decoder libraries are traits a host can turn off; keep that build compiling.
       - name: swift build (traits off)
-        run: swift build --disable-default-traits --scratch-path .build-notraits
+        run: swift build --disable-default-traits --build-tests --scratch-path .build-notraits
 
       # A test process that dies mid-run reads as exit 1 with no ✘, no backtrace and no swift-testing
       # summary: `swift test` collapses every abnormal child exit to a plain 1, and a signal takes the
