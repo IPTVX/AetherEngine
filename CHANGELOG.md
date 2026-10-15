@@ -42,6 +42,14 @@ the public-API contract.
 - **`.verbose` engine log lines cost nothing unless the category's debug level is enabled.** `EngineLog` redacted and handed every `.verbose` line to OSLog even when nobody was reading debug output; it now checks `OSLog.isEnabled(type: .debug)` for the category first and returns early. `.info` lines and the host `handler` are unchanged (verbose lines never reached the handler).
 - **`reloadAtCurrentPosition(applying:)` refuses a `preferDualLayerDolbyVision` change, or a `dolbyVisionHandling` change while the preference is on, on a custom `IOReader` source playing Profile 7**, with the new public case `SessionReloadRefusal.dualLayerRouteNeedsFreshLoad`, before any teardown. A host that switches over `SessionReloadRefusal` exhaustively has to handle the new case. The in-place rebuild of a custom source keeps the route the session was loaded with, so the change would have been logged as applied and ignored; `load()` again with the new option. URL sources re-run `load()` and are unaffected.
 
+- **LibTrueHD and LibDTSX can be left out.** Each object-audio decoder library is now behind a package
+  trait, `TrueHDObjectAudio` and `DTSXObjectAudio`, both on by default, so a host that does nothing
+  keeps today's build. A host that cannot ship one of them turns its trait off
+  (`.package(url:..., traits: [])`, or the package's traits in Xcode): the library is neither linked
+  nor resolved, and its codec keeps the channel bridge whatever `objectAudioRendering` asks, with the
+  reason in the session log. The manifest moves to swift-tools-version 6.1, which traits need. CI also
+  builds with both traits off. See README › Package traits.
+
 ### Fixed
 
 - **The package builds again on toolchains before Swift 6.4** (#787). `H264MatroskaSlotPermutation.CFRRewriter` (from #762) relied on Swift 6.4 leaving private stored properties with a default out of the memberwise initializer; earlier compilers make that initializer private, so `swift build` failed on Xcode 26. The initializer is now written out. No behavior change.

@@ -653,6 +653,23 @@ The Swift and Xcode rows are the toolchain CI builds and tests with (GitHub's `x
 
 The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
 
+### Package traits
+
+The two object-audio decoder libraries are behind package traits, both on by default, so nothing changes for a host that does not ask:
+
+| Trait | Links | Without it |
+| --- | --- | --- |
+| `TrueHDObjectAudio` | [LibTrueHD](https://github.com/superuser404notfound/LibTrueHD) | TrueHD Atmos keeps the channel bridge whatever `objectAudioRendering` asks |
+| `DTSXObjectAudio` | [LibDTSX](https://github.com/superuser404notfound/LibDTSX) | DTS:X keeps the channel bridge whatever `objectAudioRendering` asks |
+
+A host that cannot ship one of the libraries turns its trait off; the library is then neither linked nor resolved (it drops out of the host's `Package.resolved`), and the session log says why the codec stayed on the bridge (`built without the TrueHDObjectAudio trait`). In a package manifest, list the traits to keep (an empty list keeps none):
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.36.0", traits: [])
+```
+
+In an Xcode project, the package's traits are set where the package dependency is listed (XcodeGen: `traits: []` on the package). `swift build --disable-default-traits` builds the engine itself that way.
+
 ## Support
 
 If the engine is useful to you and you'd like to support its development, there's a [Ko-fi](https://ko-fi.com/superuser404).
@@ -675,9 +692,9 @@ The exception covers AetherEngine's own code; it does not extend to its dependen
 
 **libdovi** reaches your app through [LibDovi](https://github.com/superuser404notfound/LibDovi) as a static library. It is the compiled `dolby_vision` crate from [dovi_tool](https://github.com/quietvoid/dovi_tool), Copyright (c) quietvoid and contributors, dual-licensed MIT OR Apache-2.0 and consumed here under the MIT option. MIT asks for that copyright notice to travel with the binary, and it is quietvoid's notice that belongs on the acknowledgements screen. The MIT text in LibDovi's own `LICENSE` covers the packaging and build scripts only; both parts are in that one file.
 
-**LibTrueHD** ([superuser404notfound/LibTrueHD](https://github.com/superuser404notfound/LibTrueHD)) reaches your app as a static library and decodes TrueHD for `objectAudioRendering`. Its C API, framer and packaging are MIT (Copyright Quick104, who wrote it for Silo as SiloObjectAudio, and Vincent Herbst). It compiles in the `truehd` and `oamd` crates from [truehdd](https://github.com/truehdd/truehdd), Copyright Rainbaby and the truehdd contributors, under the Apache License 2.0, which asks for the license text and LibTrueHD's `NOTICE` to travel with the binary. Apache-2.0 combines with the engine's LGPL-3.0. The library is linked whether or not a host turns the option on.
+**LibTrueHD** ([superuser404notfound/LibTrueHD](https://github.com/superuser404notfound/LibTrueHD)) reaches your app as a static library and decodes TrueHD for `objectAudioRendering`. Its C API, framer and packaging are MIT (Copyright Quick104, who wrote it for Silo as SiloObjectAudio, and Vincent Herbst). It compiles in the `truehd` and `oamd` crates from [truehdd](https://github.com/truehdd/truehdd), Copyright Rainbaby and the truehdd contributors, under the Apache License 2.0, which asks for the license text and LibTrueHD's `NOTICE` to travel with the binary. Apache-2.0 combines with the engine's LGPL-3.0. It comes in through the `TrueHDObjectAudio` trait, on by default, and is linked whether or not a host turns the option on; a host that turns the trait off ships without it ([Package traits](#package-traits)).
 
-**LibDTSX** ([superuser404notfound/LibDTSX](https://github.com/superuser404notfound/LibDTSX)) reaches your app as a static library and decodes DTS:X for `objectAudioRendering`. Its C API, framing and packaging are Apache-2.0, and it compiles in the `dca` crate from [harletty-bridge](https://github.com/harletty/harletty-bridge), also under the Apache License 2.0, which asks for the license text and LibDTSX's `NOTICE` to travel with the binary. It is linked whether or not a host turns the option on.
+**LibDTSX** ([superuser404notfound/LibDTSX](https://github.com/superuser404notfound/LibDTSX)) reaches your app as a static library and decodes DTS:X for `objectAudioRendering`. Its C API, framing and packaging are Apache-2.0, and it compiles in the `dca` crate from [harletty-bridge](https://github.com/harletty/harletty-bridge), also under the Apache License 2.0, which asks for the license text and LibDTSX's `NOTICE` to travel with the binary. It comes in through the `DTSXObjectAudio` trait, on by default, and is linked whether or not a host turns the option on; a host that turns the trait off ships without it.
 
 **SMBClient** ([kishikawakatsumi/SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT) reaches your app only if you link the `AetherEngineSMB` product. Linking `AetherEngine` alone pulls in none of its symbols, even though SwiftPM still records the package in `Package.resolved`, which describes the resolved graph rather than what the linker kept.
 
