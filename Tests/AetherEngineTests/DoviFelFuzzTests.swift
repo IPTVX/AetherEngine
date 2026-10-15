@@ -9,7 +9,7 @@ import Dovi
 /// Corrupt and hostile input must degrade (nil parameters, dropped EL, base layer
 /// only), never crash or hang. Seeds are real packets/RPUs from the FEL fixtures;
 /// mutations are deterministic so a failure reproduces.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviFelFuzzTests {
 
     /// SplitMix64: deterministic, no dependence on the system RNG.

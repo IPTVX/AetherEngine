@@ -6,7 +6,7 @@ import Dovi
 /// The existing RPU fuzz mostly dies at the CRC check. This one repairs the CRC after mutating the
 /// payload (and re-applies emulation prevention), so the mutated RPU actually reaches libdovi's
 /// parser, which is built panic=abort: any upstream panic here would kill the process.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviCrcValidFuzzTests {
 
     private static let crcTable: [UInt32] = (0..<256).map { i in

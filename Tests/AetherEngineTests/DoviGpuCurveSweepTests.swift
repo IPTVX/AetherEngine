@@ -14,7 +14,7 @@ import Metal
 /// caught. They are built around the cases a single-piece test cannot see:
 /// per-piece order, per-piece coefficient denominators, and per-piece MMR
 /// coefficients.
-@Suite(.offCooperativePool)
+@Suite(.offCooperativePoolOneLane)
 struct DoviGpuCurveSweepTests {
 
     static let blWidth = 1024
