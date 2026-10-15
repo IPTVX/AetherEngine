@@ -24,6 +24,21 @@ That list is the supported set, not the compiled set. The FFmpeg build also carr
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`), gated per source on `VTCapabilityProbe`, codec id, declared field order, and on VOD the decode sample that verifies it.
 
+### H.264 VOD with changing parameter sets
+
+A length-prefixed H.264 file can retain its original `avcC` while later samples carry different
+SPS/PPS, including a resolution change under the same parameter-set IDs. Native HLS can then play
+audio without displaying video, including after seeking or reopening at that position. The producer
+checks the parameter sets actually referenced by an IDR before writing it into the native segment;
+repeated sets and announcements that no IDR uses do not change the route.
+
+In automatic mode, with `escalatesToSoftwarePath` enabled, a confirmed mismatch uses the existing
+native-to-software takeover. The software decoder accepts the changing frame dimensions, while the
+rebuild preserves the requested seek/resume position and session transport. This can briefly buffer
+and costs software decoding CPU; the native-only features described below are unavailable on that
+route. Explicit decode-path choices and disabled escalation are honored, with an error when the native
+initialization cannot serve the source. Live Annex-B configuration rotation is unchanged.
+
 ### MP4 without composition offsets
 
 Some writers emit a sample table with no `ctts` while the H.264 or HEVC bitstream still reorders pictures.
