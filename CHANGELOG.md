@@ -37,6 +37,11 @@ the public-API contract.
 
 ### Fixed
 
+- **Seeks on Matroska TrueHD titles hit the software packet cache again.** TrueHD packets carry no
+  duration and repeat their millisecond timestamps, so the cache never counted the audio as stored,
+  and every seek on the software path, even back to a spot just played, refetched from the source.
+  A duration-less audio packet now covers up to the next one's timestamp (gaps up to 0.5 s).
+
 - **FLAC with blocks under 192 samples plays instead of failing to open** (#764). An MKV whose FLAC used
   small fixed blocks (`STREAMINFO` min = max = 144, 48 kHz stereo) died on the native path with
   `-11829 "Cannot Open"` (underlying `-12848`), and the same stream in a plain `.flac` file failed the
