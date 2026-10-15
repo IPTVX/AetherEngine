@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [7.37.0] - 2026-10-15
+
 ### Added
+
+- **`TrackInfo.isDTSX`.** Set from libavcodec's DTS:X profiles ("DTS-HD MA + DTS:X", "... IMAX") at
+  probe time, and once LibDTSX confirms, while `objectAudioRendering` plays it, a track FFmpeg labelled
+  plain DTS-HD MA (FFmpeg reads only two of DTS:X's markers). The confirmation is kept per source like a
+  confirmed JOC flag, survives a track or title switch, and republishes `audioTracks`. Hosts can name a
+  DTS:X track the way they name TrueHD Atmos without parsing the profile string.
 
 - **A live session's request headers can be replaced without a rebuild (#792).**
   `updateRequestHeaders(_:)` hands the session a new header set, and the next request each of its
@@ -45,6 +53,13 @@ the public-API contract.
 - **`Probes/DolbyVisionPulse`, a reproducible Dolby Vision pulse test.** Clips whose pixels are constant while only the RPU (or, for the enhancement-layer clip, only the residual) switches every 72 frames, counter clips whose base and enhancement layers each carry their own frame number (so a dropped or mispaired residual shows on screen), a tvOS host app that plays them through AVPlayer, VideoToolbox, and the FEL route, and scripts that build the clips, cut a phone recording per arm and read back whether the panel followed the metadata. It is the measurement behind [the FEL consumption evidence](docs/dolby-vision-fel.md#45-consumption-test-assets); the host builds in CI, the rest needs a television and a phone.
 
 ### Changed
+
+- **The lossless bridge's documentation and route warning name the sinks it is for (#794).** An eARC
+  soundbar takes multichannel LPCM (measured: a Sonos Arc takes 6 channels, so `.lossless` reaches it as
+  lossless 5.1 where `.surroundCompat` gives lossy 5.1); only a sink behind legacy ARC needs E-AC-3. The
+  FLAC route warning no longer says soundbars take multichannel only as a bitstream. The engine still
+  does not pick the mode from the route: with tvOS's Continuous Audio Connection on, every HDMI route
+  reports 32 unlabelled channels whatever the sink takes.
 
 - **Dolby Vision Profile 7: a packet whose only NALs are a refused RPU and its EL now reports the
   conversion as failed** (#767, thanks @pkajaba). The packet is left as it was, as before; the result used
