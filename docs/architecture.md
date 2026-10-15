@@ -22,6 +22,16 @@ Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache
 
 Why HLS-fMP4 for the native path instead of feeding `AVPlayer` the source URL directly: AVPlayer's progressive-download path won't accept arbitrary MKV containers, and even for MP4 sources it's brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants. The HLS-fMP4 wrapper is the most permissive surface AVPlayer exposes; libavformat's `hls` muxer produces bytes byte-identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
 
+**AVC VOD configuration changes are judged before native muxing.** `H264ConfigurationTracker`
+starts from the producer’s effective `avcC`, follows length-prefixed SPS/PPS in NAL order, and checks
+the pair referenced by an IDR against that baseline. A mismatch exits the pump with a typed reason
+before the changed sample is written; the session retains the verdict for a pump that finishes before
+its owning load is installed. Producer epoch and load generation checks reject superseded events.
+The existing `SoftwarePathEscalation` takeover owns recovery under its normal route and host opt-in
+constraints. Rebuilding uses the pending user seek, or the actual playhead, never the producer’s
+read-ahead position. This avoids relying on a static VOD playlist refreshing an `EXT-X-MAP` after it
+has already been loaded.
+
 **Item diagnostics must not become playback work.** `accessLog()` and `errorLog()` can synchronously
 wait on AVFoundation's media-service queues, even when called from an item notification. The video
 host's log notifications and failure dump, the audio-only error observer, and outgoing-item counter

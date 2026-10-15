@@ -753,6 +753,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// source that is gone, and the reader's `-1` cannot say which, so the kind is decided here
     /// and published rather than inferred from the code downstream.
     var onVODSourceFailed: (@Sendable (Int32, String, PlaybackErrorKind) -> Void)?
+    var onVODVideoConfigurationChanged: (@Sendable (UInt64, String) -> Void)?
+    private var vodVideoConfigurationMismatch: (epoch: UInt64, summary: String)?
+
+    /// Retained because the first pump can finish before loadNative installs this session.
+    var pendingVODVideoConfigurationMismatch: (epoch: UInt64, summary: String)? {
+        restartLock.lock(); defer { restartLock.unlock() }
+        guard let event = vodVideoConfigurationMismatch, producer?.epoch == event.epoch else { return nil }
+        return event
+    }
+
+    func recordVODVideoConfigurationMismatch(_ prod: HLSSegmentProducer, summary: String) {
+        restartLock.lock()
+        guard !isLiveSession, producer === prod else { restartLock.unlock(); return }
+        vodVideoConfigurationMismatch = (prod.epoch, summary)
+        restartLock.unlock()
+        onVODVideoConfigurationChanged?(prod.epoch, summary)
+    }
 
     /// The one way a VOD session surfaces a terminal source failure (#370 follow-up).
     ///

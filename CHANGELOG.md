@@ -44,6 +44,13 @@ the public-API contract.
 
 ### Fixed
 
+- **H.264 VOD with in-band parameter changes recovers through compatible decoding.** When an IDR
+  references SPS/PPS that differ from the AVC initialization, the producer stops before writing that
+  sample into the stale native segment. Automatic routing uses the existing software-path takeover,
+  preserving a pending seek or cold-resume position and the session transport. Repeated or unused
+  parameter sets keep the native route; an explicitly selected route or disabled escalation is honored.
+
+
 - **The Profile 7 dual-layer route recovers from a system session loss (#739).** A screen lock or sleep
   invalidates both VideoToolbox sessions; the host's recovery reached only `HardwareVideoDecoder`, so on
   the route audio played on over a frozen picture. `DualLayerVideoDecoder` now reports one loss per

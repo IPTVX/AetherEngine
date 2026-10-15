@@ -2894,7 +2894,9 @@ public final class AetherEngine: ObservableObject {
     /// `#3 mount seek: item axis 0.00s`, `cutting seg0+`). A playable session whose clock reads exactly
     /// the reset zero has not published yet, and the parked value is what it is mounted at. A seek
     /// retires the parked value (`seek(to:origin:)`), so a genuine seek to 0 is never overridden.
-    nonisolated static func rebuildPosition(state: PlaybackState, clock: Double, underReconstruction: Double?) -> Double {
+    nonisolated static func rebuildPosition(state: PlaybackState, clock: Double, underReconstruction: Double?,
+                                            pendingSeek: Double? = nil) -> Double {
+        if let pendingSeek, pendingSeek.isFinite, pendingSeek >= 0 { return pendingSeek }
         guard let parked = underReconstruction else { return clock }
         switch state {
         case .loading: return parked
@@ -3634,7 +3636,10 @@ public final class AetherEngine: ObservableObject {
 
     /// The playhead a rebuild of this session has to come back to (#464 round 2).
     var positionForSessionRebuild: Double {
-        Self.rebuildPosition(state: state, clock: currentTime, underReconstruction: positionUnderReconstruction)
+        let pending = !isLive && nativeHost != nil
+            ? pendingRecoverySeekClockTarget.map { displaySeconds(forPlaylistSeconds: $0) } : nil
+        return Self.rebuildPosition(state: state, clock: currentTime,
+            underReconstruction: positionUnderReconstruction, pendingSeek: pending)
     }
 
     /// The transport state a rebuild of this session has to come back in (#464 round 2). Asks the

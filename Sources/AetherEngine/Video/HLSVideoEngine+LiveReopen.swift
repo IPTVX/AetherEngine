@@ -87,7 +87,7 @@ extension HLSVideoEngine {
             return true
         case .sourceReplay, .eof, .readError, .keyframeStarvation:
             return !sourceReopenable
-        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime:
+        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged:
             // muxerFailed / needsAudioSampleEntryPrime: handleLiveMuxerFailure and the AE#222 arm rebuild
             // the producer into the SAME provider, so an eager halt here would 503 the very provider the
             // rebuild is about to serve; both arms halt themselves once their budget is exhausted.
@@ -256,6 +256,10 @@ extension HLSVideoEngine {
             return
         }
         guard !alreadyRecovering else { return }
+        if case .videoConfigurationChanged(let summary) = reason {
+            recordVODVideoConfigurationMismatch(prod, summary: summary)
+            return
+        }
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
         // Re-anchor the producer on AVPlayer's real position so the segments it is starved for get produced.
         if case .backpressureWedge = reason {
@@ -390,7 +394,7 @@ extension HLSVideoEngine {
             provider?.markLiveProductionHalted()
         }
         switch reason {
-        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime:
+        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged:
             // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
             return
         case .sourceReplay:
