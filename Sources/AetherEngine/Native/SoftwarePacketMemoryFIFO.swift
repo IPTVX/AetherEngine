@@ -176,6 +176,11 @@ final class SoftwarePacketMemoryFIFO: @unchecked Sendable {
         defer { lock.unlock() }
         try requireUsable()
         try validateLocked(cursor)
+        // Checked before any chunk changes state: a refused cursor must not leave unread chunks
+        // volatile in front of the reader.
+        guard Int(cursor.offset) + 8 <= (try chunkLocked(cursor.chunkID)).used else {
+            throw SoftwarePacketDiskFIFO.Failure.invalidCursor
+        }
         if cursor.chunkID < headID {
             try reclaimLocked(from: cursor.chunkID, through: headID - 1)
         } else {
@@ -183,8 +188,6 @@ final class SoftwarePacketMemoryFIFO: @unchecked Sendable {
             var id = headID
             while id < cursor.chunkID { try chunkLocked(id).setVolatile(true); id += 1 }
         }
-        let chunk = try chunkLocked(cursor.chunkID)
-        guard Int(cursor.offset) + 8 <= chunk.used else { throw SoftwarePacketDiskFIFO.Failure.invalidCursor }
         headID = cursor.chunkID
         headOffset = Int(cursor.offset)
         recordCount = writtenRecordCount - cursor.recordIndex

@@ -28,9 +28,10 @@ final class SoftwarePlaybackHost {
     /// the session retention budget apply. On an Apple TV 4K (A12) the disk store's appends took
     /// 100 to 600 ms while a download ran and the demux thread stalled behind them, so video it had
     /// parked was decoded late and dropped: 22 to 42 drops in a 150 s soak of a 4K title, against
-    /// 0 to 3 in 8 of 9 runs with the store in memory (one run had 26, not seen again). The forward window is 96 MB (about 8 s of a 95 Mbit/s
-    /// title, on top of the forward-seconds limit); played history up to 128 MB stays volatile, so
-    /// the kernel may take it back and a seek into what it took refetches. Peak footprint of a 4K
+    /// 0 to 3 in 8 of 9 runs with the store in memory (one run had 26, not seen again). The forward
+    /// window is 96 MB (about 8 s of a 95 Mbit/s title, on top of the forward-seconds limit); played
+    /// history up to 128 MB stays volatile, so the kernel may take it back and a seek into what it
+    /// took refetches. Peak footprint of a 4K
     /// FEL session on the A12: ~655 MB against ~580 MB with the disk store.
     nonisolated static let memoryPacketStoreBudget: (forwardBytes: Int, historyBytes: Int)? = {
         #if os(tvOS)
