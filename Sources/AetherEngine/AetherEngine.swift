@@ -149,6 +149,16 @@ public final class AetherEngine: ObservableObject {
 
     private let seekEventSubject = PassthroughSubject<SeekEvent, Never>()
 
+    /// AE#792: the origin refused the session's credentials mid-session. One value per header set,
+    /// the HTTP status (401 or 403), sent on the first refusal of that set, so a host can renew a
+    /// lapsed or revoked token and hand it over with `updateRequestHeaders(_:)` while the reader is
+    /// still retrying. See `updateRequestHeaders(_:)` for what happens if it does not.
+    public var sourceAuthorizationRefused: AnyPublisher<Int, Never> {
+        sourceAuthorizationRefusedSubject.eraseToAnyPublisher()
+    }
+
+    let sourceAuthorizationRefusedSubject = PassthroughSubject<Int, Never>()
+
     /// Monotonic id source for `SeekEvent`. Deliberately NOT `seekGeneration`: that counter is the
     /// supersede fence every in-flight finalize checks itself against, so a rejected or stashed seek must
     /// not be able to move it (it would make a live seek believe it lost and return without finalizing).
@@ -4205,6 +4215,15 @@ public final class AetherEngine: ObservableObject {
         // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
         // this one through a reader that outlived it.
         sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
+        let refusalStore = sessionRequestHeaders
+        refusalStore.onCredentialRefusal = { [weak self] status in
+            Task { @MainActor [weak self] in
+                guard let self, self.sessionRequestHeaders === refusalStore else { return }
+                EngineLog.emit("[AetherEngine] AE#792: source refused the request headers (HTTP \(status))",
+                               category: .engine)
+                self.sourceAuthorizationRefusedSubject.send(status)
+            }
+        }
         audioSessionRequestsOwnedByAVFoundation = false
         // #377: register the host's concurrency ceiling for this origin before anything fetches
         // from it. Keyed on the origin rather than the load, so the subtitle side reader and any

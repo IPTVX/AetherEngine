@@ -299,7 +299,12 @@ extension AetherEngine {
             .store(in: &cancellables)
         failure
             .compactMap { $0 }
-            .sink { [weak self] info in self?.publishError(info) }
+            .sink { [weak self] info in
+                guard let self else { return }
+                self.publishError(Self.reclassifiedForCredentialRefusal(
+                    info, refusal: self.sessionRequestHeaders.recentCredentialRefusal(
+                        within: HLSVideoEngine.rateLimitVerdictWindowSeconds)))
+            }
             .store(in: &cancellables)
         didReachEnd
             .filter { $0 }

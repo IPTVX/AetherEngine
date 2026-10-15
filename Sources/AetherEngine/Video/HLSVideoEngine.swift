@@ -877,6 +877,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// See `RefusingSourceReviveBudget` for why: the old figure was the emergent product of two
     /// constants that did not know about each other, and it was never reset.
     var rateLimitReviveGate = RefusingSourceReviveBudget()
+    /// AE#792 part 2: revives spent on a credential refusal the host has since renewed. Each one
+    /// answers a renewal, so the bound only stops a host whose fresh credentials keep being refused.
+    var credentialReviveGate = MuxerFailureReviveGate(maxAttempts: 3)
 
     /// AE#169 round 2 (under `restartLock`): the demuxer's last read threw, so the next
     /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection
