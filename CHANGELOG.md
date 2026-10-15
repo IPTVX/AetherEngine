@@ -35,6 +35,8 @@ the public-API contract.
 
 ### Fixed
 
+- **The Profile 7 dual-layer route recovers from a system session loss (#739).** A screen lock or sleep invalidates both VideoToolbox sessions; the host's recovery reached only `HardwareVideoDecoder`, so on the route audio played on over a frozen picture. `DualLayerVideoDecoder` now reports one loss per event, rebuilds both sessions and re-adopts its feed epoch; the host reaches it through the new internal `VideoSessionRebuilding` protocol.
+- **The Profile 7 dual-layer route shows the last frames at end of stream.** The end-of-source flush dropped what VideoToolbox still owed, the base frames waiting for an enhancement layer and the compositions in flight. `VideoDecodingPipeline.drainForEndOfStream()` (a no-op where `flush()` already delivers) drains both sessions with pairing live, sends a waiting base frame out alone, and waits for the composer; the host calls it before that flush. Seeks still discard.
 - **A failed `CMBlockBuffer` creation around a packet's payload no longer releases the packet reference twice** when CoreMedia has already freed the block source from inside the failing call.
 
 - **FLAC with blocks under 192 samples plays instead of failing to open** (#764). An MKV whose FLAC used
