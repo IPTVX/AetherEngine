@@ -72,6 +72,18 @@ final class SoftwarePlaybackHost {
     @Published private(set) var failure: PlaybackErrorInfo?
     @Published private(set) var didReachEnd: Bool = false
 
+    /// Enhancement layer type for Profile 7 streams (FEL or MEL), used for decoder selection
+    var elType: String? = nil
+
+    /// Which layer of a Dolby Vision source to present (.automatic or .baseLayerOnly).
+    var dolbyVisionHandling: DolbyVisionHandling = .automatic
+
+    /// Opt-in to full dual-layer Dolby Vision (Profile 7 FEL) decoding and Metal GPU composition over single-layer fallback.
+    var preferDualLayerDolbyVision: Bool = false
+
+    /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
+    var configuredDVProfile: Int?
+
     /// #315: `AVSampleBufferDisplayLayer.isReadyForDisplay` for the renderer's layer, this path's
     /// answer to "there is a picture". Frames enqueued is not that answer: it counts what the
     /// decoder handed over, and #298 is the report where every one of them went into a layer no
@@ -861,6 +873,51 @@ final class SoftwarePlaybackHost {
         return min(max(untilGateOpens, floor), ceiling)
     }
 
+    /// Pure decoder selection predicate for Profile 7 / HEVC streams on the software host.
+    /// DualLayerVideoDecoder is selected ONLY when dvProfile == 7 && elType == "FEL" && preferDualLayerDolbyVision
+    /// && dolbyVisionHandling == .automatic.
+    /// All other combinations (e.g. MEL, baseLayerOnly, preferDualLayerDolbyVision == false) pick HardwareVideoDecoder.
+    nonisolated static func shouldUseDualLayerDecoder(
+        dvProfile: Int?,
+        elType: String?,
+        preferDualLayerDolbyVision: Bool,
+        dolbyVisionHandling: DolbyVisionHandling
+    ) -> Bool {
+        dvProfile == 7
+            && elType == "FEL"
+            && preferDualLayerDolbyVision
+            && dolbyVisionHandling == .automatic
+    }
+
+    /// Selects and instantiates the appropriate VideoDecodingPipeline based on stream and host options.
+    func selectVideoDecoder(
+        codecID: AVCodecID,
+        canHardwareDecode: Bool,
+        dvProfile: Int?
+    ) -> any VideoDecodingPipeline {
+        if codecID == AV_CODEC_ID_HEVC && canHardwareDecode {
+            if Self.shouldUseDualLayerDecoder(
+                dvProfile: dvProfile,
+                elType: elType,
+                preferDualLayerDolbyVision: preferDualLayerDolbyVision,
+                dolbyVisionHandling: dolbyVisionHandling
+            ) {
+                // No Metal device: the composer cannot be built, so decode the base layer alone (the
+                // decoder the software host uses for any other Profile 7 stream) instead of opening a
+                // decoder whose `open()` can only throw. A shader that fails to compile is caught later,
+                // once: every frame then goes out as its base layer.
+                if let composer = DoviFelComposer() {
+                    return DualLayerVideoDecoder(composer: composer)
+                }
+                return HardwareVideoDecoder()
+            } else {
+                return HardwareVideoDecoder()
+            }
+        } else {
+            return SoftwareVideoDecoder()
+        }
+    }
+
     // MARK: - Load
 
     func load(
@@ -919,6 +976,23 @@ final class SoftwarePlaybackHost {
             category: .swPlayback
         )
 
+        // A Profile 7 FEL session on a freshly opened demuxer (the load's probe completes its own) still
+        // has the empty hvcC of an in-band-parameter-set source: complete it, or the verdict below sends
+        // the stream to libavcodec and the enhancement layer is never composed. No-op otherwise.
+        if !isLive,
+           Self.shouldUseDualLayerDecoder(
+               dvProfile: configuredDVProfile ?? AetherEngine.dvProfile(stream: vStream),
+               elType: elType,
+               preferDualLayerDolbyVision: preferDualLayerDolbyVision,
+               dolbyVisionHandling: dolbyVisionHandling) {
+            let vIdx = dem.videoStreamIndex
+            await BlockingWork.detached(priority: .userInitiated) {
+                VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)
+            }.value
+            // A stop() can land on this suspension as on the start-position seek below.
+            guard !stopRequested else { return }
+        }
+
         // HEVC -> VTDecompressionSession (HW) when VideoToolbox PROVABLY HW-decodes this exact format;
         // everything else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder
         // requires a HW decoder and has no software fallback, so an HEVC Rext stream on hardware without a
@@ -929,11 +1003,40 @@ final class SoftwarePlaybackHost {
            codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
            VTCapabilityProbe.hardwareDecodeVerdict(codecpar: codecpar).opensHardwareDecoder {
             videoDecoder.close()
-            videoDecoder = HardwareVideoDecoder()
-            EngineLog.emit(
-                "[SWHost] selected HardwareVideoDecoder (VT HEVC) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
-                category: .swPlayback
+            let dvProfile = configuredDVProfile ?? AetherEngine.dvProfile(stream: vStream)
+            let chosen = selectVideoDecoder(
+                codecID: codecpar.pointee.codec_id,
+                canHardwareDecode: true,
+                dvProfile: dvProfile
             )
+            videoDecoder = chosen
+            if let dual = chosen as? DualLayerVideoDecoder {
+                // An in-band primary open failure (no hvcC to open from) leaves nothing to show. Surface it
+                // through the same `failure` the read loops use for a decode error. It belongs to the
+                // decoder session, not to a seek: the decoder reports it once and a seek does not reopen the
+                // primary decoder, so gating it by seek generation would lose it for good when a seek lands
+                // between the report and the main-actor hop (black video, no error). Only a stopped host
+                // drops it.
+                dual.onFatalDecodeError = { [weak self] error in
+                    Task { @MainActor [weak self] in
+                        guard let self, SoftwareReadAdmission.admitsSessionFailure(stopRequested: self.stopRequested) else { return }
+                        self.failure = PlaybackErrorInfo(
+                            kind: .softwarePipelineFailed,
+                            message: "Playback error: \(error.localizedDescription)")
+                    }
+                }
+            }
+            if chosen is DualLayerVideoDecoder {
+                EngineLog.emit(
+                    "[SWHost] selected DualLayerVideoDecoder (Metal P7 FEL) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
+                    category: .swPlayback
+                )
+            } else {
+                EngineLog.emit(
+                    "[SWHost] selected HardwareVideoDecoder (VT HEVC) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
+                    category: .swPlayback
+                )
+            }
         } else if !(videoDecoder is SoftwareVideoDecoder) {
             videoDecoder.close()
             videoDecoder = SoftwareVideoDecoder()
@@ -944,8 +1047,15 @@ final class SoftwarePlaybackHost {
             )
         }
 
-        // Audit PERF-104: only the VideoToolbox decoder emits out of presentation order.
-        renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(forHardwareDecoder: videoDecoder is HardwareVideoDecoder))
+        // Audit PERF-104: only the VideoToolbox decoders emit out of presentation order. That includes the
+        // DualLayerVideoDecoder: OrderedDelivery keeps its frames in the order the base layer came out of
+        // VideoToolbox, which is decode order (measured on the real fixtures, `DoviFelRealFileTests`), so it
+        // needs the same reorder depth as the single-layer hardware decoder.
+        renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(
+            forHardwareDecoder: videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder))
+        renderer.setFELLookahead(
+            enabled: videoDecoder is DualLayerVideoDecoder,
+            frameRate: AetherEngine.detectFrameRate(stream: vStream))
 
         // Flip display layer into HDR mode before frames arrive; without this preferredDynamicRange stays .standard and PQ/HLG renders desaturated.
         if let codecpar = vStream.pointee.codecpar {
@@ -1085,8 +1195,8 @@ final class SoftwarePlaybackHost {
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
             _ = await dem.seekBounded(to: sourceStart, timeout: Self.seekBudgetSeconds, on: seekQueue)
-            // This is load()'s only suspension point, so it is also the only place a stop() can land
-            // mid-load. Arming the clock and publishing isReady on a session already torn down would
+            // Besides the in-band record completion above, this is load()'s only suspension point, so it
+            // is the other place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
             guard !stopRequested else { return }
             // Mirror seek() skip-PTS + clock alignment so demux drops pre-keyframe frames and synchronizer starts at the resume offset.
@@ -2552,7 +2662,12 @@ final class SoftwarePlaybackHost {
                 // Back-pressure against renderer queue; also bail on pause without consuming.
                 // The wait can outlast the audio lead, so keep pumping audio while parked.
                 var waitTicks = 0
-                while !renderer.isReadyForMoreMediaData && !stopRequested() && isPlaying()
+                // The FEL look-ahead gate (`mayEnqueueVideoFrame`) holds a packet until its timestamp is
+                // inside the clock's window; a seek, including a backward DVR seek, moves the cursor and
+                // releases it here rather than waiting for its old timestamp to come round.
+                while !renderer.mayEnqueueVideoFrame(
+                    ptsSeconds: pkt.pts, clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
+                    clockArmed: clockArmed()) && !stopRequested() && isPlaying()
                     && seekGeneration() == generation && readCursor() == cursor
                     && cursor >= ring.seqBounds.first {
                     autoreleasepool {
@@ -2771,10 +2886,19 @@ final class SoftwarePlaybackHost {
         // takes it, holds it, stops reporting `isReadyForMoreMediaData`, and the loop parks on that
         // signal until its FIFO caps out. Measured here as three to four seconds of `enq=+0` with the
         // audio lead decaying under it, on a session that reports playing and never rebuffers.
+        func mayDecodeVideoPacket(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
+            let pts = packet.pointee.pts
+            let seconds = pts != Int64.min && videoTimeBaseSeconds > 0
+                ? Double(pts) * videoTimeBaseSeconds : Double.nan
+            return renderer.mayEnqueueVideoFrame(
+                ptsSeconds: seconds, clockSeconds: audioOutput?.currentTimeSeconds ?? .nan,
+                clockArmed: clockArmed())
+        }
+
         func drainParkedVideoNonblocking() {
             if seekGeneration() != parkedSeekGeneration { return }
             let epoch = videoDecoder.feedEpoch
-            while !parkedVideo.isEmpty, renderer.isReadyForMoreMediaData,
+            while let head = parkedVideo.first, mayDecodeVideoPacket(head),
                   !stopRequested(), !backgroundAudioOnly() {
                 // Leave the rest standing: the next iteration of the loop frees the FIFO as a batch
                 // once it has read the new generation.
@@ -3169,7 +3293,12 @@ final class SoftwarePlaybackHost {
                     return true
                 }
                 // Back-pressure via SampleBufferRenderer.isReadyForMoreMediaData (not the deprecated layer property). Park on condition while paused to avoid 200 Hz CPU spin.
-                while !renderer.isReadyForMoreMediaData && !stopRequested() && !backgroundAudioOnly() {
+                // Queue readiness plus the FEL-only look-ahead cap. Hold the compressed packet here,
+                // rather than letting an asynchronous decode allocate another composed buffer.
+                while !mayDecodeVideoPacket(packet) && !stopRequested() && !backgroundAudioOnly() {
+                    // A seek can move the clock backwards while this compressed FEL packet is
+                    // held. Leave the wait so the generation check below discards it immediately.
+                    if videoDecoder is DualLayerVideoDecoder, seekGeneration() != genBeforeRead { break }
                     autoreleasepool {
                         if !isPlaying() {
                             condition.lock()

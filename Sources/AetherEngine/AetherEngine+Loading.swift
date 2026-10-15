@@ -1936,7 +1936,8 @@ extension AetherEngine {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer?,
-        generation: UInt64
+        generation: UInt64,
+        elType: String? = nil
     ) async throws {
         let deinterlaceMode = loadedOptions.deinterlaceMode
         let waitStarted = DispatchTime.now()
@@ -1968,6 +1969,10 @@ extension AetherEngine {
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        host.configuredDVProfile = sourceDVProfile
+        host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
+        host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
+        host.elType = elType ?? sourceElType
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
@@ -2557,7 +2562,8 @@ extension AetherEngine {
                     isLive: loadedOptions.isLive,
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
-                    generation: gen
+                    generation: gen,
+                    elType: sourceElType
                 )
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
