@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.1
 
 import PackageDescription
 
@@ -24,6 +24,21 @@ let package = Package(
         // exposing it would force SPM consumers to compile it on those
         // platforms. The target is preserved below so `swift build` on
         // macOS still produces the CLI for upstream development.
+    ],
+    // Each object-audio decoder library sits behind a trait of its own, both on by default. A host that
+    // cannot ship one of them turns its trait off (`.package(url:..., traits: [...])`, or the package's
+    // traits in Xcode): the library is then not linked, and its codec keeps the channel bridge whatever
+    // `objectAudioRendering` asks. LibDovi, FFmpeg and everything else are unaffected.
+    traits: [
+        .trait(
+            name: "TrueHDObjectAudio",
+            description: "Link LibTrueHD, so objectAudioRendering can render TrueHD Atmos objects to APAC."
+        ),
+        .trait(
+            name: "DTSXObjectAudio",
+            description: "Link LibDTSX, so objectAudioRendering can render DTS:X heights and objects to APAC."
+        ),
+        .default(enabledTraits: ["TrueHDObjectAudio", "DTSXObjectAudio"]),
     ],
     dependencies: [
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
@@ -68,8 +83,8 @@ let package = Package(
             dependencies: [
                 .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
-                .product(name: "TrueHD", package: "LibTrueHD"),
-                .product(name: "DTSX", package: "LibDTSX"),
+                .product(name: "TrueHD", package: "LibTrueHD", condition: .when(traits: ["TrueHDObjectAudio"])),
+                .product(name: "DTSX", package: "LibDTSX", condition: .when(traits: ["DTSXObjectAudio"])),
             ],
             // Silent E-AC-3 Atmos that `AtmosOutputActivator` loops beside an APAC track on tvOS.
             resources: [.copy("Resources/silent-atmos.mp4")],

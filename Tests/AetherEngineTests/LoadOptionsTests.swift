@@ -21,6 +21,8 @@ struct LoadOptionsTests {
         #expect(opts.objectAudioRendering == .off)
         #expect(opts.isLive == false)
         #expect(opts.audioOnly == false)
+        // Dual-layer FEL composition is opt-in.
+        #expect(opts.preferDualLayerDolbyVision == false)
         // #68: probe-budget overrides default to nil so the engine keeps the
         // built-in .playback budget (50 MB / 60 s) unless a caller opts in.
         #expect(opts.probesize == nil)

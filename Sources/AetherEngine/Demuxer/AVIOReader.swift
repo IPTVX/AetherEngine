@@ -41,7 +41,13 @@ struct NetworkPhaseGate {
 final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     private let url: URL
-    private let extraHeaders: [String: String]
+    private let openedHeaders: [String: String]
+    /// AE#792: the session's live header set, when the reader was opened for one. Read per request,
+    /// so a host that rotates a credential mid-session reaches the next request (a reconnect already
+    /// backing off included) without a rebuild. Nil for every reader opened outside a session (a probe,
+    /// a sidecar, a still), which keep the headers they were opened with.
+    private let requestHeaderStore: RequestHeaderStore?
+    private var extraHeaders: [String: String] { requestHeaderStore?.current ?? openedHeaders }
     /// #450: connections the BOUNDED pool may hold to one host. A throttle, and it is allowed to be
     /// one: every request on that pool ends (a 4 MB detour block, a size probe, the tail prefetch),
     /// so a request that waits here waits for one that is finishing.
@@ -392,6 +398,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// for one re-resolve through the source.
     static func isRateLimitStatus(_ status: Int) -> Bool {
         return status == 429 || status == 503 || status == 509
+    }
+
+    /// AE#792 part 2: the origin refused the request's credentials. An identical request carrying
+    /// the identical credential cannot succeed, so these get a short ladder of their own instead of
+    /// the twelve unproductive reconnects a dropped connection is given, and the refusal is stamped
+    /// on the session's header store so the engine can tell "the token lapsed" from "the source is
+    /// gone".
+    static func isCredentialRefusalStatus(_ status: Int) -> Bool {
+        return status == 401 || status == 403
     }
 
     /// Hard server errors answered by a pinned post-redirect URL: the redirect target
@@ -761,6 +776,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Connection state.
     private var connEnded = false
     private var connStatus = 0
+    // AE#792: the header store's revision when the current generation's request was built.
+    private var connHeaderRevision: UInt64 = 0
     // Retry-After seconds from a rate-limit status, honoured before reconnect.
     private var connRetryAfter: TimeInterval = 0
     // Bumped on every (re)connect; stale delegate callbacks are ignored.
@@ -952,6 +969,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var bytesAtLastReconnect: Int64 = 0
     // Consecutive rate-limited attempts; survives seekReconnect, resets on real read progress (#71).
     private var rateLimitStreak = 0
+    // AE#792: consecutive 401/403 ends on one credential. Survives seekReconnect like the rate-limit
+    // streak, resets on real read progress and whenever the header store's revision moves.
+    private var credentialRefusalStreak = 0
+    private var credentialStreakRevision: UInt64?
 
     /// Detour LRU block cache (its own leaf lock, never held across `fetchChunk`/network or
     /// `winCond`). Stores only full-size blocks; short bodies are served once but never cached
@@ -1030,6 +1051,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// AE#585: true while the host runs a bounded index pass after the open phase, which is index
     /// work rather than playback. winCond-guarded.
     private var indexPassActive = false
+
+    /// AE#782: a producer restart repositioned the demuxer. The next backward read that needs the
+    /// network re-anchors the streaming connection there at once, instead of serving the new playback
+    /// position as serial 4 MB detour blocks until `detourReanchorBytes` have gone by. winCond-guarded.
+    private var playbackRepositionPending = false
 
     /// Playback path (known size + prefetch) or live feeds. Live always uses the
     /// persistent reader; the streaming reader has no reconnect machinery.
@@ -1118,13 +1144,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let probeDrainLock = NSLock()
     private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init()) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil) {
         self.sourceOpenPolicy = sourceOpenPolicy
         self.probeControl = probeControl
         self.probeRequestSession = probeControl == nil ? nil : probeRequestSession
         self.url = url
         self.label = label
-        self.extraHeaders = extraHeaders
+        self.openedHeaders = extraHeaders
+        self.requestHeaderStore = requestHeaderStore
         self.chunkSize = chunkSize
         self.prefetchEnabled = prefetchEnabled
         self.isLive = isLive
@@ -2298,9 +2325,31 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
 
             let curPosition = position
+            let repositionedForPlayback = playbackRepositionPending
+            if curPosition >= winStart { playbackRepositionPending = false }
 
             if curPosition < winStart {
                 winCond.unlock()
+                // AE#782: a producer restart landed here, so this is where playback continues, not a
+                // parse read that returns. Bytes already resident still serve first; the first miss
+                // anchors the connection here. Detouring cost a jump back three serial 4 MB fetches
+                // (~2 s each against a 400 ms origin) before the 8 MB re-anchor below, while the old
+                // connection kept streaming ahead of a position nobody would read.
+                if repositionedForPlayback, detourEligible {
+                    if case .served(let n, _) = serveFromDetour(into: buf.advanced(by: totalRead),
+                                                               maxLen: requestSize - totalRead,
+                                                               at: curPosition, allowFetch: false) {
+                        diag.recordDetourServe(ms: 0, fetched: false)
+                        winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
+                        totalRead += n
+                        continue
+                    }
+                    winCond.lock(); playbackRepositionPending = false; winCond.unlock()
+                    detourResetRun()
+                    sweepIdleDetourBlocks(force: true)
+                    timedReconnect(seek: true, at: curPosition)
+                    continue
+                }
                 // Backward random-access read (MP4 parse ping-pong, or a large backward scrub).
                 // Serve via the pooled detour cache so the anchored streaming connection is NOT
                 // torn down (the reconnect storm + origin 429, AetherEngine#69).
@@ -2393,6 +2442,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if connFirstDataSeen {
                     unproductiveReconnects = 0      // real progress
                     rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
+                    credentialRefusalStreak = 0     // and the credential one (#792)
                     emitNetworkPhase(.flowing)      // recovered: source delivering again (#85/#410)
                 }
                 // No flow installed and the consumer has drawn down to low water: request at the
@@ -2532,10 +2582,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // rate-limit streak, which (unlike unproductiveReconnects) survives the seekReconnect
             // that parse seeks fire, so a throttled origin fails cleanly instead of looping (#71).
             let isRateLimited = Self.isRateLimitStatus(status)
+            let isCredentialRefusal = Self.isCredentialRefusalStatus(status)
             let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
-                                       : recordReconnectAndShouldGiveUp(status: status)
+                : isCredentialRefusal ? recordCredentialRefusalAndShouldGiveUp()
+                : recordReconnectAndShouldGiveUp(status: status)
             if giveUp {
-                let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive rate-limited" : "\(unproductiveReconnects) unproductive"
+                let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive rate-limited"
+                    : isCredentialRefusal ? "\(credentialRefusalStreak) consecutive credential refusals"
+                    : "\(unproductiveReconnects) unproductive"
                 EngineLog.emit("[AVIOReader] \(label) reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
                 emitNetworkPhase(.exhausted)   // ladder spent; the reopen owns recovery, the source is still down (#410)
                 if isLive {
@@ -2543,11 +2597,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
-            let backoffStreak = isRateLimited ? rateLimitStreak : unproductiveReconnects
+            let backoffStreak = isRateLimited ? rateLimitStreak
+                : isCredentialRefusal ? credentialRefusalStreak : unproductiveReconnects
             EngineLog.emit("[AVIOReader] \(label) conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
-            let repinned = dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
+            // A credential refusal already dropped the pin where the status was read (an expired
+            // signed redirect target answers 401/403 too), and its streak is not the unproductive one.
+            let repinned = isCredentialRefusal ? false : dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
             let backoffStart = DispatchTime.now()
             // #392: a pin dropped for idleness sends this attempt to the SOURCE, which has refused
             // nothing, so the exponential pacing charged against the target that did refuse is not
@@ -2696,8 +2753,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private func chargeFaultedRunwayRefill(at frontier: Int64, ahead: Int,
                                            status: Int, retryAfter: TimeInterval) -> Bool {
         let isRateLimited = Self.isRateLimitStatus(status)
+        let isCredentialRefusal = Self.isCredentialRefusalStatus(status)
         let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
-                                   : recordReconnectAndShouldGiveUp(status: status)
+            : isCredentialRefusal ? recordCredentialRefusalAndShouldGiveUp()
+            : recordReconnectAndShouldGiveUp(status: status)
         if giveUp {
             winCond.lock()
             nextFaultedRefillAt = .distantFuture
@@ -2708,8 +2767,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 category: .demux)
             return false
         }
-        let streak = isRateLimited ? rateLimitStreak : unproductiveReconnects
-        let repinned = dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
+        let streak = isRateLimited ? rateLimitStreak
+            : isCredentialRefusal ? credentialRefusalStreak : unproductiveReconnects
+        let repinned = isCredentialRefusal ? false : dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
         lastUnplannedReconnectAt = Date()
         let delay = backoffDelay(streak: repinned ? 0 : streak, retryAfter: retryAfter)
         winCond.lock()
@@ -2745,6 +2805,25 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return rateLimitStreak > Self.rateLimitMaxStreak
     }
 
+    /// AE#792: charges one 401/403 end; true once `credentialRefusalMaxStreak` attempts on one
+    /// credential were refused. A host that replaced the headers since the last refusal starts a
+    /// fresh streak, so a renewal arriving mid-ladder is always tried. Demux-thread-only.
+    func recordCredentialRefusalAndShouldGiveUp() -> Bool {
+        let revision = requestHeaderStore?.revision
+        if revision != credentialStreakRevision {
+            credentialRefusalStreak = 0
+            credentialStreakRevision = revision
+        }
+        credentialRefusalStreak += 1
+        return credentialRefusalStreak > Self.credentialRefusalMaxStreak
+    }
+
+    /// Two retries after the first refusal: the first goes out right after the pin was dropped, so
+    /// an expired signed redirect is re-resolved through the source, and the second gives a host
+    /// that renews on `sourceAuthorizationRefused` a moment to do so. About 3 s with the backoff,
+    /// against roughly 80 s on the unproductive ladder.
+    static let credentialRefusalMaxStreak = 2
+
     // MARK: - Detour Block Cache (AetherEngine#69)
 
     /// `fetched` says whether the served bytes crossed the network. The callers charge the
@@ -2765,7 +2844,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let n = detourCache.serveCached(into: dst, maxLen: maxLen, at: offset) {
             return .served(n, fetched: false)
         }
-        guard allowFetch else { return .miss }
+        // A bounded position search may probe several distant offsets. Waiting for a whole
+        // speculative 4 MB block at each offset can spend the seek's entire deadline before
+        // the existing streaming reconnect gets a chance to deliver the requested bytes.
+        // Keep resident hits above, but let a bounded miss re-anchor immediately. Ordinary
+        // parse-time ping-pong still fills the detour cache and preserves its connection.
+        guard allowFetch, readDeadline == .distantFuture else { return .miss }
 
         let blockStart = (offset / Int64(Self.detourBlockSize)) * Int64(Self.detourBlockSize)
         let blockLen = Int(min(Int64(Self.detourBlockSize), fileSize - blockStart))
@@ -3141,6 +3225,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.unlock()
     }
 
+    /// AE#782: see `playbackRepositionPending`.
+    func notePlaybackRepositioned() {
+        winCond.lock()
+        playbackRepositionPending = true
+        winCond.unlock()
+    }
+
     /// Which cold-start span answered, so the log can name the round trip that did not happen
     /// rather than leaving its absence to be inferred.
     enum SpanServe {
@@ -3177,6 +3268,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
+        connHeaderRevision = requestHeaderStore?.revision ?? 0
         // #220: VOD asks for a fixed amount at a time, and anything an origin delivers past it is
         // dropped at the append (audit DMX-1), so the window is bounded by the ask. Two
         // cases keep the open-ended form: live, where the material is produced in real time so
@@ -3637,10 +3729,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                               respondedBy: respondedBy)
         }
         var headerMs: Double? = nil
+        var sentRevision: UInt64? = nil
         winCond.lock()
         if generation == connGeneration {
             connStatus = status
             connRetryAfter = retryAfter
+            sentRevision = connHeaderRevision
             // #93/#96 residual: time-to-first-response-header for this generation. A large value here
             // with a small subsequent first-data gap points at server-side connection queuing (the
             // origin accepted the socket but withheld the response while it served another connection
@@ -3708,6 +3802,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 "[AVIOReader] gen=\(generation) response headers after \(Int(headerMs))ms status=\(status)",
                 category: .demux
             )
+        }
+        if let sentRevision, Self.isCredentialRefusalStatus(status), let requestHeaderStore {
+            requestHeaderStore.noteCredentialRefusal(status: status, revision: sentRevision)
         }
         // #331: name the latch once. A field capture that shows the reconnect shape change is the
         // difference between "the origin has no byte addresses" and "the reconnect is broken".
