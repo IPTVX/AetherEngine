@@ -30,6 +30,16 @@ enum DisplayFlushOp: Equatable {
 /// (`setArrivalOrderHandover(frameRate:)`).
 final class SampleBufferRenderer: @unchecked Sendable {
 
+    /// Injects queue recovery for tests without requiring a suspended AVFoundation process.
+    struct ResumeQueue {
+        /// Reads the current queue failure state before admitting resumed frames.
+        let status: @MainActor () -> AVQueuedSampleBufferRenderingStatus
+        /// Discards a failed queue so the feeder can resume; healthy queues are preserved.
+        let flush: @MainActor () -> Void
+    }
+
+    /// Optional recovery operations; production uses the selected modern or legacy queue surface.
+    @MainActor private let resumeQueue: ResumeQueue?
     let displayLayer: AVSampleBufferDisplayLayer
 
     /// The modern queue surface, taken once on the main actor at construction (#351). The 27 SDKs
@@ -439,7 +449,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// Main-actor isolated because the layer is (#351); the only production caller,
     /// `SoftwarePlaybackHost`, already is.
     @MainActor
-    init(videoGravity: AVLayerVideoGravity = .resizeAspect) {
+    init(resumeQueue: ResumeQueue? = nil, videoGravity: AVLayerVideoGravity = .resizeAspect) {
+        self.resumeQueue = resumeQueue
         let layer = Self.makeDisplayLayer(isHDR: false, gravity: videoGravity)
         displayLayer = layer
         if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
@@ -524,6 +535,20 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// FigVideoQueueRemote -12080 on over-enqueue.
     var isReadyForMoreMediaData: Bool {
         queueTarget.isReadyForMoreMediaData
+    }
+
+    /// A suspended process may return with a failed queue that never admits another frame.
+    /// Recover before the feeder wakes; a healthy full queue must keep its buffered frames.
+    @MainActor
+    func recoverAfterSuspensionIfNeeded() {
+        let status = resumeQueue?.status() ?? queueStatus
+        guard status == .failed else { return }
+        EngineLog.emit("[Renderer] AE#870 queue target failed while paused (\(queueError?.localizedDescription ?? "nil")), flushing before the feeder resumes", category: .swPlayback)
+        if let resumeQueue {
+            resumeQueue.flush()
+        } else {
+            queueTarget.flush()
+        }
     }
 
     private var queueStatus: AVQueuedSampleBufferRenderingStatus {

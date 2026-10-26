@@ -594,6 +594,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// is not the one the open is waiting on: without it the open fails as FFmpeg's invalid data and a
     /// self-signed origin is indistinguishable from a corrupt file. Guarded by `streamLock`.
     private var transportSecurityCode = 0
+    private var streamURLFailureCode: Int?
+    /// AE#818: the URL error (not our own cancel) a connection of this reader last ended with, since
+    /// the last delivery. Diagnostic data only, never a reason to fail: the open and the read loop
+    /// still ride transport failures out, and the caller that gives up attaches it as the cause.
+    /// Guarded by `transportFailureLock`, which takes no other lock.
+    private var recordedTransportFailure: Int?
+    private let transportFailureLock = NSLock()
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
@@ -828,6 +835,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Connection state.
     private var connEnded = false
     private var connStatus = 0
+    private var connURLFailureCode: Int?
     // AE#792: the header store's revision when the current generation's request was built.
     private var connHeaderRevision: UInt64 = 0
     // Retry-After seconds from a rate-limit status, honoured before reconnect.
@@ -881,6 +889,26 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         defer { winCond.unlock() }
         return activeTransfer != nil
+    }
+
+    /// The URL error code the reader's last failed connection ended with, nil once data arrived.
+    var lastTransportFailureCode: Int? {
+        transportFailureLock.lock()
+        defer { transportFailureLock.unlock() }
+        return recordedTransportFailure
+    }
+
+    private func recordTransportFailure(_ error: Error?) {
+        guard let code = SourceNetworkDiagnostics.urlErrorCode(error), code != NSURLErrorCancelled else { return }
+        transportFailureLock.lock()
+        recordedTransportFailure = code
+        transportFailureLock.unlock()
+    }
+
+    private func clearRecordedTransportFailure() {
+        transportFailureLock.lock()
+        recordedTransportFailure = nil
+        transportFailureLock.unlock()
     }
 
     /// Audit DMX-107: the typed cause of the read error the streaming path reports, nil while the
@@ -1084,6 +1112,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// any positive `fileSize` as settled. Remembered so the frontier connection's own
     /// `Content-Range` can be checked against it, once.
     private var adoptedWarmSize: Int64?
+    /// AE#860: the `Content-Type` of the first 2xx answer this open got (or the warm's), the one
+    /// statement about the source an extensionless URL makes. winCond-guarded, write-once.
+    private var openContentType: String?
     private var headSpanServeLogged = false
     private var headSpanPlaybackServeLogged = false
     private var tailSpanServeLogged = false
@@ -1124,6 +1155,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// True for endless live feeds. Suppresses `position >= fileSize` EOF synthesis;
     /// reports EIO (-5) instead of EOF when the reconnect cap is hit.
     let isLive: Bool
+    /// AE#860: an open whose response declares a disc image throws `.discImageMediaType` instead
+    /// of handing a filesystem to libavformat. Only the demuxer's URL open sets it, because only it
+    /// has the disc adapter to reroute to.
+    let routesDiscMediaType: Bool
 
     /// `LoadOptions.sequentialOrigin` (via `DemuxerOpenProfile.avioSequentialOnly`): the origin
     /// fabricates range answers, so only byte 0 is addressable. `open()` routes straight onto the
@@ -1197,16 +1232,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// #240: which reader this is, for the connection log. Several readers run against the same
     /// origin at once and the line used to name none of them.
     private let label: String
+    private let diagnosticContext: SourceNetworkDiagnostics.Context?
     private let sourceOpenPolicy: SourceOpenPolicy
     private let openDiagnosticID = String(UUID().uuidString.prefix(8))
     /// Only static controlled probes use this; playback retains its existing transport policy.
     private let probeControl: ProbeControl?
     private let probeRequestSession: URLSession?
+    private let persistentRequestSession: URLSession?
     private let probeDrainLock = NSLock()
     private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget, persistentRequestSession: URLSession? = nil, diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context, routesDiscMediaType: Bool = false) {
+        self.diagnosticContext = diagnosticContext
+        self.routesDiscMediaType = routesDiscMediaType
         self.sourceOpenPolicy = sourceOpenPolicy
+        self.persistentRequestSession = persistentRequestSession
         self.probeControl = probeControl
         self.probeRequestSession = probeControl == nil ? nil : probeRequestSession
         self.url = url
@@ -1342,7 +1382,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // The open has its first bytes in hand, so there is nothing to wait for. Waiting
                 // anyway would spend the round trip this whole feature exists to remove.
                 gotData = true
-                openPrefix = Array(warm.head.data.prefix(16))
+                openPrefix = Array(warm.head.data.prefix(Self.openSniffBytes))
             } else {
                 winCond.lock()
                 rangeVerdictPending = !isLive
@@ -1393,7 +1433,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     opened = awaitFirstPersistentData()
                 }
                 gotData = try recoverUnansweredOpenIfNeeded(gotData: opened)
-                openPrefix = firstWindowPrefix()
+                openPrefix = firstWindowPrefix(max: Self.openSniffBytes)
             }
             // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. A live origin serves the
             // finite #EXTM3U body at HTTP 200 and closes the connection; the endless-feed reader then
@@ -1419,6 +1459,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 close()
                 throw AVIOReaderError.hlsPlaylistOnVODPath
             }
+            // AE#859: the same misroute for an MPEG-DASH manifest. FFmpeg ships no DASH demuxer (it
+            // needs libxml2) and could not fetch a representation if it had one; the demuxer lays
+            // the manifest out as one fragmented MP4 instead (`DASHSourceOpener`).
+            if gotData, DASHManifest.bodyBeginsWithManifest(openPrefix) {
+                EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body (AE#859); handing it to the DASH opener.", category: .demux)
+                markClosed()
+                close()
+                throw AVIOReaderError.dashManifest
+            }
+            if !isLive, routesDiscMediaType, gotData,
+               DiscImageMediaType.isDiscImage(contentType: openResponseContentType) {
+                EngineLog.emit("[AVIOReader] \(label) the source declares a disc image type (AE#860); handing it to the disc adapter.", category: .demux)
+                markClosed()
+                close()
+                if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+                throw AVIOReaderError.discImageMediaType
+            }
+            if isLive, !gotData { try failIfStreamingRefused(fallbackStatus: 0) }
             var tookFallback = false
             if !isLive {
                 // Atomically decide, under winCond, whether the optimistic connection resolved
@@ -1546,6 +1604,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if let data = fetchChunk(from: 0, size: chunkSize) {
                     currentBuffer = data
                     currentOffset = 0
+                    // AE#859: the bounded probe reader opens here, past the persistent-window check.
+                    if DASHManifest.bodyBeginsWithManifest([UInt8](data.prefix(Self.openSniffBytes))) {
+                        EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body (AE#859); handing it to the DASH opener.", category: .demux)
+                        markClosed()
+                        close()
+                        throw AVIOReaderError.dashManifest
+                    }
+                    if routesDiscMediaType, DiscImageMediaType.isDiscImage(contentType: openResponseContentType) {
+                        EngineLog.emit("[AVIOReader] \(label) the source declares a disc image type (AE#860); handing it to the disc adapter.", category: .demux)
+                        markClosed()
+                        close()
+                        throw AVIOReaderError.discImageMediaType
+                    }
                 }
             }
         }
@@ -1554,11 +1625,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // forward-only open (no size, or an origin that ignores Range) leaves that window empty. A
         // playlist endpoint answering 200 without a length lands exactly there, so the same check
         // runs on the stream's first bytes before FFmpeg is handed the m3u8 as container bytes.
-        if isStreaming, Self.bodyBeginsWithHLSPlaylistTag(firstStreamPrefix()) {
+        let streamPrefix = isStreaming ? firstStreamPrefix(max: Self.openSniffBytes) : []
+        if isStreaming, Self.bodyBeginsWithHLSPlaylistTag(streamPrefix) {
             EngineLog.emit("[AVIOReader] \(label) HLS playlist body on the forward-only open (AE#733); rerouting like AE#140/#154.", category: .demux)
             markClosed()
             close()
             throw isLive ? AVIOReaderError.hlsPlaylistOnRawLivePath : AVIOReaderError.hlsPlaylistOnVODPath
+        }
+        if isStreaming, DASHManifest.bodyBeginsWithManifest(streamPrefix) {
+            EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body on the forward-only open (AE#859); handing it to the DASH opener.", category: .demux)
+            markClosed()
+            close()
+            throw AVIOReaderError.dashManifest
         }
 
         // #126: a VOD source that finishes open() without a resolved size runs the forward-only
@@ -1675,8 +1753,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let refused = streamRefusedStatus
         let ended = streamEnded
         let empty = streamBuffer.isEmpty && streamBytesRead == 0
+        let streamCode = ended && empty ? streamURLFailureCode : nil
         streamLock.unlock()
-        let status = refused != 0 ? refused : ((ended && empty) ? fallbackStatus : 0)
+        winCond.lock()
+        let persistentEmpty = connEnded && window.isEmpty
+        let persistentCode = persistentEmpty ? connURLFailureCode : nil
+        let persistentStatus = persistentEmpty && connStatus >= 400 ? connStatus : 0
+        winCond.unlock()
+        let status = refused != 0 ? refused : ((ended && empty) ? fallbackStatus : (isLive ? persistentStatus : 0))
         // AE#495: a handshake the system refused outranks a status, because there was never a
         // response to carry one. Same reason this function exists at all: the demuxer would be handed
         // nothing and report invalid data.
@@ -1692,6 +1776,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             close()
             throw AVIOReaderError.transportSecurityFailed(code: tlsCode)
         }
+        // A trust failure cannot be fixed by reconnecting. Any other transport failure (a reset or
+        // a timeout while a tuner spins up) is left to the reconnect ladder, as before; its code is
+        // only recorded (`lastTransportFailureCode`) for whoever finally gives up.
+        if let code = streamCode ?? persistentCode, (-1206 ... -1200).contains(code), status == 0 {
+            markClosed()
+            close()
+            throw AVIOReaderError.transportSecurityFailed(code: code)
+        }
         guard status != 0 else { return }
         EngineLog.emit(
             "[AVIOReader] \(label) source refused: HTTP \(status); failing the open typed",
@@ -1704,6 +1796,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Snapshot up to `max` leading bytes of the first window (open-time, before any read has consumed
     /// it, so `winStart == 0`). winCond-guarded like every other window access. Used only by the AE#140
     /// misroute check; returns [] if no data has arrived.
+    /// How much of the body the open classifies. `#EXTM3U` is in the first bytes, but an MPD root
+    /// usually follows an XML declaration and a generator comment (GPAC writes about 120 bytes of
+    /// them), so the classification reads further than a container signature needs (AE#859).
+    static let openSniffBytes = 1024
+
+    /// AE#860: the `Content-Type` the open learned, nil until a 2xx answer (or a warm) supplied one.
+    var openResponseContentType: String? {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return openContentType
+    }
+
     private func firstWindowPrefix(max: Int = 16) -> [UInt8] {
         winCond.lock()
         defer { winCond.unlock() }
@@ -1757,6 +1861,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         activeTransfer = nil
         window.removeAll()
         connEnded = true
+        // The replacement owns its failures; do not carry this retired connection's error.
+        connURLFailureCode = nil
         winCond.broadcast()
         return (false, transfer, status, ignoredLength)
     }
@@ -1778,6 +1884,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         activeTransfer = nil
         window.removeAll()
         connEnded = true
+        connURLFailureCode = nil
         winCond.broadcast()
         return (contentLength, transfer)
     }
@@ -3112,6 +3219,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let tail = warm.tail { tailSpan = tail }
         fileSize = warm.contentLength
         adoptedWarmSize = warm.contentLength
+        if openContentType == nil { openContentType = warm.contentType }
         winCond.unlock()
         SourceContentLengthCache.store(warm.contentLength, for: url)
         // The warm followed the redirect chain and knows where it ended. Pinning that target here
@@ -3191,6 +3299,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let delegate = TailPrefetchDelegate(
             expectedLength: Self.tailPrefetchBytes,
+            diagnosticContext: diagnosticContext,
             extraHeaders: headers(for: request.url)
         )
         // #281 retest: one line per open, and the line the field needs. The advertised way to check
@@ -3446,6 +3555,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             now: TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000)
         connRangeEnd = resolvedBound.map { offset + $0 - 1 }
         connStatus = 0
+        connURLFailureCode = nil
         connRetryAfter = 0
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
@@ -3519,12 +3629,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         } else {
             let delegate = PersistentReadDelegate(
                 reader: self,
+                diagnosticContext: diagnosticContext,
                 generation: generation,
                 extraHeaders: headers(for: request.url),
                 ticket: ticket,
                 originURL: requestURLForBudget
             )
-            let task = Self.persistentSession.dataTask(with: request)
+            let task = (persistentRequestSession ?? Self.persistentSession).dataTask(with: request)
             task.delegate = delegate
             transfer = task
         }
@@ -3720,6 +3831,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         var firstDataMs: Double? = nil
         if !connFirstDataSeen {
             connFirstDataSeen = true
+            clearRecordedTransportFailure()
             firstDataMs = Double(DispatchTime.now().uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
             // #281 retest: the price of one round trip against this origin, which is what bounds
             // how long a read may wait for bytes that are already on the wire.
@@ -3923,6 +4035,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             fileSize = 0
             adoptedWarmSize = nil
         }
+        if generation == connGeneration, !usesLiveReconnectSemantics, isOK, openContentType == nil {
+            openContentType = http.value(forHTTPHeaderField: "Content-Type")
+        }
         if generation == connGeneration, !usesLiveReconnectSemantics, fileSize <= 0, !rangeIgnoredAtOpen,
            let total = Self.sizeFromResponse(http, requestedOffset: requestedOffset) {
             fileSize = total
@@ -4006,6 +4121,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         let isCurrentGen = (generation == connGeneration)
         if isCurrentGen {
+            connURLFailureCode = SourceNetworkDiagnostics.urlErrorCode(error)
+            recordTransportFailure(error)
             connEnded = true
             // #220: the refill below keys off there being no live connection, so the finished
             // task must not stay installed.
@@ -4071,6 +4188,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
 
         let delegate = StreamingDelegate(
+            diagnosticContext: diagnosticContext,
             extraHeaders: headers(for: request.url),
             onResponse: { [weak self] response in
                 // Advisory length for the EOF/EIO distinction; -1 (chunked / unknown) leaves the
@@ -4108,7 +4226,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
             // Owned bytes: the chunk is retained until it is consumed, and a delivery that still
             // references the transport's dispatch_data would pin its buffer for that long.
+            let firstDelivery = self.streamBuffer.isEmpty && self.streamBytesRead == 0
             self.streamBuffer.append(data.withUnsafeBytes { Data($0) })
+            if firstDelivery { self.clearRecordedTransportFailure() }
             self.streamPeakBytes = max(self.streamPeakBytes, self.streamBuffer.count)
             var toCancel: URLSessionDataTask?
             if self.streamBuffer.count > self.streamHardCap {
@@ -4146,6 +4266,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 return
             }
             self.streamLock.lock()
+            self.streamURLFailureCode = SourceNetworkDiagnostics.urlErrorCode(error)
+            self.recordTransportFailure(error)
             if error != nil, !self.isClosed { self.streamFailed = true }
             self.streamEnded = true
             self.streamLock.unlock()
@@ -4528,7 +4650,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { lease.release() }
         guard !scope.isStopped, !isClosed, remaining() > 0 else { return -1 }
         request.timeoutInterval = max(0.001, remaining())
-        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
+        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url), diagnosticContext: diagnosticContext)
         let task = Self.probeSession.dataTask(with: request)
         task.delegate = delegate
         let completion = DispatchSemaphore(value: 0)
@@ -4592,7 +4714,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let lease = OriginRequestBudget.Lease(ticket)
         defer { lease.release() }
 
-        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
+        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url), diagnosticContext: diagnosticContext)
         let task = (probeRequestSession ?? Self.probeSession).dataTask(with: request)
         task.delegate = delegate
 
@@ -4704,6 +4826,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         )
                         return nil
                     }
+                }
+                if !isLive, let http = response as? HTTPURLResponse {
+                    winCond.lock()
+                    if openContentType == nil { openContentType = http.value(forHTTPHeaderField: "Content-Type") }
+                    winCond.unlock()
                 }
                 addBytesFetched(data.count)
                 return data
@@ -4895,7 +5022,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { lease.release() }
 
         let delegate = ChunkFetchDelegate(extraHeaders: headers(for: request.url),
-                                          bodyLimit: Self.expectedBodyBytes(for: request))
+                                          bodyLimit: Self.expectedBodyBytes(for: request), diagnosticContext: diagnosticContext)
         let task = (probeRequestSession ?? Self.chunkSession).dataTask(with: request)
         task.delegate = delegate
         delegate.onBodyReserve = { [weak self] reserve in
@@ -5216,6 +5343,7 @@ extension URLSessionDataTask: PersistentTransfer {
 }
 
 private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     weak var reader: AVIOReader?
     let generation: Int
     let extraHeaders: [String: String]
@@ -5228,8 +5356,9 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
     /// The URL this connection was opened against, for the one-per-origin transport line.
     private let originURL: URL
 
-    init(reader: AVIOReader, generation: Int, extraHeaders: [String: String],
+    init(reader: AVIOReader, diagnosticContext: SourceNetworkDiagnostics.Context?, generation: Int, extraHeaders: [String: String],
          ticket: OriginRequestBudget.Ticket?, originURL: URL) {
+        self.sourceTrace = .init(role: .persistentRead, context: diagnosticContext)
         self.reader = reader
         self.generation = generation
         self.extraHeaders = extraHeaders
@@ -5269,6 +5398,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        sourceTrace.redirect(task: task, response: response, request: request)
         completionHandler(redirectPreservingHeaders(
             task: task, newRequest: request, extraHeaders: extraHeaders))
     }
@@ -5279,6 +5409,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        sourceTrace.response(task: dataTask, response: response)
         guard let http = response as? HTTPURLResponse, let reader else {
             completionHandler(.cancel)
             return
@@ -5306,6 +5437,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
+        sourceTrace.completed(task: task, error: error)
         releaseTicket()
         reader?.persistentConnectionEnded(error: error, generation: generation)
     }
@@ -5318,6 +5450,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
         task: URLSessionTask,
         didFinishCollecting metrics: URLSessionTaskMetrics
     ) {
+        sourceTrace.metrics(task: task, metrics: metrics)
         ReaderTransportLog.note(metrics, for: originURL)
         let hops = metrics.transactionMetrics.compactMap(AVIOReader.hopTiming)
         if let line = AVIOReader.slowFirstByteLine(
@@ -5335,6 +5468,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
 /// dispatch_data is released per delivery. @unchecked Sendable: ownership
 /// via semaphore ensures no concurrent access to mutable fields.
 private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let extraHeaders: [String: String]
     /// Most this fetch will ever buffer, nil when the request is open-ended (#255). Derived from
     /// the request, never from the response: a declared length is the origin's claim about the
@@ -5351,7 +5485,8 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     /// Reports the up-front reservation each response asked for (#255 test hook).
     var onBodyReserve: ((Int) -> Void)?
 
-    init(extraHeaders: [String: String], bodyLimit: Int?) {
+    init(extraHeaders: [String: String], bodyLimit: Int?, diagnosticContext: SourceNetworkDiagnostics.Context?) {
+        self.sourceTrace = .init(role: .chunkFetch, context: diagnosticContext)
         self.extraHeaders = extraHeaders
         self.bodyLimit = bodyLimit
     }
@@ -5372,6 +5507,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        sourceTrace.redirect(task: task, response: response, request: request)
         completionHandler(redirectPreservingHeaders(
             task: task, newRequest: request, extraHeaders: extraHeaders))
     }
@@ -5382,6 +5518,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        sourceTrace.response(task: dataTask, response: response)
         self.response = response
         if let http = response as? HTTPURLResponse {
             let reserve = AVIOReader.bodyReservation(
@@ -5438,14 +5575,20 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
+        sourceTrace.completed(task: task, error: error)
         self.error = error
         onCompletion?(response as? HTTPURLResponse)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        sourceTrace.metrics(task: task, metrics: metrics)
+    }
+
 }
 
 // MARK: - Streaming Delegate
 
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let onData: @Sendable (Data) -> Void
     let onComplete: @Sendable (Error?) -> Void
     /// Response hook (advisory Content-Length capture on the sequential-origin path).
@@ -5461,6 +5604,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     let extraHeaders: [String: String]
 
     init(
+        diagnosticContext: SourceNetworkDiagnostics.Context?,
         extraHeaders: [String: String] = [:],
         onResponse: (@Sendable (URLResponse) -> Void)? = nil,
         onRefused: (@Sendable (Int, URL?) -> Void)? = nil,
@@ -5468,6 +5612,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         onComplete: @escaping @Sendable (Error?) -> Void
     ) {
         self.extraHeaders = extraHeaders
+        self.sourceTrace = .init(role: .streaming, context: diagnosticContext)
         self.onResponse = onResponse
         self.onRefused = onRefused
         self.onData = onData
@@ -5481,6 +5626,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        sourceTrace.redirect(task: task, response: response, request: request)
         completionHandler(redirectPreservingHeaders(
             task: task, newRequest: request, extraHeaders: extraHeaders))
     }
@@ -5500,6 +5646,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        sourceTrace.response(task: dataTask, response: response)
         // Redirects never reach here (willPerformHTTPRedirection follows them), so anything but
         // a 200/206 is the origin's verdict, not media: a 401/403 refusal, a 404, a 429, a 5xx.
         // Hang up at the header so the error page never enters the stream buffer, where FFmpeg
@@ -5519,6 +5666,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        sourceTrace.completed(task: task, error: error)
         #if DEBUG
         if let error {
             EngineLog.emit("[AVIOReader] Stream error: \(error.localizedDescription)", category: .demux)
@@ -5526,6 +5674,10 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         #endif
         onComplete(error)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        sourceTrace.metrics(task: task, metrics: metrics)
+    }
+
 }
 
 // MARK: - Probe Delegate
@@ -5534,6 +5686,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
 /// captures total from Content-Range, cancels before the body streams.
 /// @unchecked Sendable: single-use per probe, semaphore ownership prevents concurrency.
 private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let extraHeaders: [String: String]
     var totalSize: Int64?
     var statusCode: Int = 0
@@ -5542,7 +5695,8 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     var onCompletion: ((HTTPURLResponse?) -> Void)?
     var onResolved: ((URL) -> Void)?
 
-    init(extraHeaders: [String: String]) {
+    init(extraHeaders: [String: String], diagnosticContext: SourceNetworkDiagnostics.Context?) {
+        self.sourceTrace = .init(role: .probe, context: diagnosticContext)
         self.extraHeaders = extraHeaders
     }
 
@@ -5562,6 +5716,7 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        sourceTrace.redirect(task: task, response: response, request: request)
         completionHandler(redirectPreservingHeaders(
             task: task, newRequest: request, extraHeaders: extraHeaders))
     }
@@ -5572,6 +5727,7 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        sourceTrace.response(task: dataTask, response: response)
         defer { completionHandler(.cancel) }
         guard let http = response as? HTTPURLResponse else { return }
         let status = http.statusCode
@@ -5587,9 +5743,14 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        sourceTrace.completed(task: task, error: error)
         self.error = error
         onCompletion?(response)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        sourceTrace.metrics(task: task, metrics: metrics)
+    }
+
 }
 
 /// Which origins have already shown they cannot answer a suffix range, so the next open does not
@@ -5672,6 +5833,7 @@ final class SuffixRangeSupport: @unchecked Sendable {
 /// whole file. That body is rejected at the header, before a byte of it is accepted, and the
 /// collected length is capped besides, so a lying `Content-Range` cannot grow this either.
 private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     enum Outcome {
         case span(Int64, Data)
         /// Named so the log says WHICH way an origin declined, since "no suffix ranges", "a 200 with
@@ -5701,7 +5863,8 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     /// silent failure would be a caller waiting out its whole budget for bytes that are never coming.
     var onOutcome: ((Outcome) -> Void)?
 
-    init(expectedLength: Int, extraHeaders: [String: String]) {
+    init(expectedLength: Int, diagnosticContext: SourceNetworkDiagnostics.Context?, extraHeaders: [String: String]) {
+        self.sourceTrace = .init(role: .tailPrefetch, context: diagnosticContext)
         self.expectedLength = expectedLength
         self.extraHeaders = extraHeaders
     }
@@ -5715,6 +5878,7 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     ) {
         // Same policy as every other delegate here: credential headers do not follow a redirect
         // to another host (the #126 cross-origin token replay).
+        sourceTrace.redirect(task: task, response: response, request: request)
         completionHandler(redirectPreservingHeaders(
             task: task, newRequest: request, extraHeaders: extraHeaders))
     }
@@ -5725,6 +5889,7 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        sourceTrace.response(task: dataTask, response: response)
         guard let http = response as? HTTPURLResponse else {
             rejection = ("no HTTP response", .declinedByOrigin)
             completionHandler(.cancel)
@@ -5758,6 +5923,7 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        sourceTrace.completed(task: task, error: error)
         let outcome = self.outcome(error: error)
         onOutcome?(outcome)
         onOutcome = nil
@@ -5777,6 +5943,10 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         }
         return .span(start, buffer)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        sourceTrace.metrics(task: task, metrics: metrics)
+    }
+
 }
 
 // MARK: - C Callbacks
@@ -5815,6 +5985,13 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
     /// --disable-network) can never demux it; surfaced to load() so it reroutes the source onto the
     /// native remote-HLS bypass instead of dying with a bare AVERROR_INVALIDDATA.
     case hlsPlaylistOnVODPath
+    /// AE#859: an MPEG-DASH manifest body arrived where container bytes belong. `Demuxer.openHTTP`
+    /// catches it and opens the manifest through `DASHSourceOpener`; it only escapes for a source
+    /// the demuxer cannot reopen by URL.
+    case dashManifest
+    /// AE#860: the opening response declared a disc image type (`DiscImageMediaType`). Internal
+    /// routing only: `Demuxer.openHTTP` catches it and tries the disc adapter.
+    case discImageMediaType
     /// The origin answered the source request with an HTTP status instead of media: a 401/403
     /// refusal, a 404, a 5xx. Typed so load() publishes the status (`PlaybackErrorKind.sourceRefused`)
     /// instead of the AVERROR_INVALIDDATA FFmpeg reports for an empty or error-page stream, and so the
@@ -5841,6 +6018,8 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
         case .requestTimeout: return "Request timed out"
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
+        case .dashManifest: return "MPEG-DASH manifest supplied where container bytes belong"
+        case .discImageMediaType: return "Disc image supplied where container bytes belong"
         case .httpStatus(let status): return "Origin answered HTTP \(status) for the source"
         case .transportSecurityFailed(let code):
             return TransportSecurityFailure.sentence(for: code)
