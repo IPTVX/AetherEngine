@@ -12,6 +12,8 @@ the public-API contract.
 
 ### IPTVX fork
 
+- Fixed Live endpoints returning a finite non-fragmented MP4 placeholder: complete movie metadata now makes the HTTP length and EOF authoritative without changing host Live intent. True Live TS bursts and fragmented MP4 retain reconnect semantics; size queries and header classification share the reader lock.
+
 - Integrated the complete upstream 7.47.0 release while retaining iOS/tvOS 16 and macOS 14. FFmpegBuild 3.9.0 preserves the upstream binaries with matching deployment metadata; LibTrueHD 3.0.0 API 2 is rebuilt at the retained floors. LibDTSX is removed. Existing object-audio and Dolby Vision still capabilities remain enabled; dual-layer composition and reference rendering remain opt-in. Source teardown stays awaitable and drains the compositor preview readers. Cold software loads preserve the resolved source origin without doubling it, while resumes retain their applied origin and legacy renderer preroll excludes held reorder frames.
 
 _Nothing yet._

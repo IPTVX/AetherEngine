@@ -149,6 +149,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
 
+    /// Candidate total length from a byte-zero Live response, not authoritative until MP4 metadata proves it finite.
+    /// Protected by `winCond`, together with the response generation and retained header bytes.
+    private var finiteLiveResourceDeclaredSize: Int64?
+
+    /// Latches complete, non-fragmented MP4 metadata without changing the host's Live playback intent.
+    /// Protected by `winCond`; retained across range refills of the same resource.
+    private var confirmedFiniteLiveResource = false
+
+    /// Whether EOF and reconnects still follow an endless feed. Read only while holding `winCond`.
+    private var usesLiveReconnectSemantics: Bool {
+        isLive && !confirmedFiniteLiveResource
+    }
+
     /// Typed source-fetch network phase, pushed on every stall/reconnect/recovery transition (#85).
     /// Mirrors `HLSVideoEngine.onSeekStateChanged`. `@Sendable`: invoked from the demux thread, the
     /// consumer hops to the main actor. Set only on the MAIN playback reader, never the subtitle side reader.
@@ -2365,7 +2378,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // `bytes=<fileSize>-` first: an empty 206 whose reconnect reset `winStart` past the
             // end and dropped a window the parse was still reading. Skipped for live, where the
             // length is not authoritative.
-            if !isLive, fileSize > 0, position >= fileSize {
+            if !usesLiveReconnectSemantics, fileSize > 0, position >= fileSize {
                 winCond.unlock()
                 return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eof
             }
@@ -2550,7 +2563,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 let undrained = window.count - max(0, Int(position - winStart))
                 let frontier = winStart + Int64(window.count)
                 if activeTransfer == nil, undrained <= Self.winLowWater,
-                   isLive || fileSize <= 0 || frontier < fileSize {
+                   usesLiveReconnectSemantics || fileSize <= 0 || frontier < fileSize {
                     if connEndedAtRangeEnd || connEndedByBackpressure {
                         refillFrom = frontier
                     } else if connEnded, Date() >= nextFaultedRefillAt {
@@ -3380,7 +3393,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let resolvedBound: Int64? = boundedTo ?? {
             guard !openEnded else { return nil }
             guard !heldConnectionEnabled else { return nil }
-            guard !isLive else { return nil }
+            guard !usesLiveReconnectSemantics else { return nil }
             // fileSize is still 0 on the very first connection, since the response's
             // Content-Range is what resolves it. Asking for a fixed amount anyway is both safe
             // and necessary: safe because a server clamps a range that overruns the file (416
@@ -3407,8 +3420,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             winStart = offset
             window.removeAll()
         }
+        // Classification must join a length and header from the same response. A fresh byte-zero
+        // Live join can return another body; ranges beyond zero cannot establish a new header proof.
+        if isLive, !confirmedFiniteLiveResource {
+            finiteLiveResourceDeclaredSize = nil
+            if offset == 0 { headSpan = Data() }
+        }
         connRequestedOffset = offset
-        let askAsJoin = isLive && liveOffsetsUnsatisfiable
+        let askAsJoin = usesLiveReconnectSemantics && liveOffsetsUnsatisfiable
         connEnded = false
         connEndedByBackpressure = false
         connEndedAtRangeEnd = false
@@ -3727,6 +3746,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if openPhaseActive, winStart == 0, base == headSpan.count,
            headSpan.count < Self.headSpanMaxBytes {
             headSpan.append(data.prefix(Self.headSpanMaxBytes - headSpan.count))
+            // A Live endpoint can redirect to an ordinary MP4 error video. Complete, non-fragmented
+            // movie metadata proves a finite resource; HTTP length alone cannot distinguish Live bursts.
+            // Inspect only growing headers, never the same capped prefix on every subsequent Live delivery.
+            if isLive, !confirmedFiniteLiveResource,
+               let declaredSize = finiteLiveResourceDeclaredSize,
+               FiniteMP4LiveResource.isNonFragmentedMP4(prefix: headSpan, declaredSize: declaredSize) {
+                confirmedFiniteLiveResource = true
+                fileSize = declaredSize
+                finiteLiveResourceDeclaredSize = nil
+            }
         }
         addBytesFetched(count)
         // #220: the requested range has been delivered in full. That ends the connection on
@@ -3841,6 +3870,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // from byte 0 (silent corruption). Reject it. Live is exempt: transcode
         // reconnect legitimately answers 200 with "from now".
         let requestedOffset = (generation == connGeneration) ? connRequestedOffset : 0
+        if isOK, generation == connGeneration, isLive, !confirmedFiniteLiveResource,
+           requestedOffset == 0 {
+            finiteLiveResourceDeclaredSize = Self.sizeFromResponse(http, requestedOffset: requestedOffset)
+        }
         // Audit DMX-101: the cold open asked for a bounded range at byte 0. A 200 whose body is not
         // that range is an origin that cannot address bytes, and this connection is abandoned at the
         // head: nothing below may adopt its Content-Length as a size the persistent reader could
@@ -3882,7 +3915,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             fileSize = 0
             adoptedWarmSize = nil
         }
-        if generation == connGeneration, !isLive, fileSize <= 0, !rangeIgnoredAtOpen,
+        if generation == connGeneration, !usesLiveReconnectSemantics, fileSize <= 0, !rangeIgnoredAtOpen,
            let total = Self.sizeFromResponse(http, requestedOffset: requestedOffset) {
             fileSize = total
             // #112: share this resolved length so a later side demuxer on the same origin can skip a probe that
@@ -3892,6 +3925,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[AVIOReader] File size: \(total) bytes (data connection)", category: .demux)
             #endif
         }
+        let responseUsesLiveReconnectSemantics = usesLiveReconnectSemantics
         winCond.unlock()
         if let headerMs, headerMs > 2000 {
             EngineLog.emit(
@@ -3911,7 +3945,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 category: .demux
             )
         }
-        if status == 200 && requestedOffset > 0 && !isLive {
+        if status == 200 && requestedOffset > 0 && !responseUsesLiveReconnectSemantics {
             EngineLog.emit(
                 "[AVIOReader] server ignored Range (200 for offset \(requestedOffset)); rejecting body",
                 category: .demux
@@ -3927,7 +3961,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         // Live is exempt for the same reason as above: its offset is bookkeeping, and the append
         // anchors the bytes at the frontier whatever the origin calls them.
-        if isOK, !isLive, generation == connGeneration,
+        if isOK, !responseUsesLiveReconnectSemantics, generation == connGeneration,
            let served = Self.misplacedRangeStart(http, requestedOffset: requestedOffset) {
             EngineLog.emit(
                 "[AVIOReader] \(label) gen=\(generation) 206 starts at \(served), not the requested "
@@ -4195,8 +4229,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the same reason `recordRateLimitAndShouldGiveUp` is not private. Callers outside the file
     /// are tests; production reaches this through `seekCallback`.
     func seek(offset: Int64, whence: Int32) -> Int64 {
+        // A Live MP4 can resolve its length while FFmpeg is already parsing its header.
+        let knownSize: Int64
+        if usePersistentReader {
+            winCond.lock()
+            knownSize = fileSize
+            winCond.unlock()
+        } else {
+            knownSize = fileSize
+        }
         if whence == AVSEEK_SIZE {
-            guard fileSize <= 0, originIgnoresRange else { return fileSize }
+            guard knownSize <= 0, originIgnoresRange else { return knownSize }
             streamLock.lock()
             defer { streamLock.unlock() }
             return streamExpectedBytes
@@ -4215,8 +4258,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 newPosition = position + offset
             }
         case SEEK_END:
-            guard fileSize >= 0 else { return -1 }
-            newPosition = fileSize + offset
+            guard knownSize >= 0 else { return -1 }
+            newPosition = knownSize + offset
         default:
             return -1
         }
