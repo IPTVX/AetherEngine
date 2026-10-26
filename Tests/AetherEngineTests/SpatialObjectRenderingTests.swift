@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait: the renderer is not built without one.
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Testing
 import Foundation
 @testable import AetherEngine
@@ -85,6 +87,8 @@ struct SpatialObjectRenderingTests {
         #expect(abs(power(gains) - 1) < 1e-5)
     }
 
+    #if TrueHDReferenceRender
+    // Snap and size are built only into the measurement reference.
     @Test("snap routes to the nearest speaker; size spreads with unit power")
     func snapAndSize() {
         let layout = SpatialSpeakerLayout.l916
@@ -99,6 +103,7 @@ struct SpatialObjectRenderingTests {
         #expect(gains.filter { $0 > 0.01 }.count >= 10, "a large object reaches most of the room")
         #expect(gains[layout.lfeIndex] == 0)
     }
+    #endif
 
     // MARK: - Renderer
 
@@ -324,6 +329,8 @@ struct SpatialObjectRenderingTests {
         #expect(abs(power(out.map { $0[0] }) - 1) < 1e-5)
     }
 
+    #if TrueHDReferenceRender
+    // Zone masks, snap and size are built only into the measurement reference.
     @Test("objects keep unit power with size and every zone mask, on every layout",
           arguments: SpatialSpeakerLayout.allCases)
     func unitPowerWithSizeAndZones(layout: SpatialSpeakerLayout) {
@@ -344,4 +351,6 @@ struct SpatialObjectRenderingTests {
             }
         }
     }
+    #endif
 }
+#endif

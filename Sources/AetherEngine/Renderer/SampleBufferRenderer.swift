@@ -202,7 +202,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
     }
 
     /// How much composed video the FEL path hands the layer before the clock starts, in seconds
-    /// (`felPrerollSatisfied(clock:)`): four frames at 24 fps, which covers a decode-order burst of a
+    /// (`prerollSatisfied(clock:live:)`): four frames at 24 fps, which covers a decode-order burst of a
     /// hierarchical GOP. Measured on the Apple TV 4K (A12) with 4K FEL, the preroll completes after
     /// 90 to 100 ms at a start and 0.3 to 0.9 s after a seek.
     static let felPrerollSeconds = 0.167
@@ -224,16 +224,30 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return min(felPrerollSeconds, Double(availableFrames) / frameRate)
     }
 
-    /// The FEL path's preroll gate for `AudioOutput.videoPrerollSatisfied`: true once frames up to
-    /// `felPrerollSeconds` past `clock` (source seconds) are in the layer, nil off the FEL path. On
-    /// the arrival-order path only the frontier counts, the newest timestamp with every earlier slot
-    /// handed over, so a frame that came early past a gap does not open the gate.
-    func felPrerollSatisfied(clock: Double) -> Bool? {
+    /// How much video every other software route hands the layer before the clock starts, in seconds
+    /// past it (`prerollSatisfied(clock:live:)`): the frame at the clock and three after it at 24 fps.
+    /// Without it a start or a seek ran the clock while the decoder was still working from the keyframe
+    /// up to the target, and the first frames arrived late: 0.9 s and 5 to 7 dropped frames on a 4K
+    /// HEVC title with no audio after a 10 s GOP on an Apple TV 4K (A15), 0.3 s and 3 on 1080p H.264
+    /// with audio (#800).
+    static let videoPrerollSeconds = 0.125
+
+    /// The preroll gate for `AudioOutput.videoPrerollSatisfied`: true once frames up to the preroll
+    /// past `clock` (source seconds) are in the layer, `felPrerollSeconds` on the FEL path and
+    /// `videoPrerollSeconds` on every other one. nil for a clock with no position, and off the FEL
+    /// path on a live stream, whose join already starts on its first keyframe (AE#844) and lets the
+    /// clock run from the audio there. On the arrival-order path only the frontier counts, the newest
+    /// timestamp with every earlier slot handed over, so a frame that came early past a gap does not
+    /// open the gate.
+    func prerollSatisfied(clock: Double, live: Bool) -> Bool? {
         reorderLock.lock()
         defer { reorderLock.unlock() }
-        guard let rate = felFrameRate, clock.isFinite else { return nil }
+        guard clock.isFinite else { return nil }
+        let rate = felFrameRate
+        if rate == nil, live { return nil }
         let handed = arrivalFloor != nil ? arrivalFloor?.frontier : _lastReleasedPtsSeconds
         guard let handed else { return false }
+        guard let rate else { return handed - clock >= Self.videoPrerollSeconds }
         let retainedFrames = arrivalFloor == nil ? reorderDepth : 0
         return handed + 1 / rate - clock >= Self.felPrerollSeconds(
             frameRate: rate,

@@ -12,6 +12,540 @@ the public-API contract.
 
 ### IPTVX fork
 
+- Integrated the complete upstream 7.47.0 release while retaining iOS/tvOS 16 and macOS 14. FFmpegBuild 3.9.0 preserves the upstream binaries with matching deployment metadata; LibTrueHD 3.0.0 API 2 is rebuilt at the retained floors. LibDTSX is removed. Existing object-audio and Dolby Vision still capabilities remain enabled; dual-layer composition and reference rendering remain opt-in. Source teardown stays awaitable and drains the compositor preview readers. Cold software loads preserve the resolved source origin without doubling it, while resumes retain their applied origin and legacy renderer preroll excludes held reorder frames.
+
+_Nothing yet._
+
+## [7.47.0] - 2026-10-23
+
+### Added
+
+- **3D on visionOS: MV-HEVC keeps its second view, and side-by-side / over-under HEVC plays as stereo (AE#812, thanks @williamliu0516).**
+  An MV-HEVC stream reached AVPlayer as plain `hvc1` (movenc writes `lhvC` only for a stream marked
+  `AV_DISPOSITION_MULTILAYER`, and the muxer's new stream had no disposition), so only the base view
+  was decoded. A frame-packed source now gets Apple's `vexu { eyes, pack }` in its init segment (the box
+  AVAssetWriter writes for `ViewPackingKind`), read back by AVFoundation as a side-by-side or over-under
+  stereo track, with no re-encode. Both declare `REQ-VIDEO-LAYOUT="CH-STEREO"` (EXT-X-VERSION 12).
+  `LoadOptions.stereoPresentation` (`.automatic` default: MV-HEVC and a container's declared packing;
+  `.sideBySide` / `.overUnder` for files that say so only in their name; `.mono`). Frame packing is
+  signalled on HEVC only: AVPlayer refuses a packed H.264 init over HLS (-12927), so H.264 plays 2D.
+  Other systems still play these files in 2D. Measured on the visionOS 27 simulator and macOS 27;
+  `aetherctl serve --stereo auto|mono|sbs|ou` serves a source as visionOS gets it.
+- **MV-HEVC decodes both views through the engine.** The AE#187 hvcC canonicalization dropped every SEI
+  array, including the three_dimensional_reference_displays_info SEI (payload 176) Apple's MV-HEVC writer
+  puts in the `hvcC`; without it AVFoundation decoded the base view alone despite `lhvC` and every layer-1
+  slice (one buffer for both eyes from `AVPlayerVideoOutput`; the left eye only on a Vision Pro). A
+  multiview session now keeps that SEI and still drops every other one.
+
+### Changed
+
+- **`AtmosOutputActivator` runs for TrueHD Atmos only.** A DTS:X track rendered to APAC no longer
+  loops the silent Dolby Atmos stream beside it, so the receiver does not show Dolby Atmos for a DTS
+  programme.
+- **Object size, snap and zone masks are built only into the `TrueHDReferenceRender` measurement
+  build.** The shipped TrueHD path already took every object as a point; the panner's size and snap
+  code and the element state's size, snap and zone fields are now compiled out of it as well. No
+  change to what a shipped build plays.
+
+### Fixed
+
+- **The Atmos activator plays on HDMI again.** Since 7.45.0 (AE#834) it compared the route against
+  `"HDMI"`, while `AVAudioSession.Port.HDMI` is `"HDMIOutput"`, so it refused every HDMI route and logged
+  `off on route ports=[HDMIOutput]`. Receivers and soundbars that need the silent Atmos stream (a Samsung
+  HW-Q990C, a reporter's AV receiver) stopped showing Dolby Atmos for TrueHD Atmos rendered to APAC.
+- **A resume from pause no longer reports one tick of `.rebuffering` (Sodalite#168).** Every resume passes
+  through `waitingToPlay` with `AVPlayerWaitingWhileEvaluatingBufferingRateReason` for a frame or two, and
+  the native and audio-only hosts folded any wait into the buffering flag, so a host that raises a spinner
+  on it flickered its controls on each Play press. That evaluation no longer counts; a wait that is really
+  short of media moves on to `toMinimizeStalls`, which still does.
+- **A software live join starts picture and sound together (AE#844, thanks @l984-451).** A join reads
+  the source mid-GOP, and the clock armed on the first audio while the first picture only decoded at
+  the next keyframe: 1.3 to 2.9 s of sound over a black screen on every join, measured on an Apple TV
+  4K over Plex Live TV. The join now starts on the first keyframe. With a DVR ring the cursor moves
+  there and waits, at most 3 s, until the lead over the newest media stands where the unmoved start
+  had it (capped at the 2 s rebuffer resume lead); without one the audio read before that keyframe is
+  dropped. A stream that flags no keyframe keeps its old start after 3 s.
+
+## [7.46.0] - 2026-10-22
+
+### Added
+
+- **`ThreadCPUSampler` and a `cpuprobe` line next to every 30 s memprobe.** It states the CPU time
+  each thread group consumed over the window, as a share of one core, with the main thread and the
+  time of threads that ended inside the window on their own fields:
+  `cpuprobe t=30s cpu=87% main=6% threads=42 top=AetherEngine.HLSSegmentProducer.pump:29 ...`.
+  Consumed time, not the scheduler's decaying `cpu_usage`, so the figures add up. A field log from a
+  box nobody here owns is now a coarse profile instead of a guess. The class is public so a host can
+  sample its UI the same way outside a playback session.
+
+### Fixed
+
+- **A live edge cushion deeper than about 20 s now starts on tvOS (AE#851).** The loopback built
+  its first live window behind AVPlayer's first playlist request, so the whole wait ran on
+  AVPlayer's playlist timer, which gives up after about 20 s on tvOS (`-16839`, then `-1008`). A
+  raw MPEG-TS channel that fills at 1x after its connect burst therefore never started with a 30 s
+  cushion, and the plain `.standard` holdback (19.2 s on a strict-realtime origin with
+  TARGETDURATION 6) sat right at the limit. The engine now waits out the same gate before the item
+  is attached, so the request is answered at once and the session still plays the full cushion
+  behind the edge (29 s with 30 s asked, `aetherctl live --realtime --preroll 0`).
+
+- **A bitmap subtitle track no longer makes the forward prefetch read four and a half minutes
+  ahead while the viewer stays fullscreen.** Selecting a PGS / DVB / DVD track armed the OCR worker
+  for its native rendition at once, and with it the prefetch lead of 270 s; on Matroska that reader
+  pulls every cluster, so a 4K remux paid ten times the prefetch bytes of the overlay-only lead (434
+  against 17 MB in 90 s), and an Apple TV 4K (1st generation) dropped frames on an 89 Mbit/s source.
+  The worker now follows the native selection (PiP, AirPlay, external display), and the native
+  select waits until it has recognized the whole window AVKit fetches in one burst, so the
+  rendition is never handed over partly empty.
+
+## [7.45.0] - 2026-10-21
+
+### Added
+
+- **`LoadOptions.liveEdgeCushionSeconds`: a host chooses how far behind the live edge a live
+  session plays.** The live counterpart of a buffer-duration setting, for viewers whose link is
+  slower or less steady than the channel. It only ever moves the playhead further back than the
+  path's own distance and is clamped to 45 s. On the loopback it raises the served `HOLD-BACK`, the
+  first-serve gate and its deadline, and floors `.fastZap`'s shallow start; the live HLS ingest
+  joins deep enough for a listed backlog to fill it at link speed. On the software path it is the
+  join lead, the landing holdback and the cushion a rebuffer refills before resuming (without a
+  DVR window it keeps a packet ring that deep, publishing no rewind window); on
+  `nativeRemoteHLS` it is `configuredTimeOffsetFromLive`, preserved across stalls and never below
+  the origin's own recommended offset. A session holding
+  the cushion reads `isAtLiveEdge`. `nil` keeps today's behaviour. `aetherctl play --live-cushion SECONDS`
+  drives it.
+
+- **`LoadOptions.sessionCacheByteBudget` and `EngineDiagnostics.sessionCacheStatus`: a host can
+  size the temporary VOD cache and see what it holds (#830, thanks @orut34iop).** An explicit byte
+  request goes through the same quarter-of-free-space clamp and `RetentionClaims` ledger as the
+  automatic 2 GiB budget, and applies to the fMP4 segment cache and the software disk packet
+  store. `0` keeps only the playback window. The snapshot reports requested and effective bytes,
+  resident and forward bytes, producer parking, evictions, a protected window that exceeds the
+  request, and the cleanup reason and result after stop, sampled off-main and never carried into
+  the next session. `nil` keeps today's sizing; live DVR, the tvOS memory store and native remote
+  HLS (reported as unsupported) are unchanged.
+
+- **`prepareExternalSubtitle` / `commitExternalSubtitle`: a downloaded sidecar is decoded before
+  it replaces the selection (#829, thanks @orut34iop).** A host picking an external subtitle had to
+  switch to it before knowing the file decodes. Preparation decodes a local SRT, WebVTT, ASS or SSA
+  file within `ExternalSubtitlePreparationPolicy` limits and touches no track, cue or preference;
+  the commit publishes the decoded cues once and reads nothing. A failed preparation keeps the old
+  selection, and a newer selection on either channel, a removal, stop or a new load turns an older
+  candidate stale. Ordinary selection is unchanged.
+
+- **`LoadOptions.softwarePacketCacheStorage`: a host can choose where the software path keeps
+  its packets (#827, thanks @orut34iop).** Seekable software VOD caches compressed packets in
+  purgeable memory on tvOS and in session files elsewhere (#776). `.disk` and `.memory` now select
+  either store on any platform, with the same budgets, volume safeguards and eviction as the
+  default; `.automatic` keeps the platform policy. A reload carries the choice over. Local files
+  that bypass the cache, live DVR and native HLS are unchanged.
+
+- **`secondarySidecarASSHeader`: a secondary ASS sidecar keeps its markup and script header
+  (#826, thanks @orut34iop).** The secondary sidecar decode ignored `preserveASSMarkup` and
+  dropped the header, while the embedded secondary path already honoured the option. It now
+  publishes raw event lines plus its own header, independent of the primary `sidecarASSHeader`
+  (script resolution and styles can differ). The header clears on a new selection, on
+  `clearSecondarySubtitle()` and on stop, and is decoded again on a session-preserving reload.
+  SRT and WebVTT stay plain text, and output without the option is unchanged.
+
+### Fixed
+
+- **Broadcast HLG plays as HLG (#839, thanks @shinier-lichen).** UK broadcast HLG (BBC iPlayer and
+  others) declares a backward-compatible BT.2020 10-bit or BT.709 transfer so an SDR set still shows
+  a picture, and names HLG only in an `alternative_transfer_characteristics` SEI (payloadType 147).
+  The engine read the declared transfer alone, so the display criteria, the route's `VIDEO-RANGE` and
+  the `colr` in `init.mp4` all said SDR. The demuxer now peeks up to 8 video packets after open, for
+  HEVC and H.264 with BT.2020 primaries and such a transfer only, and an SEI naming HLG makes the
+  stream HLG for every consumer: load, `probe(url:)` and a live reopen. Logged as
+  `[Demuxer] AE#839 ... the stream is HLG`.
+
+- **The Atmos output activator runs only on an HDMI route (#834, thanks @badrabbit).** On tvOS
+  it looped its silent Atmos stream beside an APAC programme on every route, AirPlay included. Over
+  AirPlay to a HomePod stereo pair the programme stayed silent after a pause and resume, and after a
+  second pause the picture froze too, until a seek. The activator now plays only while every output
+  port is HDMI, follows route changes, and logs `[AtmosOutputActivator] active|off on route` when
+  that verdict changes. HDMI playback is unchanged.
+
+- **A live HLS channel on the software path no longer stalls once per segment (#813).** The software
+  live join placed the picture 4 s behind the newest media, which suits a continuous TS panel but ran
+  dry before every segment of a source that delivers 10 s at a time, and the rebuffer resumed the
+  moment the late segment landed, so the stall repeated. The holdback now follows the segment length
+  (`1.5 x segment + 1 s`, 16 s on 10 s segments, at most 45 s): the join and Return to Live use it,
+  the live-edge verdict allows it plus one segment, and a rebuffer resumes once a segment plus 2 s stands ahead of the clock.
+  Continuous sources are unchanged.
+- **A container chapter seek lands on the chapter when the source does not start at 0 (#815, thanks
+  @pkajaba).** `mediaChapters` carried the container's own chapter times, while `seek(to:)` and
+  `currentTime` count from the container start, so on a source starting at 5 s every chapter seek
+  landed 5 s late. The chapters are now rebased per backend onto the seek axis, a pre-roll chapter
+  that ends before the content starts is dropped, and the software host predicts its session zero at
+  load, so a seek before the first `play()` converts on the same axis.
+- **The rewind after the load-time interlace sample is bounded (thanks @pkajaba, from #807).** The
+  sample that checks a declared interlaced field order (#232) moved the read position of the demuxer
+  the session reuses and seeked back with the plain seek, which has no deadline, so a remote source
+  that stalled there held the load. It now uses `seekBounded` with the same 5 s budget as the other
+  load-time seeks, and a rewind that does not land makes the sample inconclusive, so the declared
+  field order stands.
+- Native loopback buffered position keeps updating while paused, using the existing wall-clock sampler and the real contiguous segment frontier. Cache holes, eviction and display-axis changes remain visible without advancing playback.
+- External subtitles inherit media request headers only at the same HTTP scheme, host and effective port. Explicit subtitle headers remain authoritative, including an empty set. Primary/secondary overlays, native subtitle stores and remote-HLS sidecar renditions use the same initial-request rule; existing redirect and certificate policies are unchanged.
+- **A registered secondary subtitle keeps its identity across an audio switch (#824, thanks
+  @orut34iop).** The audio-switch rebuild restored the secondary companion through its URL only,
+  so it lost its external track id, its explicit `httpHeaders` and the `sourceStreamIndex` of a
+  multi-stream subtitle container. It now restores through the registry id the way the primary
+  track already did, and keeps the URL route for one-shot sidecars. Selecting an embedded secondary
+  track clears the old sidecar URL, `stopInternal` clears the active secondary id, and a late
+  secondary decode from an earlier load cannot publish cues or loading state into the next one.
+- **Audio on a coarse time base no longer fragments the software packet cache (#828, thanks
+  @orut34iop).** A 2048-sample WMA frame at 44.1 kHz lands on 46 or 47 ms steps, and each packet's
+  declared 46 ms left a 1 ms hole at every 47 ms step, so seeks into bytes already held refetched.
+  Packets whose codec fixes the sample count (AC-3, MPEG audio, declared AAC/E-AC-3 frame sizes,
+  non-reservoir WMA v1/v2, PCM) now carry one rational sample clock across those steps, for the
+  read-ahead frontier, `residentRanges` and seek admission alike. A missing packet, a tick of drift
+  per packet, a backward or missing timestamp and an unknown layout still leave a hole. Duration-less
+  audio keeps its successor coverage, also when the declared frame size turns out wrong.
+- **A fully prewarmed source no longer fetches its suffix again (#831, thanks @orut34iop).** When
+  the adopted head already covers the whole file, the open skipped the data connection but still
+  started the speculative `Range: bytes=-65536` tail request, so a source the warm held entirely was
+  asked for again. That request is now skipped too; a partial warm keeps its tail prefetch.
+
+### Changed
+
+- **The secondary subtitle documentation no longer says bitmap tracks are rejected (#825, thanks
+  @orut34iop).** `selectSecondarySubtitleTrack(index:)`, `secondarySubtitleCues` and
+  `docs/formats.md` still described the text-only side demuxer that #112 replaced. Embedded PGS,
+  DVB and DVD tracks already decode on the secondary channel with their own decoder, cursor and PGS
+  admission state over the shared packet store. A dual-PGS drain test now pins that: reused palette
+  and object IDs, an authored clear, off and reselect, and reconstruction after a seek. No playback
+  change.
+
+- `aetherctl play` rejects `--no-fel` and `--no-dual-layer` as stray flags. They were accepted as no-ops
+  since 7.37.0 for scripts written when `play` turned the dual-layer route on by itself.
+
+### Tests and CI
+
+- **The memory packet store's history tests no longer race the kernel (#819, thanks @yucelokan).**
+  Consumed chunks are volatile VM, so under a full suite's memory pressure the kernel could empty
+  them between a test's `pop()` and its next line, failing a cursor restore, a still walk or a
+  seek-back hit at random. An internal `kernelMayPurge: false` on `SoftwarePacketMemoryFIFO` keeps
+  that history resident at the kernel level while every count and state transition still treats it
+  as volatile, so only `purgeHistoryForTesting` empties it. The tests that re-read history use it,
+  the purge and residency tests keep real kernel purging. No change to the store in playback.
+
+- `SoftwarePacketMemoryFIFOTests` blocks a thread and now runs off the cooperative pool, so the
+  one-thread CI step cannot starve the other suites on it.
+
+## [7.44.0] - 2026-10-20
+
+### Changed
+
+- **DTS:X is decoded by FFmpeg's own `dca` decoder; LibDTSX is gone (#798).** FFmpegBuild 3.9.0 patches
+  the decoder to read the height channel set of DTS:X's standard presentation, which upstream recognises
+  but skips, and with its `x_heights` option outputs 7.1.4 with the -3 dB fold removed from the bed.
+  `DTSXObjectAudio` therefore links no library of its own, and an App Store app no longer ships
+  LibDTSX's LGPL-3.0 framework, which it could not distribute without an exception. Same
+  presentations as before (standard 7.1.4 rendered, the ones with objects play as 7.1), same priming,
+  same channel order. The output matches LibDTSX within half a 24-bit LSB, except where the folded bed
+  went past full scale: LibDTSX clipped it before removing the fold, FFmpeg's path does not. The
+  verdict now waits for up to eight frames before refusing, so a stream entered inside a peak-bit-rate
+  smoothing period is not refused on its lossy first frames.
+
+## [7.43.0] - 2026-10-20
+
+### Added
+
+- **RealMedia, feature-phone 3GP, Theora and VobSub, through FFmpegBuild 3.8.0 (FFmpegBuild#7, thanks
+  @williamliu0516).** `.rm` / `.rmvb` (RealVideo 1-4 with every RealAudio the container carries), 3GP / 3G2
+  (H.263 with AMR), `.ogv` (Theora), DVD LPCM, and local VobSub `.idx` + `.sub` sidecars as external
+  subtitle tracks. `AudioCodecCompat` names the new audio as `realAudio` and `amr` (DVD LPCM as `pcm`),
+  all bridged; the video takes the software path.
+
+### Fixed
+
+- **The persistent HTTP/1.1 HLS ingest checks FIFO headroom before every segment and key request.**
+  The gap closed in 7.40.0 only covered a clear segment whose last chunk filled the buffer; after an
+  AES-128 segment the next key and segment request still went out over the ceiling. Seek, close,
+  cancellation and a failed reader retire the wait (#832, thanks @orut34iop).
+
+### Changed
+
+- **With object rendering on and no audio track tagged with a language, TrueHD Atmos or DTS:X replaces
+  the default track.** The fallback compared the default's language and had none to compare, so a file
+  that tags nothing (Dolby's Unfold demo) opened on its E-AC-3 JOC, and a host that remembered the
+  TrueHD pick paid a second load for the switch. One tagged track keeps the old behaviour: the file
+  names its dubs, and an untagged default is not matched by guess.
+- **A VOD load produces its first segments while the panel switches into HDR or Dolby Vision (#348,
+  thanks @badrabbit).** After an HDR/DV criteria write the session start used to wait out the pre-flight
+  gate, so on a title whose first two segments took 2.0 s to cut, playback began 1.5 s after a switch that
+  had already ended. `HLSVideoEngine.start()` is now `prepare()` (open, segment plan, local server,
+  producer) plus `serve(panelIsInHDRMode:)` (the master-or-media choice), and only `serve` waits for the
+  gate, which still starts at the write, so the panel is never read earlier than before. Measured on an
+  Apple TV 4K with a Dolby Vision Profile 8.1 title: server up 74 ms after the write, every segment cut
+  inside the 2.9 s switch, `playing` 218 ms after it ended. Live loads and Profile 7 sources that may take
+  the dual-layer route keep the serial order, and a hardware-decode refusal taken mid-switch is asked
+  again once the panel has settled. The cap line no longer claims "most likely already in the target
+  mode" for a switch the gate saw start.
+
+## [7.42.0] - 2026-10-19
+
+### Added
+
+- **`LoadOptions.displayCriteriaOwner` (`.engine` / `.avKit` / `.host`), AE#842.** `suppressDisplayCriteria`
+  means "AVKit writes the criteria", and every branch behind it waits for that write: a host that keeps
+  the panel in its system format (or writes rate-only criteria itself) had no correct setting and paid up
+  to a second of play-gate wait per HDR or Dolby Vision title for a write that never came, with the
+  engine's panel readout switched off. `.host` writes nothing, takes the brief budget, reads the panel
+  and still waits out a switch it observes. `suppressDisplayCriteria = true` keeps meaning `.avKit`.
+
+### Fixed
+
+- **`confirmAtmos` no longer starves the video pump on an origin limited to one request.** Each
+  E-AC-3 track's pass is a second handle on the source, and at `maxConcurrentSourceRequests = 1`
+  every read it made took the pump's only slot: an integrator measured stalls every ten seconds on a
+  4K remux with 17 E-AC-3 tracks behind an Xtream origin that answers a second connection with 509,
+  and the pass never finished. The pass is now declined there, and for `sequentialOrigin` and
+  `heldSourceConnection`, the same set the I-frame rendition declines; the budget is re-checked
+  before every track, so a limit learned from refusals mid-session stops it too. The
+  `[AtmosConfirmation]` line now also appears for a stopped pass, with how many tracks it reached.
+
+## [7.41.0] - 2026-10-19
+
+### Added
+
+- **Dolby Vision Profile 5 / 10.0 scrub previews in colour, drawn by the system compositor.**
+  `scrubPreviewDrawsInView`, `showScrubPreview(atSeconds:in:)` and `AetherScrubPreviewView`: the
+  keyframe that opens a resident segment becomes a one-sample fMP4, and a muted `AVPlayer` inside
+  the view shows it, so the colour comes from the same place as the playing picture rather than from
+  a reshaping of our own. Needs no `DolbyVisionStillReshaping` trait. Positions outside the resident
+  window read the segment's keyframe off the source with a side demuxer, as the I-frame rendition
+  does, and get the same gates (no read on a sequential, serial or held-connection origin, waits out a
+  seek, skips superseded requests); before, the preview only covered the cached span around the
+  playhead. 26 to 45 ms per new position on an M1, 18 to 25 ms for one read off a local source,
+  byte-identical to the source's keyframe; verified next to 4K Profile 5 playback on an Apple TV.
+- **The held picture of an audio switch covers Dolby Vision Profile 5 / 10.0 without the reshaping
+  trait.** The resident segment's video becomes a standalone file, and a player on the bound surface
+  seeks it frame-exactly to the outgoing position, so the compositor colours the held frame. It was
+  skipped before. On three Profile 5 clips the held frame is pixel-identical to the paused outgoing
+  picture, up in 165 to 220 ms on an M1. The offset adds the segment's B-frame delay; without it the
+  frame lands two frames early.
+
+## [7.40.1] - 2026-10-18
+
+### Fixed
+
+- **TrueHD Atmos that starts after the probe window is rendered again.** A track whose first packet
+  lies beyond `find_stream_info`'s budget (John Wick: Chapter 2 carries TrueHD from 22 s, 45.8 MB
+  into the file) kept an unknown profile, so `objectAudioRendering` played it through the channel
+  bridge. With rendering requested and the profile unknown, the engine now reads the track's major
+  sync where the first producer starts, the same test mlpdec applies (four substreams, top bit of
+  `substream_info`), and renders it when it is Atmos. Costs 679 ms and 44.7 MB of held packets from
+  the start of that file at the tvOS probe budget, 30 ms on a resume; nothing for any other track.
+- **Persistent HTTP/1.1 body reads keep the caller's isolation (#837, thanks @brandomoore).**
+  Swift 6.4 can reject the cancellation-handler read in a consuming app with "sending 'current'
+  risks causing data races". `readChunk` and `nextBytes` now inherit the caller's isolation, so the
+  chunked decoder stays single-consumer without an unchecked `Sendable` conformance.
+
+## [7.40.0] - 2026-10-18
+
+### Changed
+
+- **TrueHD Atmos is built from the stream's own channel presentation.** With `objectAudioRendering`
+  in a `TrueHDObjectAudio` build, every output is now a share of the 7.1 (or 5.1) bed Dolby renders
+  the same mix into, split per frequency bin between floor and heights by where the objects' energy
+  lies (`BedSplitter`). No object signal is mixed into an output; the objects are decoded without
+  their matrix interpolation (LibTrueHD 3.0 no longer compiles the interpolating decode at all) and
+  taken as points at their positions, without size, snap, zones, screen anchoring, the elevation
+  switch or metadata ramps. Measured against the previous exact render through Apple's APAC decode on
+  72 windows of six films, 0.35 % of the energy lands on another speaker (median of the windows with
+  heights), Dolby's Unfold demo 3.3 %, the heights within about a dB. A 5.1 bed now covers a 7.1
+  layout's rears as well as its sides, and the split's 2048-frame latency is drained at the end of
+  input and before every encoder restart. The exact render it is measured against is only built with
+  the measurement-only `TrueHDReferenceRender` trait (#731).
+- **DTS:X plays its standard presentation only, into 7.1.4 or 9.1.6.** With LibDTSX 3.0, the heights
+  are removed from the 7.1 bed by the standard's own constant (each at -3 dB in the speaker under it)
+  instead of the gains the stream's metadata states, which is no longer read; on twelve DTS:X tracks
+  every frame stated exactly that fold, so the output is bit-identical. The alternate presentations,
+  which carry objects (some IMAX-labelled streams), are refused and play as 7.1, and DTS:X is rendered
+  only into the two layouts that carry the bed and the four heights one to one; any other layout
+  keeps the channel bridge. The object position mapping and the fold renderer are gone (#744).
+- **The documentation no longer says TrueHD Atmos objects are always lost.** The Known limitations
+  entry in `docs/formats.md`, the `AudioDelivery.bridged` reference and the channel bridge's notes
+  predate `objectAudioRendering` (#731) and said objects and heights never survive. They now say the
+  channel bridge drops them and `objectAudioRendering = .apac(layout)` keeps them, in a build with the
+  `TrueHDObjectAudio` / `DTSXObjectAudio` traits (off by default since 7.39.0), rendered into a speaker
+  bed as lossy APAC that tvOS sends to an Atmos receiver as Dolby MAT. No behaviour change (#802,
+  thanks @aravindhsampath).
+
+### Added
+
+- **`LiveTelemetry.objectAudio`: how many Atmos objects play, and how many overhead.** While
+  `objectAudioRendering` plays TrueHD Atmos or DTS:X (a build with the `TrueHDObjectAudio` /
+  `DTSXObjectAudio` traits; without them it stays nil), the 1 Hz snapshot carries an
+  `ObjectAudioActivity`: the bed it renders into, the objects the presentation declares, how many of
+  them play and how many sit above ear level, and its bed channels on height speakers (DTS:X's standard
+  heights). These are the counts the `bed levels` log line has carried since #731, for a host's stats
+  panel without reading the log; they sit behind a lock of their own, so the sampler never waits for a
+  decode. `aetherctl play` takes `--atmos-bed` as `serve` does and prints them: on a TrueHD Atmos
+  remux, `obj=13/13 up=4 bed=7.1.4`.
+
+### Fixed
+
+- **The persistent HTTP/1.1 ingest holds the next segment request whenever the buffer is full.**
+  Backpressure applied only while a segment still had bytes left over, so a segment whose last chunk
+  was taken just under the 16 MB ceiling sent the next request at once, past the ceiling. The
+  producer now waits for room between segments either way (#732; a test pins the case, and the
+  timing test that caught it on CI no longer flakes).
+- **A slow origin no longer fails large HEVC-in-TS segments on the persistent HTTP/1.1 ingest.**
+  Segment bodies stream to the demuxer instead of downloading whole first, the 45 s ceiling covers
+  only the wait for a response head, and a body ends on its size or on 30 s without a byte (typed
+  `.stalled` rather than the socket's Code=60). One request per origin at a time, so a seek never
+  opens a second connection beside a response in flight (#732).
+- **The relay admits only http and https origins.** A playlist naming another scheme (`file://`
+  included) answers 404 instead of reaching URLSession.
+
+## [7.39.0] - 2026-10-17
+
+**Not built by default any more: TrueHD Atmos and DTS:X object rendering, Profile 7 FEL dual-layer
+composition, and Dolby Vision Profile 5 / 10.0 stills.** Each is now an optional component behind a
+package trait that is off by default (`TrueHDObjectAudio`, `DTSXObjectAudio`, `DualLayerDolbyVision`,
+`DolbyVisionStillReshaping`). A host that used any of them re-enables it on its package dependency:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.39.0",
+         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
+```
+
+or in Xcode's package dependency editor (XcodeGen cannot set traits; see
+[README › Optional components](README.md#optional-components)). These components may be subject to
+third-party patent licensing; integrators who enable them are responsible for their own licensing.
+
+### Changed
+
+- **Optional components, off by default.** Without its trait a component is not compiled, and a library
+  behind it is neither linked nor resolved. The public API is unchanged and the options become no-ops:
+  `objectAudioRendering` keeps the codec on the channel bridge, and `preferDualLayerDolbyVision` keeps a
+  Profile 7 source on the native route (the route line reads `not taken (built without the
+  DualLayerDolbyVision trait)`, and `reloadAtCurrentPosition(applying:)` no longer refuses flipping it on a
+  custom-reader session, since nothing would move). The two audio traits used to be on by default; the
+  dual-layer path (`DualLayerVideoDecoder`, the Metal composer, `OrderedDelivery`, the per-frame display
+  metadata and the FEL diagnostics) and the still reshaping (`DolbyVisionStillConverter`) were always
+  compiled.
+- **A Dolby Vision Profile 5 / 10.0 source has no stills without `DolbyVisionStillReshaping`.** Its planes
+  are IPT, which the standard still path would read as YCbCr (the green / magenta picture of #103), so it
+  yields none: `scrubThumbnail` and `scrubPreviewFrame` return nil without decoding anything,
+  `supportsCacheBackedStills` is false, the I-frame rendition is absent (`dolbyVisionStillsNotBuiltIn`),
+  an audio switch holds no picture, and the session log says so once. Playback is unaffected, as are
+  Profile 8.x, HDR10, HLG and SDR stills.
+
+### Added
+
+- **`AetherEngine.OptionalComponent`**, with `isBuiltIn` and `traitName` per component, so a host can
+  hide a setting its build would ignore.
+- **`Probes/AllTraits`**, a consumer package that enables every trait; CI builds it for tvOS and iOS, runs
+  the suite with all traits (including on a one-thread cooperative pool) and builds a release `aetherctl`
+  with them. The Dolby Vision pulse probe links the engine through `PulseEngine/` with
+  `DualLayerDolbyVision` and refuses to run its FEL arms without it.
+- `aetherctl feltest`, `play --cycle-el` and `play --dv-pin` need `DualLayerDolbyVision` and exit 64
+  without it; the `@_spi(Diagnostics)` FEL tooling (`felDecodeProbe`, `FelProbeResult`,
+  `felResidualEnabled`, `armDolbyVisionPinTest` and the pin queries) exists only with it.
+
+## [7.38.1] - 2026-10-16
+
+### Fixed
+
+- **The HEVC-in-MPEG-TS HLS VOD ingest under `heldSourceConnection` no longer fails on a slow origin.**
+  A segment body now reaches the demuxer as it arrives instead of after its last byte, the carriage
+  probe reads the first segment's head and hands the still open response to the producer instead of
+  downloading it whole, and the 45 s ceiling on a whole exchange is gone: it now covers only the wait
+  for a response head, and a body is limited by its size and by 30 s without a byte, so a large
+  segment that keeps arriving is never cut off. That ceiling surfaced as `NSPOSIXErrorDomain Code=60`,
+  which named neither cause; a stall now says `body stalled, no bytes for 30 s after <received>/<expected>
+  bytes in <elapsed> s`. A seek that abandons a body with at most 2 MB left, at a rate that brings it in within 3 s,
+  drains it and keeps the connection, and the next request waits for that instead of opening a
+  second connection beside it; a larger or slower remainder closes it at once. With the FIFO full the current segment is read to its
+  end, so a paused session leaves the connection idle between two requests, not mid-body. Measured on a
+  loopback origin at 200 KB/s with 11.6 MB segments: before, the probe died at 45.1 s with `Code=60` and
+  the session left the ingest; after, the ingest held and played. The h2 path's 45 s resource timeout
+  is lifted the same way (#732, thanks @qoli for the paired device runs).
+
+- **The package compiles in Release with Xcode 26 again.** `FelResidualMeasure` (the
+  `AETHER_FEL_MEASURE` diagnostic from 7.37.0) formatted its luma-band line inside the closure it
+  hands its queue, as one `+` chain of three `map`/`joined` expressions, and Xcode 26.3's type checker
+  gave up on that closure ("unable to type-check this expression in reasonable time", x86_64 Release
+  archive), so a host archiving a universal macOS app on Xcode 26 could not build 7.37.0 or 7.38.0.
+  Xcode 27 checked it in time, which is what this repository's CI runs. The closure now calls a
+  function, and the three parts are bound to typed constants first. No behaviour change.
+
+## [7.38.0] - 2026-10-16
+
+### Changed
+
+- **A live stream on the software path starts near the newest media.** A continuous live stream over
+  HTTP opens with a burst of what the origin holds of the channel (8 to 18 s on one IPTV panel, at
+  link speed), and the software host armed its clock on that burst's first packet. Nothing on the
+  software path catches up, so the picture then ran the whole burst behind the broadcast for as long
+  as the channel played: measured 17 s behind on a channel whose native-path session ran 6 s behind.
+  The live feeder now waits for the burst to land (the ring growing no faster than real time over a
+  quarter second, from 0.3 s on, or 1.5 s at most) and starts 4 s behind the newest media, on a
+  keyframe; a source that delivers in real time, or a ring too shallow to be worth a later keyframe,
+  still starts from its first packet. The media behind the start stays in the rewind ring.
+  `SoftwareLiveJoinPolicy`, `SoftwareLiveJoinPlacementTests`.
+
+- **LibDTSX 2.0.0: `DTSX.framework` is a dynamic framework the app embeds, under the LGPL.** The
+  `dca` crate it compiles in is labelled Apache-2.0 but is a port of FFmpeg's LGPL-2.1-or-later
+  `dca` decoder, so the built library is LGPL-3.0-or-later and now ships, like the FFmpeg
+  frameworks, as a replaceable framework in `YourApp.app/Frameworks/`, exporting only the C API.
+  Same decoder, bit-identical output. A host with the `DTSXObjectAudio` trait on ships LibDTSX's
+  `NOTICE` and `LICENSES/` with the app (#798, thanks @tweakapps and @cmcpherson274).
+- **LibTrueHD 2.3.1:** `truehd_atmos_version_string()` names the `truehd` commit actually built in;
+  it still named an older one. Same decoder (LibTrueHD#2, thanks @cmcpherson274).
+
+### Fixed
+
+- **A software start or seek no longer runs the clock while the decoder works up to the target
+  (#800).** The software host started its clock the moment the first packet went in (video-only) or
+  the first audio decoded, while the video decoder was still working from the keyframe before the
+  target up to it, so the first frames reached the layer late and were dropped: a 4K HEVC title
+  with no audio and 10 s GOPs ran its clock 0.9 s ahead of the first frame after a switch onto the
+  software path and dropped 5 to 7 frames on an Apple TV 4K, a 1080p H.264 title with audio 0.3 s
+  and 3. Before 7.32.2 the #724 re-anchor hid this by starting the clock a whole GOP behind. The
+  video preroll #774 added for the Profile 7 FEL route now holds every VOD software route: the
+  clock waits at rate 0 until frames from its position on are in the layer
+  (`SampleBufferRenderer.videoPrerollSeconds`, 0.125 s) and then starts `prerollStartLead` from
+  now. A live stream off the FEL route still starts at once. Measured with `aetherctl play --sw` on
+  a 4K 10 s GOP fixture: `preroll ready after 889 ms; starting at t=36.600`, where the clock used to
+  start at once. Reported with measurements by @cmcpherson274. `VideoPrerollTests`.
+
+- **A live reconnect whose audio returns first no longer publishes a picture twice.** When the
+  returning connection's audio opened the replay check before the outgoing connection's last pictures
+  left the PES parser (a flagged picture and its unflagged, truncated successor), those pictures were
+  not part of the held boundary. The returning copy of the first one committed the batch, the
+  returning copy of the truncated one arrived after it, and the producer published both and bumped the
+  second DTS, which poisons Apple's reference chain until the next IDR. Measured on one reconnect in
+  three on an Apple TV (AE#747, `superseded=0`). Such a tail now raises the retained video frontier,
+  bounded like a held damaged boundary, so the returning copies land in the verified batch and replace
+  the outgoing ones. `LivePacketReplayGuardTests`.
+
+- **A live stream read off its URL and refused for a while keeps its session.** The continuous
+  MPEG-TS form of an IPTV channel is one connection for as long as it plays, and a connection-limited
+  panel answers its reconnects with 509 while another device on the account holds the last slot, for
+  seconds to tens of seconds. The reader climbed its 0.5, 1, 2, 4, 8 s ladder, gave up after six
+  refusals, and each refusal armed the origin's request pacer (a quiet of up to 15 s, with each
+  request waiting up to 10 s on it), which the reload after it then waited out. A live stream's
+  429/503/509 is now asked again every second, or after the origin's Retry-After up to 5 s, for up to
+  60 s, the way the live HLS ingest asks for its playlist (#778); its refusals arm no pacer and lower
+  no budget, and the books still say the origin refused, so the revive arm tells metered from lost. A
+  live open the origin answers with a status fails typed with that status at once
+  (`AVIOReaderError.httpStatus`, `sourceRateLimited` or `sourceRefused` at the host), where the read
+  loop used to spend the open budget on the same request and hand back an untyped read failure.
+  A server error that is not a refusal (a 500 or 502 while a tuner spins up) is asked once more
+  first, as the read loop did. `LiveStreamRefusalRetryTests`.
+- **Profile 7 FEL chroma residual is sampled where the base chroma sits.** With a quarter-resolution
+  enhancement layer (1080p under 4K), the chroma kernel read the enhancement chroma at texel centres,
+  a quarter of an EL chroma texel up and to the left of the co-sited (top-left) chroma location HDR
+  streams use. Base chroma sample n now reads EL texel n / 2, DoViBaker's phase. Same-resolution
+  enhancement layers and luma are unchanged.
+
+### IPTVX fork
+
 - Integrated complete upstream 7.37.0 with iOS/tvOS 16 and macOS 14 retained. Swift tools 6.1 preserves upstream optional object-audio traits; existing compatible binary fork pins remain unchanged. The modern arrival-order handover runs on iOS/tvOS 18, macOS 15 and visionOS 1.1 or later; older systems retain PTS-ordered display-layer handover with a preroll budget that excludes frames still held for reordering, preventing a high-frame-rate startup/seek timeout. Shared decoder creation retains OS availability guards for both initial opens and recovery.
 
 - Integrated the complete upstream 7.36.0 release while retaining iOS/tvOS 16 and macOS 14. The fork uses complete FFmpegBuild 3.7.1 binaries with compatible framework metadata and rebuilt LibTrueHD 2.3.0 / LibDTSX 1.0.1 archives for the retained platform floors. Decoder recovery shares the same availability guards as initial session creation; object-audio encoding remains OS-26-only with ordinary audio fallbacks on older systems.

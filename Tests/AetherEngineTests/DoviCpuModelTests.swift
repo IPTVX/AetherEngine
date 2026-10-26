@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -109,11 +111,13 @@ struct DoviCpuModelTests {
             !p.flags.contains(.disableResidual) && n.nlqMethod == .linear && n.nlqScale != 0
         }
 
-        /// Bilinear sample of an enhancement-layer plane at the centre of base-layer pixel (x, y) of a
-        /// plane `baseW` x `baseH`, as a 10-bit code (the word is UNORM x 65535 / 64).
-        func elCode(_ el: Plane, comp: Int, x: Int, y: Int, baseW: Int, baseH: Int) -> Int {
-            let u = (Double(x) + 0.5) / Double(baseW) * Double(el.width) - 0.5
-            let v = (Double(y) + 0.5) / Double(baseH) * Double(el.height) - 0.5
+        /// Bilinear sample of an enhancement-layer plane at base-layer sample (x, y) of a plane `baseW` x
+        /// `baseH`, as a 10-bit code (the word is UNORM x 65535 / 64). Luma samples sit at pixel centres;
+        /// chroma (`cosited`) is co-sited with the top-left luma sample, so the two grids share sample 0.
+        func elCode(_ el: Plane, comp: Int, x: Int, y: Int, baseW: Int, baseH: Int, cosited: Bool = false) -> Int {
+            let centre = cosited ? 0.0 : 0.5
+            let u = (Double(x) + centre) / Double(baseW) * Double(el.width) - centre
+            let v = (Double(y) + centre) / Double(baseH) * Double(el.height) - centre
             let x0 = Int(floor(u)), y0 = Int(floor(v))
             let fx = u - Double(x0), fy = v - Double(y0)
             func w(_ xx: Int, _ yy: Int) -> Double {
@@ -166,12 +170,12 @@ struct DoviCpuModelTests {
             if !p.flags.contains(.disableResidual) {
                 if nlqActive(p.nlqCb) {
                     a.active = true
-                    a.elCode = elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height)
+                    a.elCode = elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true)
                     a.residual = inverseNlq(p.nlqCb, a.elCode)
                 }
                 if nlqActive(p.nlqCr) {
                     b.active = true
-                    b.elCode = elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height)
+                    b.elCode = elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true)
                     b.residual = inverseNlq(p.nlqCr, b.elCode)
                 }
             }
@@ -199,10 +203,10 @@ struct DoviCpuModelTests {
             var vcr = denormalize(predict(p.polyCr, p.mmrCr, blValue: cr, y: yn, u: un, v: vn))
             if !p.flags.contains(.disableResidual) {
                 if nlqActive(p.nlqCb) {
-                    vcb += inverseNlq(p.nlqCb, elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height))
+                    vcb += inverseNlq(p.nlqCb, elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true))
                 }
                 if nlqActive(p.nlqCr) {
-                    vcr += inverseNlq(p.nlqCr, elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height))
+                    vcr += inverseNlq(p.nlqCr, elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true))
                 }
             }
             let m = Int(p.vdrMax)
@@ -439,3 +443,4 @@ struct DoviCpuModelTests {
         }
     }
 }
+#endif

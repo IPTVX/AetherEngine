@@ -259,7 +259,8 @@ struct SWClockAnchorPolicyTests {
         for resolution in [correction.clockResolution, aheadSample] {
             let sessionZero = SWClockAnchorPolicy.reanchoredSessionZero(
                 initialSessionZeroSeconds: initialZero,
-                additionalOffsetSeconds: resolution.sessionZeroSeconds
+                additionalOffsetSeconds: resolution.sessionZeroSeconds,
+                initialClockSeconds: sourceAnchor
             )
             let publishedPosition = resolution.anchorSeconds - sessionZero
 
@@ -270,6 +271,29 @@ struct SWClockAnchorPolicyTests {
                 sessionZeroSeconds: sessionZero
             ) - resolution.anchorSeconds) < 1e-9)
         }
+    }
+
+    // Failure modes:
+    // - A cold load predicts its source origin before arming and counts that origin twice.
+    // - A resume discards the origin already applied to its nonzero source-axis clock.
+
+    /// A cold-load prediction informs the host but has not yet moved its zero clock to the source axis.
+    @Test("a cold-load clock re-anchor replaces the predicted origin without doubling it")
+    func test_reanchoredSessionZero_coldLoad_usesResolvedOrigin() {
+        // Arrange — the 7.47 loader predicts a 600-second source origin before first play.
+        let predictedZero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: 600)
+        let resolution = SWClockAnchorPolicy.resolve(initialSeconds: 0, firstSampleSeconds: 600.25)
+
+        // Act — the cold clock starts at zero, so its resolved offset is already the whole origin.
+        let sessionZero = SWClockAnchorPolicy.reanchoredSessionZero(
+            initialSessionZeroSeconds: predictedZero,
+            additionalOffsetSeconds: resolution.sessionZeroSeconds,
+            initialClockSeconds: 0
+        )
+
+        // Assert — first playback publishes the beginning rather than a negative source origin.
+        #expect(sessionZero == 600.25)
+        #expect(resolution.anchorSeconds - sessionZero == 0)
     }
 
     // MARK: - Carrying a seek target back to the source axis

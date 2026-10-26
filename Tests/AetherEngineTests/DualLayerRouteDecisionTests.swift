@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: without it every Profile 7 decision is `notBuiltIn`.
+#if DualLayerDolbyVision
 import Testing
 import AetherLibavcodec
 @testable import AetherEngine
@@ -28,6 +30,20 @@ struct DualLayerRouteDecisionTests {
         let decision = decide()
         #expect(decision.isTaken)
         #expect(decision.logLine == "[AetherEngine] DV P7 dual-layer route: taken (el_type=FEL, 3840x2160@23.976, budget 80%)")
+    }
+
+    @Test("a UHD Blu-ray with its enhancement layer on its own PID keeps the native route, FEL or not")
+    func foldedDiscKeepsTheNativeRoute() {
+        let decision = DualLayerRouteDecision.decide(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: 7, dolbyVisionHandling: .automatic,
+            preferDualLayerDolbyVision: true, isLive: false, isSourceSeekable: true,
+            canHardwareDecode: { true }, elType: "FEL", geometry: uhd24, enhancementLayerInPackets: false)
+        #expect(decision == .notTaken(.enhancementLayerNotInPackets))
+        #expect(decision.logLine?.contains("own PID") == true)
+        #expect(DualLayerRouteDecision.blockingReasonBeforeProbe(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: 7, dolbyVisionHandling: .automatic,
+            preferDualLayerDolbyVision: true, isLive: false, isSourceSeekable: true,
+            canHardwareDecode: { true }, enhancementLayerInPackets: false) == .enhancementLayerNotInPackets)
     }
 
     @Test("MEL never takes the route, with the flag on")
@@ -211,3 +227,4 @@ struct DualLayerRouteDecisionTests {
                                               settledGeneration: 3, stopRequested: false))
     }
 }
+#endif

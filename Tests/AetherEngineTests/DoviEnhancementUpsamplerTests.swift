@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Foundation
 import Testing
 import Metal
@@ -44,6 +46,42 @@ struct DoviEnhancementUpsamplerTests {
         }
     }
 
+    @Test("EL chroma is co-sited with the base chroma: even samples land on EL texels, odd ones half way")
+    func chromaIsCosited() throws {
+        // Quarter-resolution EL: EL chroma 16 x 4 under base chroma 32 x 8. Cb ramps across columns, Cr down
+        // rows, 16 codes per EL texel. Base chroma sample n sits at EL texel n / 2 (DoViBaker's
+        // upsampleChromaEven / Odd), so even samples read one texel exactly; a centre-aligned fetch would
+        // read n / 2 - 0.25 and land 4 codes low on every even sample past the edge.
+        let composer = try #require(DoviFelComposer())
+        var p = DoviGpuEdgeCaseTests.params()
+        p.ditherMode = .debugRawVDR
+        let bl = try #require(H.makeBuffer(width: 64, height: 16))
+        let el = try #require(H.makeBuffer(width: 32, height: 8))
+        H.fillPlane(bl, plane: 0, components: 1) { _, _, _ in 512 }
+        H.fillPlane(bl, plane: 1, components: 2) { _, _, _ in 512 }
+        H.fillPlane(el, plane: 0, components: 1) { _, _, _ in 512 }
+        H.fillPlane(el, plane: 1, components: 2) { x, y, c in 600 + 16 * (c == 0 ? x : y) }
+        let out = try #require(composer.compose(baseBuffer: bl, enhancementBuffer: el, params: p))
+        let planes = DoviTestSupport.rawVDR(out, chromaOnly: true)
+        let cb = planes[1], cr = planes[2]
+
+        /// EL code at base chroma index n along an axis of `elCount` texels, clamped at the far edge.
+        func elAt(_ n: Int, _ elCount: Int) -> Double { 600.0 + 16.0 * min(Double(n) / 2.0, Double(elCount - 1)) }
+        /// 2048 + ((2r - 1) * 2048) >> 12 = 2048 + r - 1 for the positive r used here.
+        func vdr(_ e: Double) -> Int { 2048 + Int(e.rounded()) - 512 - 1 }
+
+        for y in 0..<8 {
+            for x in 0..<32 {
+                let tol = (x % 2 == 0) ? 0 : 1
+                let gotCb = cb[y * 32 + x], wantCb = vdr(elAt(x, 16))
+                #expect(abs(gotCb - wantCb) <= tol, "Cb (\(x), \(y)): \(gotCb) vs \(wantCb)")
+                let tolR = (y % 2 == 0) ? 0 : 1
+                let gotCr = cr[y * 32 + x], wantCr = vdr(elAt(y, 4))
+                #expect(abs(gotCr - wantCr) <= tolR, "Cr (\(x), \(y)): \(gotCr) vs \(wantCr)")
+            }
+        }
+    }
+
     @Test("a step edge in the EL is blended, never overshot, and the plateaus are exact")
     func stepHasNoRinging() throws {
         let low = 600, high = 700
@@ -60,3 +98,4 @@ struct DoviEnhancementUpsamplerTests {
         for gx in 1..<64 { #expect(row[gx] >= row[gx - 1], "monotone at \(gx)") }
     }
 }
+#endif

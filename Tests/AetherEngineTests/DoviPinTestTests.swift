@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG && DualLayerDolbyVision
 import Testing
 import Foundation
 @testable import AetherEngine
@@ -45,13 +45,13 @@ struct DoviPinTestTests {
     func thresholdRuleGivesUpAfterScanLimit() throws {
         let nal = DoviComposedFrameRpuTests.felNAL
         let hit = DoviPinTest(emit: { _ in })
-        hit.configure(try #require(DoviPinTest.parse(spec: "maxpq>=0,period:2")))
+        hit.configure(DoviPinTest.parse(spec: "maxpq>=0,period:2"))
         _ = hit.substitute(nal)
         #expect(hit.isPinned, "the fixture must parse, or the rest of this test proves nothing")
 
         let sink = Sink()
         let pin = DoviPinTest(emit: { sink.append($0) })
-        pin.configure(try #require(DoviPinTest.parse(spec: "maxpq>=4096,period:2")))
+        pin.configure(DoviPinTest.parse(spec: "maxpq>=4096,period:2"))
         for _ in 1..<DoviPinTest.thresholdScanLimit { _ = pin.substitute(nal) }
         #expect(pin.isArmed)
         _ = pin.substitute(nal)

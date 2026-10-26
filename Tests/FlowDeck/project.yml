@@ -24,6 +24,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.ios
         SWIFT_VERSION: 6.0
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) TrueHDObjectAudio DTSXObjectAudio DolbyVisionStillReshaping"
   AetherEngineTVOSTests:
     type: bundle.unit-test
     platform: tvOS
@@ -40,6 +41,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.tvos
         SWIFT_VERSION: 6.0
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) TrueHDObjectAudio DTSXObjectAudio DolbyVisionStillReshaping"
   AetherEngineMacTests:
     type: bundle.unit-test
     platform: macOS
@@ -56,6 +58,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: app.iptvx.aether-validation.mac
         SWIFT_VERSION: 6.0
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) TrueHDObjectAudio DTSXObjectAudio DolbyVisionStillReshaping"
 schemes:
   AetherEngineiOSTests:
     build:

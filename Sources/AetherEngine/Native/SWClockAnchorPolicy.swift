@@ -106,14 +106,17 @@ enum SWClockAnchorPolicy {
 
     /// Preserves a resume's source origin when a first sample moves the clock anchor forward.
     ///
-    /// Anchor policies return an additional offset relative to the load anchor. A cold load
-    /// starts at zero, but an offset-origin resume has already established its session zero
-    /// before decoding; replacing that baseline would publish source timestamps as positions.
+    /// Anchor policies return an offset relative to the load clock. A cold load leaves that
+    /// clock at zero even though it predicts a source origin for chapter and thumbnail queries;
+    /// its resolved offset already contains the whole origin. A resume has moved its clock onto
+    /// the source axis, so it must retain the baseline applied before decoding.
     static func reanchoredSessionZero(
         initialSessionZeroSeconds: Double,
-        additionalOffsetSeconds: Double
+        additionalOffsetSeconds: Double,
+        initialClockSeconds: Double
     ) -> Double {
-        initialSessionZeroSeconds + additionalOffsetSeconds
+        let appliedZero = initialClockSeconds == 0 ? 0 : initialSessionZeroSeconds
+        return appliedZero + additionalOffsetSeconds
     }
 
     /// Converts a session-axis position into the source axis.

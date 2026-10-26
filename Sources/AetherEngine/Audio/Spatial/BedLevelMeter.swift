@@ -1,13 +1,16 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Accelerate
 import Foundation
 
-/// Per-channel levels of the rendered bed, for the session log.
+/// Per-channel levels of the rendered bed, for the session log, and the object counts behind them,
+/// which `LiveTelemetry.objectAudio` also publishes (`activity`).
 ///
 /// A report that the heights or the LFE are missing can only be placed if the log says what the
 /// engine handed AVPlayer. Level here means the encoder was given that channel's sound, so a height
 /// heard from the floor speakers lost it after this point. Silence here is a lead, not a verdict: the
 /// object counts come from the metadata (gain and position), and an elevated object can still be
-/// silent or snap to a floor speaker.
+/// silent.
 ///
 /// Measured on the planes the encoder is fed, gap-fill silence included, because that is what was
 /// sent. The first window after a start or a seek closes after `firstWindowSeconds`, so a short test
@@ -36,6 +39,9 @@ struct BedLevelMeter {
     /// at all still reports what is playing.
     private var activeObjects = 0
     private var elevatedObjects = 0
+    /// What the current configuration declares, set when it arrives.
+    private var configuredObjects = 0
+    private var heightBedChannels = 0
     private var maxActiveObjects = 0
     private var maxElevatedObjects = 0
 
@@ -53,14 +59,17 @@ struct BedLevelMeter {
         peaks = Array(repeating: 0, count: layout.channelCount)
     }
 
-    /// Count the objects the metadata has playing, and how many of them sit above ear level with
-    /// elevation allowed. A new object configuration forgets the old elements' states; its first
+    /// Count the objects the metadata has playing, and how many of them sit above ear level (with
+    /// elevation allowed, in the measurement reference, the only build that reads that switch). A
+    /// new object configuration forgets the old elements' states; its first
     /// update restates every element.
     mutating func observe(roles: [ObjectAudioRole], updates: [ObjectAudioMetadataUpdate],
                           configurationChanged: Bool = false) {
         if configurationChanged || elementStates.count != roles.count {
             elementStates = Array(repeating: nil, count: roles.count)
             lfeIndices = roles.indices.filter { roles[$0] == .lfe }
+            configuredObjects = roles.filter { $0 == .object }.count
+            heightBedChannels = roles.filter { if case .bed(let speaker) = $0 { speaker.isHeight } else { false } }.count
             // A configuration with no objects sends no object metadata; the old counts must not hold.
             activeObjects = 0
             elevatedObjects = 0
@@ -74,11 +83,22 @@ struct BedLevelMeter {
             for (index, role) in roles.enumerated() where role == .object {
                 guard let state = elementStates[index], state.gain > 0 else { continue }
                 activeObjects += 1
+                #if TrueHDReferenceRender
                 if state.position.z > 0, !Self.heightSpeakers.isSubset(of: state.excluded) { elevatedObjects += 1 }
+                #else
+                if state.position.z > 0 { elevatedObjects += 1 }
+                #endif
             }
             maxActiveObjects = max(maxActiveObjects, activeObjects)
             maxElevatedObjects = max(maxElevatedObjects, elevatedObjects)
         }
+    }
+
+    /// The counts as of the latest update, for `LiveTelemetry.objectAudio`.
+    var activity: ObjectAudioActivity {
+        ObjectAudioActivity(
+            layout: layout, objects: configuredObjects, activeObjects: activeObjects, elevatedObjects: elevatedObjects,
+            heightChannels: heightBedChannels)
     }
 
     /// Measure the LFE elements' combined input for one decoded block (one plane per role).
@@ -183,3 +203,4 @@ struct BedLevelMeter {
         amplitude > 0 ? String(format: "%.1f", 20 * log10(amplitude)) : "-inf"
     }
 }
+#endif

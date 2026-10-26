@@ -10,8 +10,12 @@ import Foundation
 /// in place of the lossless 7.1, which is why this is the host's choice and not the engine's.
 ///
 /// Applies to TrueHD sources FFmpeg identifies as Atmos (profile 30) and to DTS-HD Master Audio that
-/// LibDTSX confirms as DTS:X on its first frames, at 48 kHz, and only on OS 26 and later, where the
+/// decodes as DTS:X in its standard presentation on its first frame, at 48 kHz, and only on OS 26 and later, where the
 /// APAC encoder API exists. Everything else keeps `audioBridgeMode`.
+///
+/// The renderer is an optional component: TrueHD needs the `TrueHDObjectAudio` package trait and DTS:X
+/// the `DTSXObjectAudio` trait, both off by default. Without a codec's trait `.apac` is a no-op for it
+/// (`AetherEngine.OptionalComponent.isBuiltIn` answers which are in a build).
 public enum ObjectAudioRendering: Equatable, Sendable {
     case off
     /// Render into `layout`, which should match the speakers the receiver actually drives.

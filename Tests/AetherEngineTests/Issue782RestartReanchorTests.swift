@@ -11,6 +11,13 @@ struct Issue782RestartReanchorTests {
 
     private static let chunk = 256 * 1024
 
+    /// The detour fetch's 4 s interactive budget is a wall clock: on a loaded runner a 4 MB block
+    /// missed it, fell through to the rescue reconnect AT the landing, and the parse-read assertions
+    /// read that as the AE#782 anchor. The policy under test is where the read goes, not how fast.
+    private func makeReader(_ server: ThrottledOriginServer) -> AVIOReader {
+        AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!, detourFetchBudget: 30)
+    }
+
     private func readForward(_ reader: AVIOReader, _ buf: UnsafeMutablePointer<UInt8>, bytes: Int) -> Bool {
         var read = 0
         while read < bytes {
@@ -30,7 +37,7 @@ struct Issue782RestartReanchorTests {
     func repositionAnchorsAtLanding() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = makeReader(server)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         reader.markOpenPhaseFinished()
@@ -56,7 +63,7 @@ struct Issue782RestartReanchorTests {
     func parseReadStillDetours() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = makeReader(server)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         reader.markOpenPhaseFinished()
@@ -77,7 +84,7 @@ struct Issue782RestartReanchorTests {
     func residentBlockServesFirst() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = makeReader(server)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         reader.markOpenPhaseFinished()

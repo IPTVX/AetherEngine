@@ -9,8 +9,12 @@ import Testing
 @MainActor
 struct StaleSessionCallbackTests {
 
-    private static func customSource() throws -> MediaSource {
-        .custom(DataIOReader(data: try ProbeTestFixtures.hdr10Plus()), formatHint: "mp4")
+    /// Gives each load a fresh native H.264 source without simulator hardware HEVC requirements.
+    private static func customSource() -> MediaSource {
+        .custom(
+            DataIOReader(data: TinyTransportStreamFixture.data),
+            formatHint: "mpegts"
+        )
     }
 
     private static let mediaFailure = SoftwarePathEscalation.Request(
@@ -23,7 +27,7 @@ struct StaleSessionCallbackTests {
     @Test("An escalation raised before stop() and run after it does nothing")
     func escalationAfterStopIsDropped() async throws {
         let engine = try AetherEngine()
-        engine.loadedURL = try #require(URL(string: "http://127.0.0.1:9/source.mkv"))
+        engine.loadedURL = URL(string: "http://127.0.0.1:9/source.mkv")
         let raisedUnder = engine.loadGeneration
         var events: [SoftwarePathEscalationEvent] = []
         let sub = engine.softwarePathEscalations.sink { events.append($0) }

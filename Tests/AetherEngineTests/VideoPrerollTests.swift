@@ -6,10 +6,11 @@ import os
 import Testing
 @testable import AetherEngine
 
-/// The FEL path's start: the clock waits at rate 0 until composed frames are in the layer, then
-/// starts a fixed lead from now (`AudioOutput.videoPrerollSatisfied`, `prerollStartLead`,
-/// `SampleBufferRenderer.felPrerollSatisfied(clock:)`). On an Apple TV 4K a clock started the moment
-/// the first packet arrived dropped 3 to 5 frames at every start and seek; with both, none.
+/// The software path's start: the clock waits at rate 0 until frames are in the layer, then starts a
+/// fixed lead from now (`AudioOutput.videoPrerollSatisfied`, `prerollStartLead`,
+/// `SampleBufferRenderer.prerollSatisfied(clock:live:)`). On an Apple TV 4K a clock started the moment
+/// the first packet arrived dropped 3 to 7 frames at every start and seek; with both, none on FEL
+/// (#774). Every other VOD route since #800.
 @Suite("Video preroll before the clock starts")
 struct VideoPrerollTests {
 
@@ -37,11 +38,43 @@ struct VideoPrerollTests {
 
     // MARK: - Renderer gate
 
-    @Test("Off the FEL path the renderer has no opinion, so the clock starts at once")
+    @Test("Off the FEL path the gate opens once frames reach videoPrerollSeconds past the clock")
     @MainActor
-    func noGateOffTheFELPath() {
+    func singleLayerGate() {
         let renderer = SampleBufferRenderer()
-        #expect(renderer.felPrerollSatisfied(clock: 0) == nil)
+        renderer.setReorderDepth(SampleBufferRenderer.presentationOrderReorderDepth)
+        let pixels = Self.makePixelBuffer()
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == false, "nothing handed over yet")
+        // One frame stays held for its duration, so 0 to 3 hands over 0 to 2.
+        for i in 0...3 { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == false)
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(4))
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == true)
+        #expect(renderer.prerollSatisfied(clock: Self.time(2).seconds, live: false) == false)
+    }
+
+    @Test("Off the FEL path a live stream does not preroll")
+    @MainActor
+    func singleLayerLiveHasNoGate() {
+        let renderer = SampleBufferRenderer()
+        #expect(renderer.prerollSatisfied(clock: 0, live: true) == nil)
+        renderer.setFELLookahead(enabled: true, frameRate: 24)
+        #expect(renderer.prerollSatisfied(clock: 0, live: true) == false, "the FEL route still does")
+    }
+
+    @Test("A resume between keyframes counts from the target, not from the GOP decoded up to it")
+    @MainActor
+    func singleLayerGateAfterAResume() {
+        let renderer = SampleBufferRenderer()
+        renderer.setReorderDepth(SampleBufferRenderer.presentationOrderReorderDepth)
+        let pixels = Self.makePixelBuffer()
+        // #800: the keyframe sits 3 s before the target; everything up to it is decoded and skipped.
+        let target = Self.time(2078).seconds
+        renderer.setSkipThreshold(Self.time(2078))
+        for i in 2000..<2078 { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
+        #expect(renderer.prerollSatisfied(clock: target, live: false) == false)
+        for i in 2078...2082 { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
+        #expect(renderer.prerollSatisfied(clock: target, live: false) == true)
     }
 
     @Test("The gate opens once the contiguous frames reach the preroll past the clock",
@@ -52,17 +85,17 @@ struct VideoPrerollTests {
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         renderer.setArrivalOrderHandover(frameRate: 24)
         let pixels = Self.makePixelBuffer()
-        #expect(renderer.felPrerollSatisfied(clock: 0) == false, "nothing handed over yet")
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == false, "nothing handed over yet")
         // A frame past a gap does not count: 0, 1, 2 and then 6 leave the frontier at frame 2.
         for i in [0, 1, 2, 6] { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
-        #expect(renderer.felPrerollSatisfied(clock: 0) == false)
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == false)
         // 0 to 3 is four frames, 0.1667 s: just short of the preroll.
         renderer.enqueue(pixelBuffer: pixels, pts: Self.time(3))
-        #expect(renderer.felPrerollSatisfied(clock: 0) == false)
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == false)
         renderer.enqueue(pixelBuffer: pixels, pts: Self.time(4))
-        #expect(renderer.felPrerollSatisfied(clock: 0) == true)
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == true)
         // The same frames are not enough for a clock further on.
-        #expect(renderer.felPrerollSatisfied(clock: Self.time(4).seconds) == false)
+        #expect(renderer.prerollSatisfied(clock: Self.time(4).seconds, live: false) == false)
     }
 
     @Test("After a seek the gate counts from the seek target, not from the frames before it",
@@ -77,9 +110,9 @@ struct VideoPrerollTests {
         renderer.flush(removingDisplayedImage: false)
         renderer.setSkipThreshold(Self.time(100))
         let target = Self.time(100).seconds
-        #expect(renderer.felPrerollSatisfied(clock: target) == false)
+        #expect(renderer.prerollSatisfied(clock: target, live: false) == false)
         for i in 100..<105 { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
-        #expect(renderer.felPrerollSatisfied(clock: target) == true)
+        #expect(renderer.prerollSatisfied(clock: target, live: false) == true)
     }
 
     @Test("After a seek to a target between two frames the gate still opens without a running clock",
@@ -96,7 +129,7 @@ struct VideoPrerollTests {
         for i in PresentationFloorTests.decodeOrder(gop: 8, frames: 24, startingAt: 96) {
             renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i))
         }
-        #expect(renderer.felPrerollSatisfied(clock: target) == true)
+        #expect(renderer.prerollSatisfied(clock: target, live: false) == true)
         #expect(renderer.framesBelowFloor == 0)
     }
 
@@ -115,7 +148,7 @@ struct VideoPrerollTests {
             renderer.enqueue(pixelBuffer: pixels, pts: CMTime(value: Int64(admitted), timescale: 60))
             admitted += 1
         }
-        #expect(renderer.felPrerollSatisfied(clock: 0) == true, "\(admitted) frames admitted")
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == true, "\(admitted) frames admitted")
     }
 
     /// Exercises the legacy PTS buffer on every OS so high-rate preroll cannot silently deadlock.
@@ -140,7 +173,7 @@ struct VideoPrerollTests {
             clockSeconds: 0, clockArmed: true) {
             renderer.enqueue(pixelBuffer: pixels, pts: CMTime(value: Int64(admitted), timescale: 60))
             admitted += 1
-            if firstReadyFrameCount == nil, renderer.felPrerollSatisfied(clock: 0) == true {
+            if firstReadyFrameCount == nil, renderer.prerollSatisfied(clock: 0, live: false) == true {
                 firstReadyFrameCount = admitted
             }
         }
@@ -150,7 +183,7 @@ struct VideoPrerollTests {
         #expect(renderer.heldFrameCount == depth)
         #expect(firstReadyFrameCount == depth + 4)
         #expect((firstReadyFrameCount ?? admitted) < admitted)
-        #expect(renderer.felPrerollSatisfied(clock: 0) == true)
+        #expect(renderer.prerollSatisfied(clock: 0, live: false) == true)
     }
 
     // MARK: - Clock

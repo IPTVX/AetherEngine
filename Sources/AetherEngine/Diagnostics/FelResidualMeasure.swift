@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreVideo
 import CoreMedia
@@ -34,25 +36,31 @@ enum FelResidualMeasure {
         let b = SendableBuffer(value: base), e = SendableBuffer(value: enhancement)
         queue.async {
             defer { inFlight.withLock { $0 = false } }
-            var full = params; full.ditherMode = .none; full.flags.remove(.disableResidual)
-            var mel = params; mel.ditherMode = .none; mel.flags.insert(.disableResidual)
-            guard let a = composer.compose(baseBuffer: b.value, enhancementBuffer: e.value, params: full, frameIndex: frameIndex),
-                  let m = composer.compose(baseBuffer: b.value, enhancementBuffer: e.value, params: mel, frameIndex: frameIndex)
-            else { return }
-            let planes = ["Y", "Cb", "Cr"]
-            var parts: [String] = []
-            for (k, name) in planes.enumerated() {
-                let s = stats(a, m, plane: k)
-                parts.append(String(format: "%@ diff=%.2f%% mean=%.3f signed=%+.3f p99=%d max=%d ge2=%.3f%% ge4=%.3f%%",
-                                    name, s.diffPct, s.mean, s.signedMean, s.p99, s.max, s.ge2Pct, s.ge4Pct))
-                if k == 0 {
-                    parts.append("Yband[0-255|256-511|512-767|768+] mean=" + s.bandMean.map { String(format: "%.2f", $0) }.joined(separator: "/")
-                                 + " signed=" + s.bandSignedMean.map { String(format: "%+.2f", $0) }.joined(separator: "/")
-                                 + " share%=" + s.bandFrac.map { String(format: "%.1f", $0) }.joined(separator: "/"))
-                }
-            }
-            EngineLog.emit("[FELMeasure] pts=\(String(format: "%.3f", pts.seconds)) " + parts.joined(separator: " | "), category: .swPlayback)
+            measure(composer: composer, base: b.value, enhancement: e.value, params: params, frameIndex: frameIndex, pts: pts)
         }
+    }
+
+    private static func measure(composer: DoviFelComposer, base: CVPixelBuffer, enhancement: CVPixelBuffer,
+                                params: DoviMetalParams, frameIndex: UInt32, pts: CMTime) {
+        var full = params; full.ditherMode = .none; full.flags.remove(.disableResidual)
+        var mel = params; mel.ditherMode = .none; mel.flags.insert(.disableResidual)
+        guard let a = composer.compose(baseBuffer: base, enhancementBuffer: enhancement, params: full, frameIndex: frameIndex),
+              let m = composer.compose(baseBuffer: base, enhancementBuffer: enhancement, params: mel, frameIndex: frameIndex)
+        else { return }
+        let planes = ["Y", "Cb", "Cr"]
+        var parts: [String] = []
+        for (k, name) in planes.enumerated() {
+            let s = stats(a, m, plane: k)
+            parts.append(String(format: "%@ diff=%.2f%% mean=%.3f signed=%+.3f p99=%d max=%d ge2=%.3f%% ge4=%.3f%%",
+                                name, s.diffPct, s.mean, s.signedMean, s.p99, s.max, s.ge2Pct, s.ge4Pct))
+            if k == 0 {
+                let mean: String = s.bandMean.map { String(format: "%.2f", $0) }.joined(separator: "/")
+                let signed: String = s.bandSignedMean.map { String(format: "%+.2f", $0) }.joined(separator: "/")
+                let share: String = s.bandFrac.map { String(format: "%.1f", $0) }.joined(separator: "/")
+                parts.append("Yband[0-255|256-511|512-767|768+] mean=\(mean) signed=\(signed) share%=\(share)")
+            }
+        }
+        EngineLog.emit("[FELMeasure] pts=\(String(format: "%.3f", pts.seconds)) " + parts.joined(separator: " | "), category: .swPlayback)
     }
 
     private struct Stats { var diffPct = 0.0, mean = 0.0, signedMean = 0.0, p99 = 0, max = 0, ge2Pct = 0.0, ge4Pct = 0.0, bandMean = [Double](repeating: 0, count: 4), bandSignedMean = [Double](repeating: 0, count: 4), bandFrac = [Double](repeating: 0, count: 4) }
@@ -103,3 +111,4 @@ enum FelResidualMeasure {
         return s
     }
 }
+#endif

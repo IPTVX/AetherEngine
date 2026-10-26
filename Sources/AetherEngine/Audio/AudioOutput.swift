@@ -414,8 +414,9 @@ final class AudioOutput: @unchecked Sendable {
     // MARK: - Video preroll
 
     /// Whether the video renderer holds enough to start the clock at a source time: nil when this
-    /// session does not preroll, so the clock starts at once as it always has. Set by the host for the
-    /// Profile 7 FEL route (`SampleBufferRenderer.felPrerollSatisfied(clock:)`).
+    /// session does not preroll, so the clock starts at once as it always has. Set by the software
+    /// host (`SampleBufferRenderer.prerollSatisfied(clock:live:)`): the FEL route since #774, every
+    /// other VOD route since #800.
     ///
     /// The video queue is filled with the timebase stopped and the clock starts only once that is done,
     /// the same idea as `AVPlayer.preroll(atRate:)`. Starting at full rate the moment

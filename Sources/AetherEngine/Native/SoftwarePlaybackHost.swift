@@ -26,6 +26,52 @@ final class SoftwarePlaybackHost {
         }
     }
 
+    /// Only codec sample geometry is admitted, never the WMA bitrate fallback in
+    /// av_get_audio_frame_duration2. Parameters are copied before the read-ahead thread starts.
+    /// Variable/packed or reservoir-dependent packet layouts stay strict until proven separately.
+    nonisolated static func audioPacketTiming(_ parameters: UnsafeMutablePointer<AVCodecParameters>)
+        -> SoftwareAudioPacketTiming? {
+        let p = parameters.pointee
+        guard p.sample_rate > 0, p.sample_rate <= 768_000 else { return nil }
+        let samples: Int32
+        switch p.codec_id {
+        case AV_CODEC_ID_AC3: samples = 1536
+        case AV_CODEC_ID_MP1: samples = 384
+        case AV_CODEC_ID_MP2: samples = 1152
+        case AV_CODEC_ID_MP3: samples = p.sample_rate <= 24000 ? 576 : 1152
+        case AV_CODEC_ID_AAC, AV_CODEC_ID_EAC3:
+            // Includes known AAC 960/1024/SBR geometry. A packet with a different declared
+            // duration fails the sample-clock admission instead of inheriting the initial size.
+            guard p.frame_size > 1 else { return nil }
+            samples = p.frame_size
+        case AV_CODEC_ID_WMAV1, AV_CODEC_ID_WMAV2:
+            let flagOffset = p.codec_id == AV_CODEC_ID_WMAV1 ? 2 : 4
+            guard p.sample_rate <= 50_000, p.ch_layout.nb_channels > 0,
+                  p.ch_layout.nb_channels <= 2, p.block_align > 0,
+                  Int(p.extradata_size) >= flagOffset + 2, let data = p.extradata else { return nil }
+            let flags = UInt16(data[flagOffset]) | (UInt16(data[flagOffset + 1]) << 8)
+            // A reservoir superframe can depend on the previous packet and yield several
+            // frames: byte length/bitrate is not proof of its sample count.
+            guard flags & 2 == 0 else { return nil }
+            if p.sample_rate <= 16_000 { samples = 512 }
+            else if p.sample_rate <= 22_050 || (p.codec_id == AV_CODEC_ID_WMAV1 && p.sample_rate <= 32_000) {
+                samples = 1024
+            } else { samples = 2048 }
+            return .init(sampleRate: p.sample_rate,
+                         layout: .fixed(samples: samples, packetBytes: Int(p.block_align)))
+        default:
+            let bits = av_get_exact_bits_per_sample(p.codec_id)
+            guard bits > 0, bits % 8 == 0, p.ch_layout.nb_channels > 0,
+                  p.ch_layout.nb_channels <= 64 else { return nil }
+            return .init(sampleRate: p.sample_rate,
+                         layout: .pcm(bytesPerSampleFrame: Int(bits / 8) * Int(p.ch_layout.nb_channels)))
+        }
+        return .init(sampleRate: p.sample_rate, layout: .fixed(samples: samples, packetBytes: nil))
+    }
+
+    /// Bounds of the memory store wherever it runs, by platform default or `.memory` (#827).
+    nonisolated static let memoryPacketStoreBounds = (forwardBytes: 96 << 20, historyBytes: 128 << 20)
+
     /// The software VOD packet store's bounds on tvOS, which keeps it in purgeable memory
     /// (`SoftwarePacketMemoryFIFO`) instead of session files; nil elsewhere, where the disk store and
     /// the session retention budget apply. On an Apple TV 4K (A12) the disk store's appends took
@@ -38,12 +84,60 @@ final class SoftwarePlaybackHost {
     /// FEL session on the A12: ~655 MB against ~580 MB with the disk store.
     nonisolated static let memoryPacketStoreBudget: (forwardBytes: Int, historyBytes: Int)? = {
         #if os(tvOS)
-        return (forwardBytes: 96 << 20, historyBytes: 128 << 20)
+        return memoryPacketStoreBounds
         #else
         return nil
         #endif
     }()
 
+
+    /// Zero still needs a working spool; every choice retains the volume and shared-claim clamp.
+    nonisolated static func packetCacheBudgetBytes(requestedBytes: Int?, availableBytes: Int64?,
+                                                   capRelaxed: Bool) -> Int {
+        let budget = HLSVideoEngine.resolveSessionCacheBudget(
+            requestedBytes: requestedBytes, volumeAvailableBytes: availableBytes, capRelaxed: capRelaxed)
+        return min(budget.volumeSafetyLimitBytes,
+                   budget.baseEffectiveBytes > 0 ? budget.baseEffectiveBytes : 32 << 20)
+    }
+
+    /// Run off-main: disk construction queries volume capacity and opens temporary files.
+    nonisolated static func makePacketStore(
+        storage: SoftwarePacketCacheStorage, forwardSegments: Int?,
+        requestedBytes: Int? = nil, directory: URL = FileManager.default.temporaryDirectory,
+        claims: RetentionClaims = .shared
+    ) throws -> (any SoftwarePacketStore, Int, RetentionClaims.Claim?)? {
+        let memoryBudget: (forwardBytes: Int, historyBytes: Int)?
+        switch storage {
+        case .automatic: memoryBudget = memoryPacketStoreBudget
+        case .disk: memoryBudget = nil
+        case .memory: memoryBudget = memoryPacketStoreBounds
+        }
+        let segments = HLSVideoEngine.clampedForwardWindow(forwardSegments)
+        let fifo: any SoftwarePacketStore
+        let bytes: Int
+        var claim: RetentionClaims.Claim?
+        if let memory = memoryBudget {
+            bytes = memory.forwardBytes
+            fifo = SoftwarePacketMemoryFIFO(historyCapBytes: memory.historyBytes)
+            EngineLog.emit("[SWHost] packet cache in memory: forward \(memory.forwardBytes >> 20) MB, "
+                   + "history \(memory.historyBytes >> 20) MB", category: .swPlayback)
+        } else {
+            let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+                .volumeAvailableCapacity.map(Int64.init)
+            let capRelaxed = HLSVideoEngine.retentionCapRelaxed(forwardWindowSegments: segments)
+            let diskClaim = claims.claim(volumeAvailableBytes: available) {
+                packetCacheBudgetBytes(requestedBytes: requestedBytes, availableBytes: $0, capRelaxed: capRelaxed)
+            }
+            bytes = diskClaim.bytes
+            guard bytes > 0 else { return nil }
+            fifo = try SoftwarePacketDiskFIFO(
+                chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true,
+                parentDirectory: directory)
+            claim = diskClaim
+        }
+        return (fifo, bytes, claim)
+    }
 
     // MARK: - Published state (mirrors NativeAVPlayerHost surface)
 
@@ -130,6 +224,11 @@ final class SoftwarePlaybackHost {
     /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
     nonisolated(unsafe) var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
 
+    /// Fires (off-main) when the demux loop re-anchors the clock at a first sample past the load anchor,
+    /// with the session zero it resolved. Hooked by `AetherEngine` to republish `mediaChapters` from the
+    /// clock's real zero.
+    nonisolated(unsafe) var onClockSessionZero: (@Sendable (Double) -> Void)?
+
     /// AE#658: forwarded from the video decoder, off-main.
     nonisolated(unsafe) var onDecodedVideoFormat: (@Sendable (DecodedVideoFormat) -> Void)?
 
@@ -146,7 +245,7 @@ final class SoftwarePlaybackHost {
 
     /// Whether load selected VideoToolbox rather than libavcodec / dav1d for video decoding.
     /// Only meaningful after load has returned successfully.
-    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder }
+    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder || decodesDualLayer }
 
     /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
     /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
@@ -347,13 +446,18 @@ final class SoftwarePlaybackHost {
 
     @discardableResult
     func setLiveDVRLimits(_ limits: LiveDVRLimits, availableBytes: Int64?) -> Bool {
-        guard let ring = dvrRing else { return false }
+        guard let ring = dvrRing, !dvrRingHoldsCushionOnly else { return false }
         return ring.setLimits(limits, availableBytes: availableBytes)
     }
     var liveDVRBytes: Int? { dvrRing?.retainedBytes }
-    var liveDVRWindowSeconds: Double? { dvrRing?.retainedWindowSeconds }
+    /// A live session without a DVR window that asked for `liveEdgeCushionSeconds`: the ring exists
+    /// only so the join can wait for the cushion and play behind the reader, and the session still
+    /// publishes no rewind window, so a seek stays refused as on any live-only session.
+    nonisolated(unsafe) private var dvrRingHoldsCushionOnly = false
+
+    var liveDVRWindowSeconds: Double? { dvrRingHoldsCushionOnly ? nil : dvrRing?.retainedWindowSeconds }
     var liveDVRResidentFloor: Double? {
-        guard let pts = dvrRing?.oldestKeyframePts else { return nil }
+        guard !dvrRingHoldsCushionOnly, let pts = dvrRing?.oldestKeyframePts else { return nil }
         liveEdgeLock.lock(); defer { liveEdgeLock.unlock() }
         guard sessionStartPts.isFinite else { return nil }
         return max(0, pts - sessionStartPts)
@@ -371,6 +475,20 @@ final class SoftwarePlaybackHost {
     nonisolated(unsafe) private var sessionStartPts: Double = .nan
 
     nonisolated(unsafe) private var newestSourcePts: Double = .nan
+    /// Where a live session's picture starts once the source's connect burst has landed; read and
+    /// advanced by the live feeder under `liveEdgeLock`, reset with the session.
+    nonisolated(unsafe) private var liveJoinPolicy = SoftwareLiveJoinPolicy()
+
+    /// AE#813: the unit a live source delivers in, read on demand because a live ingest learns it
+    /// as segments arrive. Set by the engine before `load()`; nil for a continuous source.
+    nonisolated(unsafe) var liveDeliveryUnit: (@Sendable () -> Double?)?
+    /// `LoadOptions.liveEdgeCushionSeconds`. Set by the engine before `load()`.
+    nonisolated(unsafe) var liveEdgeCushionSeconds: Double?
+
+    /// AE#813: how far behind the newest media this live session holds.
+    nonisolated var liveHoldback: SoftwareLiveHoldback {
+        SoftwareLiveHoldback(deliveryUnitSeconds: liveDeliveryUnit?(), edgeCushionSeconds: liveEdgeCushionSeconds)
+    }
 
     /// Guards `sessionStartPts` / `newestSourcePts` against the demux
     /// thread writing while the main-actor time tick reads them.
@@ -422,7 +540,7 @@ final class SoftwarePlaybackHost {
     /// the start; nil before that and when no ring is armed. Published as the resident floor so the
     /// seekable range follows what the ring still holds (audit VPERF-101).
     nonisolated var dvrResidentFloorSessionSeconds: Double? {
-        guard let ring = dvrRing else { return nil }
+        guard let ring = dvrRing, !dvrRingHoldsCushionOnly else { return nil }
         liveEdgeLock.lock()
         let start = sessionStartPts
         liveEdgeLock.unlock()
@@ -470,6 +588,23 @@ final class SoftwarePlaybackHost {
         demuxCondition.lock()
         demuxCondition.broadcast()
         demuxCondition.unlock()
+    }
+
+    /// The live join's placement (#797), compare-and-set on the seek generation: a seek that landed
+    /// between the feeder's decision and this write already moved the cursor where the viewer asked.
+    nonisolated private func placeFeedCursor(_ value: Int, ifGeneration generation: UInt64) -> Bool {
+        feedLock.lock()
+        guard _seekGeneration == generation else {
+            feedLock.unlock()
+            return false
+        }
+        _feedCursor = value
+        feedLock.unlock()
+        audioLookahead.reset(to: value)
+        demuxCondition.lock()
+        demuxCondition.broadcast()
+        demuxCondition.unlock()
+        return true
     }
 
     nonisolated private var dvrRecoveryPending: Bool {
@@ -911,7 +1046,7 @@ final class SoftwarePlaybackHost {
 
     /// Pure decoder selection predicate for Profile 7 / HEVC streams on the software host.
     /// DualLayerVideoDecoder is selected ONLY when dvProfile == 7 && elType == "FEL" && preferDualLayerDolbyVision
-    /// && dolbyVisionHandling == .automatic.
+    /// && dolbyVisionHandling == .automatic, in a build with the DualLayerDolbyVision trait.
     /// All other combinations (e.g. MEL, baseLayerOnly, preferDualLayerDolbyVision == false) pick HardwareVideoDecoder.
     nonisolated static func shouldUseDualLayerDecoder(
         dvProfile: Int?,
@@ -919,11 +1054,23 @@ final class SoftwarePlaybackHost {
         preferDualLayerDolbyVision: Bool,
         dolbyVisionHandling: DolbyVisionHandling
     ) -> Bool {
-        dvProfile == 7
+        DualLayerRouteDecision.isBuiltIn
+            && dvProfile == 7
             && elType == "FEL"
             && preferDualLayerDolbyVision
             && dolbyVisionHandling == .automatic
     }
+
+    /// Whether `decoder` is a `DualLayerVideoDecoder`; always false without the trait.
+    nonisolated static func isDualLayer(_ decoder: any VideoDecodingPipeline) -> Bool {
+        #if DualLayerDolbyVision
+        return decoder is DualLayerVideoDecoder
+        #else
+        return false
+        #endif
+    }
+
+    var decodesDualLayer: Bool { Self.isDualLayer(videoDecoder) }
 
     /// Selects and instantiates the appropriate VideoDecodingPipeline based on stream and host options.
     func selectVideoDecoder(
@@ -938,6 +1085,7 @@ final class SoftwarePlaybackHost {
                 preferDualLayerDolbyVision: preferDualLayerDolbyVision,
                 dolbyVisionHandling: dolbyVisionHandling
             ) {
+                #if DualLayerDolbyVision
                 // No Metal device: the composer cannot be built, so decode the base layer alone (the
                 // decoder the software host uses for any other Profile 7 stream) instead of opening a
                 // decoder whose `open()` can only throw. A shader that fails to compile is caught later,
@@ -946,6 +1094,7 @@ final class SoftwarePlaybackHost {
                     return DualLayerVideoDecoder(composer: composer)
                 }
                 EngineLog.emit("[SWHost] DV P7 dual-layer route: no Metal device for the composer, decoding the base layer alone", category: .swPlayback)
+                #endif
                 return HardwareVideoDecoder()
             } else {
                 return HardwareVideoDecoder()
@@ -964,7 +1113,9 @@ final class SoftwarePlaybackHost {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         dvrRetention: SoftwareDVRRetentionOptions? = nil,
-        forwardBufferSegments: Int? = nil
+        forwardBufferSegments: Int? = nil,
+        packetCacheStorage: SoftwarePacketCacheStorage = .automatic,
+        sessionCacheByteBudget: Int? = nil
     ) async throws {
         self.demuxer = dem
         self.duration = dem.duration
@@ -981,7 +1132,15 @@ final class SoftwarePlaybackHost {
         // there is no carried-in picture to guard against here (the native path's problem).
         armReadyForDisplayObserver()
 
-        if isLive, let window = dvrWindowSeconds { _ = prepareLiveDVR(windowSeconds: window, retention: dvrRetention) }
+        dvrRingHoldsCushionOnly = false
+        if isLive, let window = dvrWindowSeconds {
+            _ = prepareLiveDVR(windowSeconds: window, retention: dvrRetention)
+        } else if isLive, let cushion = LiveEdgePolicy.edgeCushion(liveEdgeCushionSeconds) {
+            // The plain live feeder plays packets as the demuxer reads them, so there is nothing to
+            // play behind. A ring as deep as the loopback's cushion window gives the join one.
+            dvrRingHoldsCushionOnly = prepareLiveDVR(
+                windowSeconds: cushion + LiveWindowSizing.edgeCushionWindowMarginSeconds, retention: nil) != nil
+        }
 
         // Resolve the audio stream up front so the session-start log and the decoder agree. #133:
         // live-TS AAC whose codecpar the probe left empty makes av_find_best_stream return -1; the
@@ -1024,7 +1183,7 @@ final class SoftwarePlaybackHost {
                dolbyVisionHandling: dolbyVisionHandling) {
             let vIdx = dem.videoStreamIndex
             await BlockingWork.detached(priority: .userInitiated) {
-                VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)
+                _ = VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)
             }.value
             // A stop() can land on this suspension as on the start-position seek below.
             guard !stopRequested else { return }
@@ -1047,6 +1206,7 @@ final class SoftwarePlaybackHost {
                 dvProfile: dvProfile
             )
             videoDecoder = chosen
+            #if DualLayerDolbyVision
             if let dual = chosen as? DualLayerVideoDecoder {
                 // An in-band primary open failure (no hvcC to open from) leaves nothing to show. Surface it
                 // through the same `failure` the read loops use for a decode error. It belongs to the
@@ -1063,7 +1223,8 @@ final class SoftwarePlaybackHost {
                     }
                 }
             }
-            if chosen is DualLayerVideoDecoder {
+            #endif
+            if decodesDualLayer {
                 EngineLog.emit(
                     "[SWHost] selected DualLayerVideoDecoder (Metal P7 FEL) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
                     category: .swPlayback
@@ -1090,14 +1251,14 @@ final class SoftwarePlaybackHost {
         // the same reorder depth as the single-layer hardware decoder, used only when arrival-order handover
         // below is off (no frame rate).
         renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(
-            forHardwareDecoder: videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder))
+            forHardwareDecoder: videoDecoder is HardwareVideoDecoder || decodesDualLayer))
         renderer.setFELLookahead(
-            enabled: videoDecoder is DualLayerVideoDecoder,
+            enabled: decodesDualLayer,
             frameRate: AetherEngine.detectFrameRate(stream: vStream))
         // The FEL look-ahead window only holds if none of it waits in the reorder buffer; see
         // `SampleBufferRenderer.arrivalFloor`. Without a frame rate it stays on the reorder buffer.
         renderer.setArrivalOrderHandover(
-            frameRate: videoDecoder is DualLayerVideoDecoder ? AetherEngine.detectFrameRate(stream: vStream) : nil)
+            frameRate: decodesDualLayer ? AetherEngine.detectFrameRate(stream: vStream) : nil)
 
         // Flip display layer into HDR mode before frames arrive; without this preferredDynamicRange stays .standard and PQ/HLG renders desaturated.
         if let codecpar = vStream.pointee.codecpar {
@@ -1219,13 +1380,15 @@ final class SoftwarePlaybackHost {
         renderer.setTimeline(audioOutput.timeline)   // AE#395
         self.audioOutput?.volume = volume
         self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
-        // The FEL path holds the clock until composed frames are queued, then starts it a little ahead
-        // (`AudioOutput.videoPrerollSatisfied`); every other route answers nil and starts at once, and
-        // so does a session playing audio only in the background, which feeds the renderer nothing.
+        // The clock waits until frames from its position on are queued, then starts a little ahead
+        // (`AudioOutput.videoPrerollSatisfied`, #774, #800). A live stream off the FEL path starts at
+        // once, and so does a session playing audio only in the background, which feeds the renderer
+        // nothing.
         let prerollRenderer = renderer
+        let prerollLive = isLive
         self.audioOutput?.videoPrerollSatisfied = { [weak self] clock in
             guard self?.backgroundAudioOnly != true else { return nil }
-            return prerollRenderer.felPrerollSatisfied(clock: clock)
+            return prerollRenderer.prerollSatisfied(clock: clock, live: prerollLive)
         }
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
         // it a silent software session on a long-latency route and an audible one on HDMI log the same.
@@ -1237,11 +1400,23 @@ final class SoftwarePlaybackHost {
         // Reset the live feeder state for the new session.
         resetFeederState()
 
+        // The session zero a cold load predicts from the source's origin, the way a resume derives it.
+        // Set for every non-live source, not only a resume: a seek or a scrub still before the first play
+        // converts with it, and the demux loop only resolves the real zero when it first arms the clock
+        // (a pre-play seek arms the clock itself, so the loop never would). Reported, so the engine's
+        // chapter axis, harvest anchors and stills all read the same zero.
+        if !isLive {
+            let predictedZero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
+            if predictedZero != clockSessionZero {
+                clockSessionZero = predictedZero
+                onClockSessionZero?(predictedZero)
+            }
+        }
+
         if let start = startPosition, start.isFinite, start > 0 {
             // AE#724: the anchor is a session-axis position; on an offset-origin source it is carried
             // over before it reaches the demuxer, the skip threshold and the clock, as a seek's is.
-            let zero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
-            clockSessionZero = zero
+            let zero = clockSessionZero
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
@@ -1276,34 +1451,16 @@ final class SoftwarePlaybackHost {
             let audio: SoftwarePacketReadAhead.Stream? = audioStreamIndex >= 0
                 ? dem.stream(at: audioStreamIndex).map {
                     .init(index: audioStreamIndex, numerator: $0.pointee.time_base.num,
-                          denominator: $0.pointee.time_base.den)
+                          denominator: $0.pointee.time_base.den,
+                          audioTiming: Self.audioPacketTiming($0.pointee.codecpar))
                 } : nil
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
             let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
-                let fifo: any SoftwarePacketStore
-                let bytes: Int
-                var claim: RetentionClaims.Claim?
-                if let memory = Self.memoryPacketStoreBudget {
-                    bytes = memory.forwardBytes
-                    fifo = SoftwarePacketMemoryFIFO(historyCapBytes: memory.historyBytes)
-                    EngineLog.emit("[SWHost] packet cache in memory: forward \(memory.forwardBytes >> 20) MB, "
-                                   + "history \(memory.historyBytes >> 20) MB", category: .swPlayback)
-                } else {
-                    let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                    let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
-                        .volumeAvailableCapacity.map(Int64.init)
-                    let capRelaxed = HLSVideoEngine.retentionCapRelaxed(forwardWindowSegments: segments)
-                    let diskClaim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
-                        HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: $0, capRelaxed: capRelaxed)
-                    }
-                    bytes = diskClaim.bytes
-                    guard bytes > 0 else { return nil }
-                    fifo = try SoftwarePacketDiskFIFO(
-                        chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true)
-                    claim = diskClaim
-                }
+                guard let (fifo, bytes, claim) = try Self.makePacketStore(
+                    storage: packetCacheStorage, forwardSegments: segments,
+                    requestedBytes: sessionCacheByteBudget) else { return nil }
                 let readAhead = SoftwarePacketReadAhead(
                     video: video, audio: audio, byteBudget: bytes,
                     forwardSeconds: Double(segments) * 4,
@@ -1561,10 +1718,12 @@ final class SoftwarePlaybackHost {
 
     #if DEBUG
     func invalidateVideoSessionForTesting() -> Bool {
+        #if DualLayerDolbyVision
         if let dual = videoDecoder as? DualLayerVideoDecoder {
             dual.invalidateSessionsForTesting()
             return true
         }
+        #endif
         guard let hw = videoDecoder as? HardwareVideoDecoder else { return false }
         hw.invalidateSessionForTesting()
         return true
@@ -2057,6 +2216,7 @@ final class SoftwarePlaybackHost {
         retentionClaims.removeAll()
         liveEdgeLock.lock()
         sessionStartPts = .nan
+        liveJoinPolicy = SoftwareLiveJoinPolicy()
         newestSourcePts = .nan
         liveEdgeLock.unlock()
 
@@ -2203,10 +2363,13 @@ final class SoftwarePlaybackHost {
         // #107: the demux loop reports the resolved session-zero offset when it re-anchors
         // the clock at a first-sample PTS far past the anchor (mid-stream-joined source).
         let onClockAnchored: @Sendable (Double) -> Void = { [weak self] zero in
-            self?.clockSessionZero = SWClockAnchorPolicy.reanchoredSessionZero(
+            let resolvedZero = SWClockAnchorPolicy.reanchoredSessionZero(
                 initialSessionZeroSeconds: initialSessionZero,
-                additionalOffsetSeconds: zero
+                additionalOffsetSeconds: zero,
+                initialClockSeconds: initialClock.seconds
             )
+            self?.clockSessionZero = resolvedZero
+            self?.onClockSessionZero?(resolvedZero)
         }
 
         if liveSession, let ring {
@@ -2222,6 +2385,31 @@ final class SoftwarePlaybackHost {
             }
             let recoverCursor: @Sendable (Int) -> Void = { [weak self] old in
                 self?.recoverEvictedFeedCursor(from: old, ring: ring)
+            }
+            // Where the live join starts, once the connect burst has landed (see the policy). Nil
+            // while it is still landing; the feeder asks again a moment later.
+            let liveJoinPlacement: @Sendable () -> SoftwareLiveJoinPolicy.Decision? = { [weak self] in
+                guard let self else { return .fromStart }
+                self.liveEdgeLock.lock()
+                defer { self.liveEdgeLock.unlock() }
+                guard self.sessionStartPts.isFinite, self.newestSourcePts.isFinite else { return nil }
+                return self.liveJoinPolicy.observe(firstPts: self.sessionStartPts,
+                                                   newestPts: self.newestSourcePts,
+                                                   at: ProcessInfo.processInfo.systemUptime,
+                                                   leadSeconds: self.liveHoldback.joinLeadSeconds,
+                                                   minimumSpanSeconds: self.liveHoldback.edgeCushionSeconds)
+            }
+            let liveHoldback: @Sendable () -> SoftwareLiveHoldback = { [weak self] in
+                self?.liveHoldback ?? .continuous
+            }
+            let newestSourcePts: @Sendable () -> Double = { [weak self] in
+                guard let self else { return .nan }
+                self.liveEdgeLock.lock()
+                defer { self.liveEdgeLock.unlock() }
+                return self.newestSourcePts
+            }
+            let placeCursor: @Sendable (Int, UInt64) -> Bool = { [weak self] seq, generation in
+                self?.placeFeedCursor(seq, ifGeneration: generation) ?? false
             }
             let setSourceEnded: @Sendable () -> Void = { [weak self] in
                 self?.sourceEnded = true
@@ -2271,6 +2459,10 @@ final class SoftwarePlaybackHost {
                     readCursor: readCursor,
                     advanceCursor: advanceCursor,
                     recoverCursor: recoverCursor,
+                    liveJoinPlacement: liveJoinPlacement,
+                    liveHoldback: liveHoldback,
+                    newestSourcePts: newestSourcePts,
+                    placeCursor: placeCursor,
                     seekGeneration: getSeekGeneration,
                     currentRate: currentRate,
                     isPlaying: getFeederPlaying,
@@ -2545,6 +2737,10 @@ final class SoftwarePlaybackHost {
         readCursor: @Sendable () -> Int,
         advanceCursor: @Sendable (Int) -> Void,
         recoverCursor: @Sendable (Int) -> Void,
+        liveJoinPlacement: @Sendable () -> SoftwareLiveJoinPolicy.Decision? = { .fromStart },
+        liveHoldback: @Sendable () -> SoftwareLiveHoldback = { .continuous },
+        newestSourcePts: @Sendable () -> Double = { .nan },
+        placeCursor: @Sendable (Int, UInt64) -> Bool = { _, _ in false },
         seekGeneration: @Sendable () -> UInt64,
         currentRate: @Sendable () -> Float,
         isPlaying: @Sendable () -> Bool,
@@ -2556,6 +2752,13 @@ final class SoftwarePlaybackHost {
         audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
         noteDecodeGeneration: @Sendable () -> Void
     ) {
+        // The join's start is placed once, before the first packet is fed; a seek before then is
+        // the viewer's own choice of position and retires it.
+        var liveJoinPending = true
+        // AE#844: once placed, a join that kept its cursor moves to the first keyframe past it. Set
+        // while that is pending: when the join was decided.
+        var liveJoinAlignSince: TimeInterval?
+        var liveJoinAlignLead: Double?
         // Audio look-ahead pump (#107 audio chopping): feed audio packets ahead of the
         // combined cursor so the audio renderer holds AudioLookaheadPolicy.targetLeadSeconds
         // of decoded audio regardless of video decode pace. Without it audio lead is capped
@@ -2629,26 +2832,34 @@ final class SoftwarePlaybackHost {
             if clockArmed(), isPlaying(), readCursor() >= ring.seqBounds.first,
                seekGeneration() == feederGeneration {
                 let lastPTS = audioLookahead.lastFedAudioPTS
-                let lead = lastPTS.isFinite ? lastPTS - aOut.currentTimeSeconds : 0
+                let clock = aOut.currentTimeSeconds
+                let lead = lastPTS.isFinite ? lastPTS - clock : 0
+                let newest = newestSourcePts()
+                let ahead = newest.isFinite ? newest - clock : 0
+                let cushion = liveHoldback().resumeCushionSeconds
                 switch AudioLookaheadPolicy.clockAction(
                     rebuffering: rebuffering,
                     lastFedAudioPTS: lastPTS,
-                    clockSeconds: aOut.currentTimeSeconds,
+                    clockSeconds: clock,
                     atRingEnd: audioLookahead.current >= ring.seqBounds.end,
-                    sourceEnded: sourceEnded()
+                    sourceEnded: sourceEnded(),
+                    bufferedAheadSeconds: ahead,
+                    resumeCushionSeconds: cushion
                 ) {
                 case .pauseForRebuffer:
                     rebuffering = true
+                    let resumesAt = cushion.map { ", resumes at \(String(format: "%.1f", $0))s ahead" } ?? ""
                     EngineLog.emit(
                         "[SWHost] live source underrun: pausing clock to rebuffer "
-                        + "(lead=\(String(format: "%.2f", lead))s)",
+                        + "(lead=\(String(format: "%.2f", lead))s\(resumesAt))",
                         category: .swPlayback
                     )
                     aOut.pause()
                 case .resume:
                     rebuffering = false
                     EngineLog.emit(
-                        "[SWHost] rebuffered: resuming clock (lead=\(String(format: "%.2f", lead))s)",
+                        "[SWHost] rebuffered: resuming clock (lead=\(String(format: "%.2f", lead))s "
+                        + "ahead=\(String(format: "%.2f", ahead))s)",
                         category: .swPlayback
                     )
                     aOut.setRate(currentRate())
@@ -2693,6 +2904,86 @@ final class SoftwarePlaybackHost {
                 preArmPacketsFed = 0
                 hadLead = false
                 rebuffering = false
+                liveJoinPending = false
+                liveJoinAlignSince = nil
+            }
+            if liveJoinPending {
+                switch liveJoinPlacement() {
+                case nil:
+                    if sourceEnded() {
+                        // Nothing more will land; play what there is from its start.
+                        liveJoinPending = false
+                    } else {
+                        condition.lock()
+                        autoreleasepool {
+                            _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
+                        }
+                        condition.unlock()
+                        return true
+                    }
+                case .fromStart?:
+                    liveJoinPending = false
+                case .place(let targetPts)?:
+                    liveJoinPending = false
+                    let holdback = liveHoldback()
+                    let unit = holdback.deliveryUnitSeconds.map { String(format: "%.1f", $0) + "s" } ?? "continuous"
+                    let cursor = readCursor()
+                    if let seq = ring.seq(forKeyframeAtOrBefore: targetPts), seq > cursor,
+                       let keyframe = ring.packet(atSeq: seq), placeCursor(seq, generation) {
+                        let skipped = keyframe.pts - (ring.packet(atSeq: cursor)?.pts ?? keyframe.pts)
+                        EngineLog.emit(
+                            "[SWHost] live join placed \(String(format: "%.1f", holdback.joinLeadSeconds))s "
+                            + "behind the newest media (delivery unit \(unit)): skipped \(String(format: "%.1f", skipped))s of the "
+                            + "connect burst (cursor seq=\(cursor) -> \(seq), keyframe pts=\(String(format: "%.2f", keyframe.pts)))",
+                            category: .swPlayback
+                        )
+                        return true
+                    }
+                }
+                if !liveJoinPending {
+                    liveJoinAlignSince = ProcessInfo.processInfo.systemUptime
+                    liveJoinAlignLead = SoftwareLiveJoinPolicy.alignmentLead(
+                        cursorPts: ring.pts(atSeq: readCursor()), newestPts: newestSourcePts())
+                }
+            }
+            if let since = liveJoinAlignSince {
+                let cursor = readCursor()
+                let keyframe = ring.keyframe(atOrAfterSeq: cursor)
+                let cursorPts = ring.pts(atSeq: cursor)
+                let newest = newestSourcePts()
+                let waited = ProcessInfo.processInfo.systemUptime - since
+                switch SoftwareLiveJoinPolicy.alignment(cursorSeq: cursor, keyframe: keyframe,
+                                                        wantedLead: liveJoinAlignLead, newestPts: newest,
+                                                        waited: waited, sourceEnded: sourceEnded()) {
+                case .wait:
+                    condition.lock()
+                    autoreleasepool {
+                        _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
+                    }
+                    condition.unlock()
+                    return true
+                case .snap:
+                    liveJoinAlignSince = nil
+                    if let keyframe, placeCursor(keyframe.seq, generation) {
+                        EngineLog.emit(
+                            "[SWHost] live join moved to the first keyframe: skipped "
+                            + "\(String(format: "%.2f", keyframe.pts - (cursorPts ?? keyframe.pts)))s before it "
+                            + "(cursor seq=\(cursor) -> \(keyframe.seq), keyframe pts=\(String(format: "%.2f", keyframe.pts)), "
+                            + "lead \(String(format: "%.2f", newest - keyframe.pts))s, waited \(String(format: "%.0f", waited * 1000)) ms)",
+                            category: .swPlayback
+                        )
+                        return true
+                    }
+                case .stay:
+                    liveJoinAlignSince = nil
+                    if keyframe == nil {
+                        EngineLog.emit(
+                            "[SWHost] live join found no keyframe in \(String(format: "%.0f", waited * 1000)) ms; "
+                            + "starting at the cursor (seq=\(cursor))",
+                            category: .swPlayback
+                        )
+                    }
+                }
             }
             let cursor = readCursor()
             let bounds = ring.seqBounds
@@ -2929,6 +3220,14 @@ final class SoftwarePlaybackHost {
         var didEvaluateInitialAVSkew = false
         var discardAudioBeforeSeconds = Double.nan
         let startupSeekGeneration = seekGeneration()
+        // AE#844: a live join reads the source from wherever it stands, mid-GOP as a rule, and
+        // would arm the clock on audio the picture only catches up with at the next keyframe.
+        // Audio up to that keyframe is dropped while the clock is unarmed
+        // (`SoftwareLiveJoinPolicy.dropsAudioBeforeFirstKeyframe`).
+        var liveJoinAwaitsKeyframe = isLive && videoStreamIndex >= 0 && audioDecoder != nil
+        var liveJoinDropStartedAt: TimeInterval?
+        var liveJoinFirstDroppedPts = Double.nan
+        var liveJoinDroppedPackets = 0
 
         // VOD audio decoupling (#107 family). The combined loop paced EVERYTHING on the video
         // renderer's ~10-frame queue, so interleaved audio could never build more than ~0.3 s
@@ -3451,6 +3750,46 @@ final class SoftwarePlaybackHost {
                 }
             }
 
+            if liveJoinAwaitsKeyframe {
+                if clockArmed() || backgroundAudioOnly() {
+                    liveJoinAwaitsKeyframe = false
+                } else if streamIdx == videoStreamIndex, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 {
+                    liveJoinAwaitsKeyframe = false
+                    if liveJoinDroppedPackets > 0 {
+                        let keyPts = packet.pointee.pts != Int64.min
+                            ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
+                        EngineLog.emit(
+                            "[SWHost] live join starts on the first keyframe: dropped \(liveJoinDroppedPackets) audio "
+                            + "packets (\(String(format: "%.2f", keyPts - liveJoinFirstDroppedPts))s) before it, "
+                            + "keyframe pts=\(String(format: "%.2f", keyPts))",
+                            category: .swPlayback
+                        )
+                    }
+                } else if streamIdx == audioStreamIndex {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let pts = packet.pointee.pts != Int64.min
+                        ? Double(packet.pointee.pts) * audioTimeBaseSeconds : Double.nan
+                    if liveJoinDropStartedAt == nil {
+                        liveJoinDropStartedAt = now
+                        liveJoinFirstDroppedPts = pts
+                    }
+                    if SoftwareLiveJoinPolicy.dropsAudioBeforeFirstKeyframe(
+                        waited: now - (liveJoinDropStartedAt ?? now),
+                        droppedSpanSeconds: pts - liveJoinFirstDroppedPts) {
+                        liveJoinDroppedPackets += 1
+                        av_packet_unref(packet)
+                        av_packet_free_safe(packet)
+                        return true
+                    }
+                    liveJoinAwaitsKeyframe = false
+                    EngineLog.emit(
+                        "[SWHost] live join found no keyframe after \(liveJoinDroppedPackets) audio packets; "
+                        + "starting on the audio",
+                        category: .swPlayback
+                    )
+                }
+            }
+
             if streamIdx == videoStreamIndex {
                 // Background audio-only: drop video, don't gate on the non-draining display layer.
                 if backgroundAudioOnly() {
@@ -3485,7 +3824,7 @@ final class SoftwarePlaybackHost {
                 while !mayDecodeVideoPacket(packet) && !stopRequested() && !backgroundAudioOnly() {
                     // A seek can move the clock backwards while this compressed FEL packet is
                     // held. Leave the wait so the generation check below discards it immediately.
-                    if videoDecoder is DualLayerVideoDecoder, seekGeneration() != genBeforeRead { break }
+                    if Self.isDualLayer(videoDecoder), seekGeneration() != genBeforeRead { break }
                     autoreleasepool {
                         if !isPlaying() {
                             condition.lock()

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 
 /// Canonical Metal source for the Dolby Vision FEL composer.
@@ -555,9 +557,16 @@ kernel void dovi_compose_chroma(
         bool cr_active = (params.nlq_cr.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cr.nlq_scale != 0);
         if (cb_active || cr_active) {
             constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-            float2 uv = (float2(gid) + 0.5f) / float2(uv_width, uv_height);
-            float2 el = dovi_sample_el_2d(el_uv_tex, s, uv,
-                                          float2(params.el_width / 2u, params.el_height / 2u)) * dovi_unorm_to_code;
+            // Chroma is co-sited with the top-left luma sample (chroma location type 2, as HDR10 and
+            // Dolby Vision streams carry it), so the enhancement chroma grid and the base chroma grid
+            // share their first sample rather than their outer edge: base chroma sample n sits at EL
+            // chroma texel n * el / bl, and a quarter-resolution EL gives the even samples exactly and
+            // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
+            // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
+            // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
+            float2 el_uv_size = float2(params.el_width / 2u, params.el_height / 2u);
+            float2 uv = float2(gid) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
+            float2 el = dovi_sample_el_2d(el_uv_tex, s, uv, el_uv_size) * dovi_unorm_to_code;
             if (cb_active) {
                 vdr_cb += dovi_eval_inv_nlq(params.nlq_cb, int(rint(el.r)));
             }
@@ -721,3 +730,4 @@ kernel void dovi_layout_probe(
         preamble + "\n" + sharedStructs + "\n" + kernels + "\n"
     }
 }
+#endif

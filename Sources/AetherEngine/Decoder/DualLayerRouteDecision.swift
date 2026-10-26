@@ -18,6 +18,11 @@ enum DualLayerRouteDecision: Equatable {
         /// Not HEVC Dolby Vision Profile 7: nothing to decide, and nothing is logged.
         case notProfile7
         case preferenceOff
+        /// The package was built without the `DualLayerDolbyVision` trait, so there is no composer.
+        case notBuiltIn
+        /// The enhancement layer is not in the video packets: a UHD Blu-ray's lives on its own PID and the demuxer
+        /// folds in only its RPUs (`BluRayDolbyVisionLayers`), so there is nothing to compose.
+        case enhancementLayerNotInPackets
         case baseLayerOnlyHandling
         case liveOrNotSeekable
         case noHardwareHEVC
@@ -50,6 +55,9 @@ enum DualLayerRouteDecision: Equatable {
             value.rounded() == value ? String(Int(value)) : String(format: "%.3f", value)
         }
     }
+
+    /// Whether the composer is compiled in (the `DualLayerDolbyVision` package trait, off by default).
+    static let isBuiltIn = AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn
 
     /// The most pixels per second, base layer plus enhancement layer, the route is willing to decode in
     /// real time: UHD 3840x2160 at 30 fps (248.8 Mpx/s) plus a 1920x1080 enhancement layer at 30 fps
@@ -94,10 +102,13 @@ enum DualLayerRouteDecision: Equatable {
         preferDualLayerDolbyVision: Bool,
         isLive: Bool,
         isSourceSeekable: Bool,
-        canHardwareDecode: (() -> Bool)?
+        canHardwareDecode: (() -> Bool)?,
+        enhancementLayerInPackets: Bool = true
     ) -> Reason? {
         guard codecID == AV_CODEC_ID_HEVC, dvProfile == 7 else { return .notProfile7 }
         guard preferDualLayerDolbyVision else { return .preferenceOff }
+        guard isBuiltIn else { return .notBuiltIn }
+        guard enhancementLayerInPackets else { return .enhancementLayerNotInPackets }
         guard dolbyVisionHandling == .automatic else { return .baseLayerOnlyHandling }
         guard !isLive, isSourceSeekable else { return .liveOrNotSeekable }
         guard canHardwareDecode?() ?? true else { return .noHardwareHEVC }
@@ -115,12 +126,14 @@ enum DualLayerRouteDecision: Equatable {
         canHardwareDecode: (() -> Bool)?,
         elType: String?,
         geometry: Geometry,
-        enhancementLayerSize: (width: Int, height: Int)? = nil
+        enhancementLayerSize: (width: Int, height: Int)? = nil,
+        enhancementLayerInPackets: Bool = true
     ) -> DualLayerRouteDecision {
         if let reason = blockingReasonBeforeProbe(
             codecID: codecID, dvProfile: dvProfile, dolbyVisionHandling: dolbyVisionHandling,
             preferDualLayerDolbyVision: preferDualLayerDolbyVision, isLive: isLive,
-            isSourceSeekable: isSourceSeekable, canHardwareDecode: canHardwareDecode) {
+            isSourceSeekable: isSourceSeekable, canHardwareDecode: canHardwareDecode,
+            enhancementLayerInPackets: enhancementLayerInPackets) {
             return .notTaken(reason)
         }
         switch elType {
@@ -165,6 +178,10 @@ extension DualLayerRouteDecision.Reason {
             return "not Dolby Vision Profile 7"
         case .preferenceOff:
             return "preferDualLayerDolbyVision is off"
+        case .notBuiltIn:
+            return "built without the DualLayerDolbyVision trait"
+        case .enhancementLayerNotInPackets:
+            return "enhancement layer on its own PID (UHD Blu-ray), only its RPUs are folded in"
         case .baseLayerOnlyHandling:
             return "dolbyVisionHandling is baseLayerOnly"
         case .liveOrNotSeekable:

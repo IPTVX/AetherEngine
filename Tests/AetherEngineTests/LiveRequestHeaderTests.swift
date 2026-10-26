@@ -15,19 +15,30 @@ struct LiveRequestHeaderTests {
     /// An origin whose first token lapses after the opening range: "first" is served below
     /// `lapsesAt` and refused from there on, "second" is served everywhere. Tying the lapse to the
     /// offset rather than to a moment keeps the read from racing the rotation.
+    ///
+    /// The host's renewal happens here too, on the refusal numbered `renewsAtRefusal`, before that
+    /// 401 goes out. A test task that watched for the refusal and then renewed raced the reader's
+    /// credential ladder (`AVIOReader.credentialRefusalMaxStreak`, about 3 s), which a loaded
+    /// runner overran: the reader gave up before the renewal landed.
     final class TokenGate: @unchecked Sendable {
         private let lock = NSLock()
         private var refused = 0
         let lapsesAt: Int64
+        let renewsAtRefusal: Int
         weak var origin: ThrottledOriginServer?
+        var renew: (@Sendable () -> Void)?
 
-        init(lapsesAt: Int64) { self.lapsesAt = lapsesAt }
+        init(lapsesAt: Int64, renewsAtRefusal: Int) {
+            self.lapsesAt = lapsesAt
+            self.renewsAtRefusal = renewsAtRefusal
+        }
         var refusals: Int { lock.withLock { refused } }
 
         func answer(_ index: Int, offset: Int64) -> ThrottledOriginServer.Directive {
             let sent = origin?.requestHeaders[index]["authorization"]
             if sent == "Bearer second" || (sent == "Bearer first" && offset < lapsesAt) { return .serve206 }
-            lock.withLock { refused += 1 }
+            let count = lock.withLock { refused += 1; return refused }
+            if count == renewsAtRefusal { renew?() }
             return .status(401)
         }
     }
@@ -36,7 +47,9 @@ struct LiveRequestHeaderTests {
           .timeLimit(.minutes(2)))
     func refusedTokenHealsWithoutReopen() async throws {
         let firstRange: Int64 = 256 * 1024
-        let gate = TokenGate(lapsesAt: firstRange)
+        // The last refusal the ladder still retries after: the reader is mid-ladder, on the stale
+        // token, when the renewal lands.
+        let gate = TokenGate(lapsesAt: firstRange, renewsAtRefusal: AVIOReader.credentialRefusalMaxStreak)
         let originMaybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024,
                                                 respond: { index, offset, _ in gate.answer(index, offset: offset) })
         let origin = try #require(originMaybe)
@@ -44,6 +57,7 @@ struct LiveRequestHeaderTests {
         defer { origin.stop() }
 
         let store = RequestHeaderStore(["Authorization": "Bearer first"])
+        gate.renew = { store.replace(["Authorization": "Bearer second"]) }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/movie.bin")!,
                                 extraHeaders: store.current,
                                 boundedInitialFetch: firstRange,
@@ -66,12 +80,9 @@ struct LiveRequestHeaderTests {
             delivered.finish(got)
         }
 
-        // The reader has met the refusal and is in its reconnect ladder before the host renews.
-        try await waitFor { gate.refusals >= 1 }
-        store.replace(["Authorization": "Bearer second"])
-
         try await waitFor { delivered.total != nil }
         #expect(delivered.total == target, "the read healed past the refusal instead of failing")
+        #expect(gate.refusals == AVIOReader.credentialRefusalMaxStreak, "the renewal landed mid-ladder")
         let sent = origin.requestHeaders.map { $0["authorization"] }
         #expect(sent.last == "Bearer second", "the healing request carried the renewed token")
         // One reader all the way through: the same AVIOReader was never reopened, it only reconnected.
