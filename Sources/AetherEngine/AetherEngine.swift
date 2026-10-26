@@ -4536,6 +4536,25 @@ public final class AetherEngine: ObservableObject {
                 }
             }.value
             probeOpened = true
+            if loadGeneration == gen, options.isLive, probe.confirmedFiniteLiveResource {
+                // A finite placeholder is still a Live channel to its host, but the engine must
+                // keep its whole program and end at EOF. A sliding Live playlist would evict the
+                // playhead while a fast download runs ahead, then reopen the same file forever.
+                options.isLive = false
+                options.isLiveRejoin = false
+                options.liveJoinProfile = .standard
+                loadedOptions.isLive = false
+                loadedOptions.isLiveRejoin = false
+                loadedOptions.liveJoinProfile = .standard
+                isLive = false
+                isSequentialOrigin = options.sequentialOrigin
+                liveWindow = nil
+                undecodableLiveAudioStreamIndices.removeAll()
+                EngineLog.emit(
+                    "[AetherEngine] confirmed finite MP4 on a Live endpoint; using finite session playback",
+                    category: .engine
+                )
+            }
             let videoIdx = probe.videoStreamIndex
             if videoIdx >= 0, let stream = probe.stream(at: videoIdx) {
                 detectedFormat = Self.detectVideoFormat(stream: stream)

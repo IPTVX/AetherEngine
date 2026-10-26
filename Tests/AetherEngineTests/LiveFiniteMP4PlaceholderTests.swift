@@ -53,7 +53,10 @@ struct LiveFiniteMP4PlaceholderTests {
             // Only the worker releases native state; markClosed merely interrupts the current open.
             defer { demuxer.close() }
             try demuxer.open(url: url, isLive: isLive)
-            return demuxer.videoStreamIndex >= 0
+            return (
+                hasVideo: demuxer.videoStreamIndex >= 0,
+                finiteLiveResource: demuxer.confirmedFiniteLiveResource
+            )
         }
 
         let deadline = ContinuousClock.now + .seconds(2)
@@ -74,12 +77,27 @@ struct LiveFiniteMP4PlaceholderTests {
             "isLive=\(isLive), mode=\(responseMode), requests=\(requestCount), stages=\(observedStages)"
         )
         if completedWithinBudget {
-            #expect(try outcome.get(), "The finite fixture must resolve its video stream")
+            let opened = try outcome.get()
+            #expect(opened.hasVideo, "The finite fixture must resolve its video stream")
+            #expect(opened.finiteLiveResource == isLive, "The session must receive the HTTP reader's finite-resource proof")
             #expect(observedStages.contains("containerOpened"))
             #expect(observedStages.contains("streamsProbed"))
         }
         try await waitFor { origin.isStopped }
         #expect(origin.failure == nil)
+    }
+
+    /// A normal finite custom source has a duration but provides no HTTP Live resource evidence.
+    @Test("A finite custom container does not establish finite HTTP Live resource proof")
+    func test_customSource_finiteDuration_doesNotClaimHTTPProof() throws {
+        let bytes = try ProbeTestFixtures.decode(AtmosDetectionProbeIntegrationTests.videoOnlyBase64)
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+
+        try demuxer.open(reader: DataIOReader(data: bytes), formatHint: "mp4", isLive: false)
+
+        #expect(demuxer.duration > 0)
+        #expect(!demuxer.confirmedFiniteLiveResource)
     }
 
     /// Produces only loopback fixture responses, including Content-Type and finite length on every success.

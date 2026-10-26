@@ -385,6 +385,12 @@ public final class Demuxer: @unchecked Sendable {
     // Forward-only custom sources report false.
     var isSourceSeekable: Bool { avioProvider?.isSeekable ?? true }
 
+    /// The HTTP reader proved a finite, non-fragmented MP4 despite the caller's Live declaration.
+    /// Container duration alone, custom sources and ordinary Live or fragmented MP4 do not establish this proof.
+    var confirmedFiniteLiveResource: Bool {
+        (avioProvider as? AVIOReader)?.isConfirmedFiniteLiveResource ?? false
+    }
+
     /// True when the source is a UHD Blu-ray clip whose Dolby Vision RPUs are folded in from the enhancement-layer
     /// PID (`BluRayDolbyVisionLayers`): the video packets carry the RPU but not the enhancement layer itself.
     private(set) var foldsBluRayDolbyVisionLayers = false

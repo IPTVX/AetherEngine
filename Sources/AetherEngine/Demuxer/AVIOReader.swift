@@ -157,6 +157,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Protected by `winCond`; retained across range refills of the same resource.
     private var confirmedFiniteLiveResource = false
 
+    /// Whether this live-labelled HTTP source proved a complete, non-fragmented MP4 resource.
+    /// The owning session reads this after probing to use finite playback semantics as well as finite IO.
+    var isConfirmedFiniteLiveResource: Bool {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return confirmedFiniteLiveResource
+    }
+
     /// Whether EOF and reconnects still follow an endless feed. Read only while holding `winCond`.
     private var usesLiveReconnectSemantics: Bool {
         isLive && !confirmedFiniteLiveResource
