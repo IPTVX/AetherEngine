@@ -58,7 +58,9 @@ struct BackgroundDecisionWaitsForLoadTests {
         return runs
     }
 
-    private static func fixture() throws -> Data { try ProbeTestFixtures.hdr10Plus() }
+    /// Keeps playback alive while the owed policy hops asynchronously to the main actor.
+    /// A short probe fixture can reach EOF before that callback observes its settled state.
+    private static func fixture() throws -> Data { try LongGOPTransportStreamFixture.data() }
 
     @Test("A load in flight holds the decision whatever state it passes through")
     func settleMatrix() {
@@ -77,7 +79,7 @@ struct BackgroundDecisionWaitsForLoadTests {
         let runs = Self.installPolicy(on: engine)
         let reader = HeldDataReader(try Self.fixture())
         let load = Task { @MainActor in
-            try await engine.load(source: .custom(reader, formatHint: "mp4"))
+            try await engine.load(source: .custom(reader, formatHint: "mpegts"))
         }
         try await waitFor { reader.entered }
 
@@ -100,7 +102,7 @@ struct BackgroundDecisionWaitsForLoadTests {
     func owedSeekStillSettlesOnTheState() async throws {
         let engine = try AetherEngine()
         defer { engine.stop() }
-        _ = try await engine.load(source: .custom(DataIOReader(data: try Self.fixture()), formatHint: "mp4"))
+        _ = try await engine.load(source: .custom(DataIOReader(data: try Self.fixture()), formatHint: "mpegts"))
         let runs = Self.installPolicy(on: engine)
         engine.state = .seeking
 
@@ -116,14 +118,14 @@ struct BackgroundDecisionWaitsForLoadTests {
     func pictureInPictureClosedMidLoadIsOwed() async throws {
         let engine = try AetherEngine()
         defer { engine.stop() }
-        _ = try await engine.load(source: .custom(DataIOReader(data: try Self.fixture()), formatHint: "mp4"))
+        _ = try await engine.load(source: .custom(DataIOReader(data: try Self.fixture()), formatHint: "mpegts"))
         let runs = Self.installPolicy(on: engine)
         // Backgrounded with a PiP window keeping the session alive, so nothing was owed.
         engine.noteDidEnterBackground()
 
         let reader = HeldDataReader(try Self.fixture())
         let load = Task { @MainActor in
-            try await engine.load(source: .custom(reader, formatHint: "mp4"))
+            try await engine.load(source: .custom(reader, formatHint: "mpegts"))
         }
         try await waitFor { reader.entered }
         engine.settleBackgroundDecisionAfterPictureInPictureClosed()
@@ -136,4 +138,39 @@ struct BackgroundDecisionWaitsForLoadTests {
         #expect(runs.states == [.playing])
         #expect(engine.state == .paused)
     }
+
+    @Test("a retained background reload settles policy without a paused readiness waypoint (AE#870)",
+          arguments: [true, false], [true, false])
+    func retainedReloadSettlesPolicy(autoplay: Bool, settlesBeforeReturn: Bool) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var actions: [AetherEngine.BackgroundAction] = []
+        engine.owedBackgroundPolicyForTesting = { engine in
+            let action = AetherEngine.backgroundAction(
+                isAudioBackend: false, hasSoftwareHost: false, softwareHostHasAudio: false,
+                keepVideoAlive: false, pipActive: false, state: engine.state,
+                retainPausedVideoPipeline: engine.retainsVideoPipelineWhenBackgrounded)
+            actions.append(action)
+            if action == .teardownVideo { engine.releaseVideoPipelineForBackground() }
+        }
+        engine.retainsVideoPipelineWhenBackgrounded = true
+        engine.backgroundPlaybackEnabled = false
+        engine.state = .paused
+        engine.noteDidEnterBackground()
+        // The same admission as loadSession. Remote-HLS autoplay stays .loading until rendering;
+        // it intentionally omits the .paused readiness waypoint of the other video paths.
+        engine.stopInternal(resetDisplayCriteria: false)
+        let generation = engine.loadGeneration
+        engine.beginLoadInFlight(generation)
+        engine.state = .loading
+        if settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
+        let decidedMidLoad = try await waitFor(upTo: .milliseconds(300)) { !actions.isEmpty }
+        #expect(!decidedMidLoad)
+        engine.endLoadInFlight(generation)
+        if !settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
+        try await waitFor { !actions.isEmpty }
+        #expect(actions == [autoplay ? .teardownVideo : .doNothing])
+        #expect(engine.state == .paused)
+    }
+
 }

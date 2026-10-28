@@ -592,13 +592,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// off the HDMI route has to know that, or it reads the carrier as a downmix.
     public internal(set) var audioIsAtmosStreamCopy = false
 
-    /// The audio is TrueHD Atmos or DTS:X rendered to APAC (`objectAudioRendering`), which on tvOS needs
-    /// `AtmosOutputActivator` beside the player to reach the receiver as Atmos.
-    var audioIsAPAC = false
+    /// The audio is TrueHD Atmos or DTS:X rendered into a speaker bed (`objectAudioRendering`), as APAC or
+    /// PCM, which on tvOS some sinks only show as Atmos with `AtmosOutputActivator` beside the player.
+    var audioIsRenderedBed = false
 
-    /// The APAC track is TrueHD Atmos, not DTS:X: only then does `AtmosOutputActivator` bring the
+    /// The rendered bed is TrueHD Atmos, not DTS:X: only then does `AtmosOutputActivator` bring the
     /// receiver to Dolby Atmos, which a DTS programme is not.
-    var audioAPACIsFromDolbyAtmos = false
+    var audioBedIsFromDolbyAtmos = false
 
     /// The DTS:X decoder confirmed the playing track as DTS:X (#744), whatever FFmpeg's profile label said. The
     /// engine folds it into the published track's `isDTSX`.
@@ -860,6 +860,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// the keyframe-aligned plan's boundaries ARE index entries. `.decode` for every other plan,
     /// which is what the cutter compared before the axis existed.
     var planBoundaryAxis: PlanBoundaryAxis = .decode
+
+    /// How far before its boundary the keyframe each `segmentPlan` entry names may arrive
+    /// (`VODSegmentCutter.reachTicks`). Empty unless a #409 repair moves keyframes off the index.
+    /// Set with the final plan by `finalizedPlan`, never off the plan before it is collapsed.
+    var planKeyframeReachTicks: [Int64] = []
+    /// `Demuxer.indexedKeyframeAdvanceTicks` of a keyframe-aligned plan, held until the plan is final.
+    var planKeyframeAdvanceTicks: Int64 = 0
 
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
@@ -1456,6 +1463,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let durationSeconds = dem.duration
         var plan: [Segment]
         var keyframeBytePositions: [Int64: Int64] = [:]
+        planKeyframeAdvanceTicks = 0
         if isLiveSession {
             sourceBitrate = dem.bitRate
             self.firstKeyframePts = 0
@@ -1559,6 +1567,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // stamping. Read from the demuxer that produced them, never from the URL or the
                 // host's metadata: on a remux session the delivered container is the one indexed.
                 planBoundaryAxis = PlanBoundaryAxis.forContainer(formatName: dem.containerFormatName)
+                planKeyframeAdvanceTicks = dem.indexedKeyframeAdvanceTicks
                 let firstKeyframePts = keyframes.sorted().first ?? 0
                 self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -1738,6 +1747,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if !isLiveSession {
             if dem.isSourceSeekable { dem.seek(to: 0) }
             dem.endIndexPass()      // AE#585: the next read that lands outside a span is playback's
+            // The prewarm left the streaming connection mid-file, so playback's first miss past the
+            // retained head was a 4 MB detour block, which on a one-request origin waited its full
+            // 4 s budget for the slot that connection held (first frame 11 s on a 1080p MKV). Playback
+            // starts here: the first miss anchors the connection, as a restart's does (AE#782).
+            if dem.isSourceSeekable { dem.notePlaybackRepositioned() }
         }
         demuxerAtInitialProducerStart = false
 
@@ -1865,6 +1879,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
             || (videoStream.pointee.disposition & AV_DISPOSITION_MULTILAYER) != 0 {
             EngineLog.emit("[HLSVideoEngine] stereo: \(stereo.reason)", category: .session)
         }
+        // AE#886: built from stream fields only, so every producer of the session (and every init it
+        // writes) agrees on the time base. A Matroska track with DefaultDuration probes its rate exactly.
+        let frameGrid: CFRFrameGrid? = isLiveSession ? nil : CFRFrameGrid.make(
+            sourceTimeBase: videoTimeBase,
+            frameRate: videoStream.pointee.avg_frame_rate.num > 0
+                ? videoStream.pointee.avg_frame_rate : videoStream.pointee.r_frame_rate,
+            startPts: videoStream.pointee.start_time
+        )
+        if let frameGrid {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#886 frame grid: source TB \(videoTimeBase.num)/\(videoTimeBase.den) "
+                + "is coarser than the frame, muxing on 1/\(frameGrid.outputTimeBase.den) "
+                + "(\(frameGrid.frameTicks) ticks a frame, origin \(frameGrid.originPts))",
+                category: .session
+            )
+        }
         let videoConfig = HLSSegmentProducer.StreamConfig(
             codecpar: UnsafePointer(ownedVideoParams.ptr),
             timeBase: videoTimeBase,
@@ -1876,14 +1906,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
             nalFramingOverride: measuredVideoNALFraming,
             convertsAnnexBSamples: framingNormalization.convertsAnnexBSamples,
             nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed),
-            stereo: stereo.signal
+            stereo: stereo.signal,
+            frameGrid: frameGrid
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
         // Fold degenerate sub-frame segments (keyframe clusters make buildKeyframeSegmentPlan emit
         // ~40 ms segments the producer cannot cut, wedging the near-EOF resume; the plan and producer
         // share these boundaries, so the merge fixes both at once).
-        plan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
+        (plan, planKeyframeReachTicks) = Self.finalizedPlan(
+            plan, minDurationSeconds: Self.minSegmentDurationSeconds,
+            keyframeAdvance: planKeyframeAdvanceTicks, keyframes: Array(keyframeBytePositions.keys))
         self.segmentPlan = plan
         if !keyframeBytePositions.isEmpty {
             sourcePeakBitrate = Self.peakSegmentBitrate(plan: plan, keyframeBytePositions: keyframeBytePositions)
@@ -2248,7 +2281,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // true on a source whose stream-copy was rejected and bridged to FLAC; objects do not survive
         // that, hence the `.streamCopy` conjunct. Without it a downgraded session would advertise
         // `CHANNELS="16/JOC"` over a FLAC bed, which is worse than saying nothing.
-        // #731: the APAC bed is muxed behind a 2-channel ALAC stand-in, so its bridge states the count.
+        // #731: the APAC bed is muxed behind a 2-channel ALAC stand-in, so its bridge states the count
+        // (the PCM bed's codecpar carries its own, the bridge states it all the same).
         let servedAudioChannels: Int? = savedAudioConfig.map {
             $0.bridge?.servedChannelCount ?? Int($0.codecpar.pointee.ch_layout.nb_channels)
         }
@@ -3488,6 +3522,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             restartTargetVideoPts: videoTarget,
             boundaryClaimsRandomAccess: planBoundariesClaimRandomAccess,
             planBoundaryAxis: planBoundaryAxis,
+            keyframeReachTicks: Array(planKeyframeReachTicks.dropFirst(min(baseIndex, planKeyframeReachTicks.count))),
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework

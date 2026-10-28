@@ -94,6 +94,7 @@ struct AudioOutputFlushEpochTests {
         let captured = output.epoch
         output.flush()
         let afterSeek = output.epoch
+        let afterSeekClockCommand = output.clockCommandRevision
         let buffer = try #require(makeBuffer(pts: 100))
 
         // Act — attempt the old packet's startup correction.
@@ -102,6 +103,7 @@ struct AudioOutputFlushEpochTests {
         // Assert — the refused correction never flushes the current queue.
         #expect(correctedEpoch == nil)
         #expect(output.epoch == afterSeek)
+        #expect(output.clockCommandRevision == afterSeekClockCommand)
         #expect(!output.enqueue(sampleBuffer: buffer, ifEpoch: captured))
     }
 

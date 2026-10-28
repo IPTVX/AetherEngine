@@ -96,7 +96,7 @@ On Apple platforms the real choice is between AVPlayer, with deep OS integration
 | **Container & codec breadth** | Wide, FFmpeg demux | Wide, FFmpeg demux | Narrow, Apple's set | Wide | Wide |
 | **Hardware decode** | VideoToolbox, dav1d SW fallback | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
 | **Dolby Vision** | P5, P7 as 8.1 (or opt-in FEL dual-layer), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
-| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial); TrueHD Atmos and DTS:X rendered to APAC, heights kept (optional components) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
+| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial); TrueHD Atmos and DTS:X rendered into a speaker bed, delivered as lossless PCM (APAC on AirPlay), heights kept (optional components) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
 | **HDR on tvOS** | Native Match Content switch | Native Match Content on AVPlayer path, else Metal tone-map | Native Match Content | Software tone-mapping | Software tone-mapping |
 | **Rendering & UI** | OS-native, you ship SwiftUI | Own Metal renderer, bundled controls | OS-native, you ship UI | Own renderer, bundled controls | Own renderer, bundled OSC |
 | **Apple TV / App Store** | Yes, LGPL plus store exception | Free build GPL, paid LGPL tier for AV1 hardware decode and the full decoder set | Yes | Yes, LGPL | Not practical, GPL, no tvOS |
@@ -388,7 +388,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.50.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -583,6 +583,12 @@ A test rig that only captures stdout / stderr (`devicectl device process launch 
 EngineLog.handler = { print($0) }   // every info-level line, verbatim
 ```
 
+A log viewer that files lines by subsystem takes the same lines with their category instead of parsing the `[Prefix]` in the text:
+
+```swift
+EngineLog.structuredHandler = { line, category, level in viewer.append(line, from: category.rawValue) }
+```
+
 The first line of any session names the FFmpeg that answered, because which one does is decided by your executable's link rather than by the package graph:
 
 ```
@@ -635,10 +641,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.50.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.48.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.50.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -651,7 +657,18 @@ Pin to `.upToNextMinor(from: "7.48.0")` for stricter teams that prefer to opt in
 | Swift | 6.4 |
 | Xcode | 27.0 |
 
-The manifest requires Swift tools 6.1 for package traits. The Swift and Xcode rows are the toolchain CI builds and tests with (GitHub's `xcode-27` image); older toolchains are not tested. The source needs at least the 26.2 SDK in any case (`VTRegisterSupplementalVideoDecoderIfAvailable` is iOS / tvOS 26.2 API, and an unguarded C symbol has to exist at compile time). This IPTVX fork retains iOS / tvOS 16 and macOS 14 through availability checks and compatibility paths for the renderer, clock, audio session and display criteria.
+The manifest requires Swift tools 6.1 for package traits. The Swift and Xcode rows are the
+supported toolchain CI builds and tests with (GitHub's `xcode-27` image). Older toolchains are
+not tested. This IPTVX fork retains iOS / tvOS 16 and macOS 14 through availability checks and
+compatibility paths for the renderer, clock, audio session and display criteria.
+
+Supplemental AV1/VP9 registration also has a narrow compile-time guard around
+`VTRegisterSupplementalVideoDecoderIfAvailable`, first declared by the mobile SDKs in Xcode 26.2.
+The guard uses Swift 6.2.3 as a proxy for that SDK in stock Xcode bundles. It omits those calls in
+stock Xcode 26.0/26.1 while leaving hardware queries and software fallback intact; it does not
+establish that the rest of the package builds there or lower the supported toolchain above.
+A separately installed newer Swift toolchain paired with an older SDK is not covered by this
+proxy. The existing macOS registration path is unchanged.
 
 The upstream 7.x line requires iOS / tvOS 18 and macOS 15. IPTVX integrates the complete upstream release and pins its compatibility fork and binary packaging explicitly; the upstream deployment floor does not describe this fork.
 
@@ -673,7 +690,7 @@ These components may be subject to third-party patent licensing. Integrators who
 To enable them, list the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.50.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
 ```
 
