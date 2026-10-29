@@ -13,5 +13,6 @@
   and verification in the registry.
 - Use FlowDeck for Apple build/test/run/device operations. Keep source, automated
   test, simulator, macOS and physical-device evidence distinct.
-- Do not move published tags, add host UI/settings workarounds or expose source
-  URLs, credentials or headers in documentation and test evidence.
+- Move a published tag only when the user explicitly requests it. Do not add host
+  UI/settings workarounds or expose source URLs, credentials or headers in
+  documentation and test evidence.

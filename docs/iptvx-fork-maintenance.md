@@ -37,9 +37,10 @@ increase are implied by this correction.
 
 ## IPTVX-LIVE-AUDIO-DELAY — active
 
-Baseline: upstream `7.51.0`, IPTVX fork `7.51.0-iptvx` at
+Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 `218c922adc1043154b16c161d41eee4fa786bf73`.
-First delivery: `7.51.0-iptvx.1`.
+Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
+correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
 ### Contract to preserve
 
