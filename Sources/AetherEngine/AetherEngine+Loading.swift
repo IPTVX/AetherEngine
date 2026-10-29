@@ -2637,6 +2637,7 @@ extension AetherEngine {
             && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
                 outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
                 outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
+        let awaitsAudioDelaySourceTeardown = ownsLiveAudioDelayRejoin
         stopInternal(resetDisplayCriteria: false,
                      keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                      keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
@@ -2649,6 +2650,13 @@ extension AetherEngine {
         if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         let gen = loadGeneration
+        if awaitsAudioDelaySourceTeardown {
+            do {
+                try await awaitLiveAudioDelaySourceTeardown(generation: gen)
+            } catch {
+                return nil
+            }
+        }
         // Audit LIF-101: the same settle point as `load`, for the same readiness waypoint.
         beginLoadInFlight(gen)
         defer { endLoadInFlight(gen) }

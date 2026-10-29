@@ -2040,6 +2040,16 @@ public final class AetherEngine: ObservableObject {
     /// Detached source cleanup started by the most recent native-session stop.
     private var nativeSourceTeardownTask: Task<Void, Never>?
 
+    /// Waits only after normal teardown invalidates callbacks, before replacement source I/O begins.
+    /// A stop or newer load owns all shared state after this suspension and must not be overwritten.
+    func awaitLiveAudioDelaySourceTeardown(generation: UInt64) async throws {
+        let teardown = nativeSourceTeardownTask
+        await teardown?.value
+        try Task.checkCancellation()
+        try checkLoadCurrent(generation)
+        nativeSourceTeardownTask = nil
+    }
+
     /// Fold the cache's playlist-axis spans onto the published display axis, the same way
     /// `onSeekStateChanged` folds a scrub target (#38). The two axes differ by
     /// `playlistShiftSeconds - sourcePresentationOrigin`, which is not zero on the very path this
@@ -3868,6 +3878,11 @@ public final class AetherEngine: ObservableObject {
     /// the rebuild already in flight delivers the newest one. See `reanchorForAudioDelay`.
     var audioDelayReanchorInFlight = false
 
+    /// Owns a coalesced Live-without-DVR correction until its fresh producer has been installed.
+    var liveAudioDelayRejoinTask: Task<Void, Never>?
+    /// Guards cleanup so a retired correction cannot clear a successor's ownership.
+    var liveAudioDelayRejoinID: UUID?
+
     /// The playhead a rebuild of this session has to come back to (#464 round 2).
     var positionForSessionRebuild: Double {
         let pending = !isLive && nativeHost != nil
@@ -4385,6 +4400,7 @@ public final class AetherEngine: ObservableObject {
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
         claimSoftwarePathTakeover()   // AE#629
+        let awaitsAudioDelaySourceTeardown = ownsLiveAudioDelayRejoin
         stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .inactive
@@ -4471,6 +4487,11 @@ public final class AetherEngine: ObservableObject {
         // Round 3: and the transport it is rebuilding toward, for the same window and the same
         // reason. The host this load replaces is the one a stacked rebuild would ask.
         transportIntentUnderReconstruction = options.autoplay
+        // Invalidate the old generation and detach AVPlayer callbacks BEFORE waiting. Otherwise an
+        // old-item failure during source closure could change the replacement's state or intent.
+        if awaitsAudioDelaySourceTeardown {
+            try await awaitLiveAudioDelaySourceTeardown(generation: gen)
+        }
         isBuffering = false
         residentPlaylistRanges = []
         residentRanges = []
@@ -6065,7 +6086,15 @@ public final class AetherEngine: ObservableObject {
         // A torn-down session (#357 background teardown) has no transport left to read and its
         // resume is the host's call, so that path keeps replaying the mount flag exactly as before.
         if !resumesTornDownSession { setLoadedAutoplay(sessionRebuildResumesPlaying) }
-        if isCustomSource {
+        // A normal Live HLS URL becomes a forward-only ingest reader. Unlike an arbitrary custom
+        // stream it can rejoin from its immutable playlist identity. Only this owned correction
+        // takes that path; the ordinary public custom-source reload contract is unchanged.
+        let audioDelayRejoinSource: MediaSource? = ownsLiveAudioDelayRejoin
+            ? (customReader as? HLSLiveIngestReader)?
+                .makeFreshMainReader(httpHeaders: loadedOptions.httpHeaders)
+                .map { .custom($0, formatHint: "mpegts") }
+            : nil
+        if isCustomSource, audioDelayRejoinSource == nil {
             // Rebuild on retained reader (seekable only); no URL to reopen.
             //
             // AE#526: a refusal, said out loud. This used to return silently, and a host cannot tell
@@ -6146,7 +6175,7 @@ public final class AetherEngine: ObservableObject {
         var options = loadedOptions
         options.isLiveRejoin = options.isLive
         options.subtitleSessionCarryover = carryover
-        try await load(url: url, startPosition: resume, options: options,
+        try await load(source: audioDelayRejoinSource ?? .url(url), startPosition: resume, options: options,
                        audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
         // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
         // while it ran is the newer word.
@@ -6971,6 +7000,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
+        cancelLiveAudioDelayRejoin()
         cancelPendingAudioSelection()
         releaseHeldPicture(reason: "stop")
         nextLoadRequestsInPlaceItemHandover = false
@@ -8067,6 +8097,7 @@ public final class AetherEngine: ObservableObject {
         // AE#560: a recording never outlives its session. This covers stop(), a new load() and
         // every reload, all of which pass through here before the demuxer goes away.
         endRecordingIfRunning(reason: .sessionEnded)
+        if !ownsLiveAudioDelayRejoin { cancelLiveAudioDelayRejoin() }
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
         scrubPreviewSourceGeneration = UUID()

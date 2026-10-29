@@ -21,6 +21,8 @@ For iterative work, open `Package.swift` in Xcode 27+ and pick the `AetherEngine
 
 The `aetherctl` command-line target is macOS-only (it uses `Foundation.Process`) and is excluded from the iOS / tvOS library build.
 
+Before every IPTVX tag update, follow [IPTVX fork maintenance](docs/iptvx-fork-maintenance.md): port, apply and verify each active correction, or document upstream equivalence before retiring it.
+
 When integrating a new upstream tag, merge the complete release. Keep the legacy display-layer queue and availability guards for older systems, and keep the modern video-renderer path for iOS/tvOS 18+, macOS 15+, and visionOS. Before publishing an IPTVX fork tag, run the package tests, compile with iOS/tvOS 16 deployment targets, and check playback on both older and current OS versions. Do not update IPTVX's package pin until that validation passes.
 
 ## Writing tests

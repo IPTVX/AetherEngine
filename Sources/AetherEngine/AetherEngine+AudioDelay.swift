@@ -39,9 +39,10 @@ extension AetherEngine {
     ///   makes AVPlayer let go. Measured on the same fixture: about 0.3 s of held picture, position
     ///   preserved to the sample (7.80 s to 7.80 s).
     ///
-    /// This is why it is not free the way `setRate` is. A session that cannot re-anchor (live without
-    /// a DVR window) keeps the value and lets it arrive at the next seam the session makes on its
-    /// own, rather than being denied it.
+    /// Live loopback without DVR rejoins the Live edge with a fresh producer, after the previous
+    /// source has closed. This preserves transport and selections without enabling DVR or seeking
+    /// an unavailable position. A custom stream that cannot seek or reopen keeps the value for its
+    /// next independently created producer and logs the refusal.
     ///
     /// On `.remoteBypass` AVPlayer owns the whole media selection and the engine never sees the
     /// timestamps, and an audio-only session has no video for audio to be early or late against. Both
@@ -67,7 +68,7 @@ extension AetherEngine {
         // not the engine's to move, while the reload underneath it was already cutting with the new
         // value. The value is in `loadedOptions`, which is exactly what that load reads, so the
         // honest answer is that it is on its way rather than that it cannot arrive.
-        guard state != .loading else {
+        guard state != .loading, liveAudioDelayRejoinID == nil else {
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) set while the session is "
                 + "being rebuilt; the load in flight reads it from the options and delivers it",
@@ -105,13 +106,17 @@ extension AetherEngine {
             // correction rides the session-preserving reload #460 built, which is also the spelling
             // this was filed as an alternative for.
             // Written onto the session that is running, not just carried in the options the reload
-            // replays: if the reload below cannot happen (live without a DVR window), this is what
+            // replays: if the source cannot reopen, this is what
             // makes the next producer the session builds for its own reasons cut with the new value.
             nativeVideoSession?.audioDelaySeconds = clamped
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the loopback path",
                 category: .engine
             )
+            if isLive, liveWindow?.windowSeconds == nil {
+                rejoinLiveForAudioDelay()
+                return
+            }
             reanchorForAudioDelay { _, delay in
                 // Round 2 (cmcpherson274): this was `try? await reloadAtCurrentPosition()`, under a
                 // line that had already announced the re-cut. Two claims, one of them unverified: a
@@ -156,11 +161,73 @@ extension AetherEngine {
         }
     }
 
+    /// Whether the current reload owns the correction for precisely the session it is retiring.
+    var ownsLiveAudioDelayRejoin: Bool {
+        guard let context = LiveAudioDelayRejoinContext.current else { return false }
+        return context.ownerID == liveAudioDelayRejoinID && context.generation == loadGeneration
+    }
+
+    /// Cancels ownership before a stop or unrelated source replacement can be resumed by old work.
+    func cancelLiveAudioDelayRejoin() {
+        liveAudioDelayRejoinID = nil
+        liveAudioDelayRejoinTask?.cancel()
+        liveAudioDelayRejoinTask = nil
+    }
+
+    /// Coalesces Live corrections onto fresh-edge reloads. Every pass reads the latest requested
+    /// offset; a change after the producer captured it requires another pass. URL and reconstructible
+    /// HLS-ingest sources reopen; a genuinely forward-only custom source is explicitly refused.
+    private func rejoinLiveForAudioDelay() {
+        if liveAudioDelayRejoinID != nil { return }
+        if let refusal = sessionReloadRefusal, !(customReader is HLSLiveIngestReader) {
+            EngineLog.emit(
+                "[AetherEngine] AE#464: Live audio-delay rejoin refused (\(refusal.rawValue)); "
+                + "the requested offset is kept for the next producer",
+                category: .engine
+            )
+            return
+        }
+        let ownerID = UUID()
+        let initialGeneration = loadGeneration
+        liveAudioDelayRejoinID = ownerID
+        liveAudioDelayRejoinTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.liveAudioDelayRejoinID == ownerID {
+                    self.liveAudioDelayRejoinID = nil
+                    self.liveAudioDelayRejoinTask = nil
+                }
+            }
+            guard self.loadGeneration == initialGeneration else { return }
+            repeat {
+                let delay = self.loadedOptions.audioDelaySeconds
+                let context = LiveAudioDelayRejoinContext(ownerID: ownerID, generation: self.loadGeneration)
+                do {
+                    try await LiveAudioDelayRejoinContext.$current.withValue(context) {
+                        try await self.reloadAtCurrentPosition()
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.liveAudioDelayRejoinID == ownerID else { return }
+                    EngineLog.emit("[AetherEngine] AE#464: Live audio-delay rejoin failed (\(error))",
+                                   category: .engine)
+                    return
+                }
+                guard self.liveAudioDelayRejoinID == ownerID, !Task.isCancelled else { return }
+                let delivered = self.nativeVideoSession?.audioDelaySeconds ?? delay
+                EngineLog.emit("[AetherEngine] AE#464: rejoined Live with audio delay \(Self.ms(delivered))",
+                               category: .engine)
+                if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds) { return }
+            } while self.isLive && self.liveWindow?.windowSeconds == nil && self.videoRoute == .loopback
+        }
+    }
+
     /// Bring the change to the playhead instead of leaving it to arrive when the media already
     /// committed to the old value drains. What that costs differs per route, which is why the caller
     /// passes the re-anchor in: a flush and a reposition on the software path, a whole item on the
-    /// loopback one. Live without a DVR window has no position to return to, so the value simply
-    /// stands from the next seam the session makes on its own.
+    /// loopback one. Live without DVR has no seek position: software applies its output offset to
+    /// subsequent buffers, while loopback takes the separate fresh-edge rejoin above.
     ///
     /// Neither route asks for the producer restart directly. A restart raised while no seek of the
     /// engine's own is in flight is reported as a user scrub (`setNativeScrubSeek`), which opened a

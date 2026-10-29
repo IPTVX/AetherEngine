@@ -233,9 +233,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// engine-created ingest session (the dead reader's construction inputs are immutable, so the fresh
     /// one rejoins the same channel at its current live edge). Main-video role only: the companion
     /// audio reader's lifetime is owned by its parent and never reopens independently.
-    func makeFreshMainReader() -> HLSLiveIngestReader? {
+    /// A session-preserving correction supplies its current headers, including rotated credentials;
+    /// an autonomous producer reopen keeps the construction-time headers when no override is given.
+    func makeFreshMainReader(httpHeaders: [String: String]? = nil) -> HLSLiveIngestReader? {
         guard role == .mainVideo else { return nil }
-        let fresh = HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
+        let fresh = HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders ?? self.httpHeaders, role: .mainVideo,
                                         diagnosticContext: diagnosticContext)
         fresh.setJoinCushion(joinCushionSeconds)
         return fresh
