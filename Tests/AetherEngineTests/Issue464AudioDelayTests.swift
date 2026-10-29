@@ -15,8 +15,8 @@ struct Issue464AudioDelayPolicyTests {
     func clamping() {
         #expect(AudioDelayPolicy.clamp(0.15) == 0.15)
         #expect(AudioDelayPolicy.clamp(-0.15) == -0.15)
-        #expect(AudioDelayPolicy.clamp(9.0) == AudioDelayPolicy.maxAbsSeconds)
-        #expect(AudioDelayPolicy.clamp(-9.0) == -AudioDelayPolicy.maxAbsSeconds)
+        #expect(AudioDelayPolicy.clamp(181.0) == AudioDelayPolicy.maxAbsSeconds)
+        #expect(AudioDelayPolicy.clamp(-181.0) == -AudioDelayPolicy.maxAbsSeconds)
         // An unset stepper reads back NaN often enough to be worth naming: it must not reach a
         // timestamp, where it would poison every packet the session writes rather than one value.
         #expect(AudioDelayPolicy.clamp(.nan) == 0)
@@ -31,12 +31,14 @@ struct Issue464AudioDelayPolicyTests {
         #expect(AudioDelayPolicy.isOutOfRange(.nan))
     }
 
-    @Test("the bound stays inside the muxer's interleave window, which a constant offset consumes")
-    func boundFitsTheInterleaveWindow() {
-        // A constant A/V offset costs the interleaver |delay| of buffering. The muxer's floor is 8 s
-        // (MP4SegmentMuxer construction in HLSSegmentProducer), so a bound at or above it would let a
-        // host trade lip-sync for a stalled interleaver.
-        #expect(AudioDelayPolicy.maxAbsSeconds < 8.0)
+    /// Large offsets use compressed scheduling before muxing; only the existing small-offset band
+    /// is presented directly to the muxer's bounded interleaver.
+    @Test("large offsets select alignment before exceeding the original interleave band")
+    func largeOffsetsUseCompressedAlignment() {
+        #expect(AudioDelayPolicy.maxAbsSeconds == 180)
+        #expect(!AudioDelayPolicy.usesAlignment(2))
+        #expect(AudioDelayPolicy.usesAlignment(2.5))
+        #expect(AudioDelayPolicy.usesAlignment(-180))
     }
 
     @Test("every route says where its offset lands, and the two AVPlayer-owned ones say they cannot")

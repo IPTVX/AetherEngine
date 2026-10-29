@@ -1,6 +1,6 @@
 import Foundation
 
-/// Carries one owned Live correction through the existing reload/load call chain without a public
+/// Carries one owned audio correction through the existing reload/load call chain without a public
 /// option. The original generation prevents tasks spawned by retired callbacks inheriting ownership.
 struct LiveAudioDelayRejoinContext: Sendable {
     /// Identifies the coalesced correction whose teardown may keep its own task alive.

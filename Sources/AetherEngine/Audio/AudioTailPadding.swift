@@ -62,13 +62,20 @@ enum AudioTailPadding {
     ///
     /// The packets are stamped here rather than taken from the encoder: encoders with a priming
     /// delay (AAC) shift their own timestamps, and every frame is the same silence, so only the
-    /// position matters.
+    /// position matters. Optional byte and generation limits are enabled only by the large-delay caller;
+    /// exceeding either frees all encoded packets and returns an actionable unavailable outcome.
     static func silencePackets(
         codecpar: UnsafePointer<AVCodecParameters>,
         startTicks: Int64,
         endTicks: Int64,
-        timeBase: AVRational
+        timeBase: AVRational,
+        maximumPacketBytes: Int? = nil,
+        isCurrent: (() -> Bool)? = nil
     ) -> Outcome {
+        if let isCurrent, !isCurrent() { return .unavailable("audio-delay buffering cancelled") }
+        if let maximumPacketBytes, maximumPacketBytes < 0 {
+            return .unavailable("audio-delay silence packet limit must be nonnegative")
+        }
         let par = codecpar.pointee
         let codecID = par.codec_id
         if codecID == AV_CODEC_ID_AAC {
@@ -123,13 +130,26 @@ enum AudioTailPadding {
         guard frames > 0 else { return .packets([], encoder: String(cString: codec.pointee.name)) }
 
         var encoded: [UnsafeMutablePointer<AVPacket>] = []
+        var encodedBytes = 0
+        var failure: String?
+        /// Drains only while the owning generation and its optional output-byte reservation permit it.
         func drain() {
-            while encoded.count < frames, let pkt = trackedPacketAlloc() {
+            while encoded.count < frames {
+                if let isCurrent, !isCurrent() { failure = "audio-delay buffering cancelled"; return }
+                guard let pkt = trackedPacketAlloc() else { return }
                 guard avcodec_receive_packet(enc, pkt) >= 0 else {
-                    var p: UnsafeMutablePointer<AVPacket>? = pkt
-                    trackedPacketFree(&p)
+                    var owned = Optional(pkt)
+                    trackedPacketFree(&owned)
                     return
                 }
+                let bytes = Int(pkt.pointee.size)
+                if let maximumPacketBytes, bytes > maximumPacketBytes - encodedBytes {
+                    var owned = Optional(pkt)
+                    trackedPacketFree(&owned)
+                    failure = "audio-delay silence packets exceed the \(maximumPacketBytes)-byte output limit"
+                    return
+                }
+                encodedBytes += bytes
                 encoded.append(pkt)
             }
         }
@@ -138,6 +158,7 @@ enum AudioTailPadding {
         defer { av_frame_free(&frameOpt) }
         guard let frame = frameOpt else { return .unavailable("frame allocation failed") }
         for index in 0..<frames {
+            if let isCurrent, !isCurrent() { failure = "audio-delay buffering cancelled"; break }
             av_frame_unref(frame)
             frame.pointee.format = format.rawValue
             frame.pointee.nb_samples = frameSize
@@ -149,9 +170,21 @@ enum AudioTailPadding {
             frame.pointee.pts = Int64(index) * Int64(frameSize)
             guard avcodec_send_frame(enc, frame) >= 0 else { break }
             drain()
+            if failure != nil { break }
         }
-        _ = avcodec_send_frame(enc, nil)
-        drain()
+        if failure == nil {
+            if let isCurrent, !isCurrent() {
+                failure = "audio-delay buffering cancelled"
+            } else {
+                _ = avcodec_send_frame(enc, nil)
+                drain()
+            }
+        }
+        if let isCurrent, !isCurrent() { failure = "audio-delay buffering cancelled" }
+        if let failure {
+            for packet in encoded { var owned = Optional(packet); trackedPacketFree(&owned) }
+            return .unavailable(failure)
+        }
 
         let frameTicks = av_rescale_q(Int64(frameSize), AVRational(num: 1, den: par.sample_rate), timeBase)
         for (index, pkt) in encoded.enumerated() {
@@ -161,6 +194,10 @@ enum AudioTailPadding {
             pkt.pointee.dts = pts
             pkt.pointee.duration = frameTicks
             pkt.pointee.flags |= AV_PKT_FLAG_KEY
+        }
+        if let isCurrent, !isCurrent() {
+            for packet in encoded { var owned = Optional(packet); trackedPacketFree(&owned) }
+            return .unavailable("audio-delay buffering cancelled")
         }
         return .packets(encoded, encoder: String(cString: codec.pointee.name))
     }
@@ -174,6 +211,48 @@ enum AudioTailPadding {
         guard bytes.count >= offset + 4 else { return nil }
         let value = bytes[offset..<offset + 4].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
         return value > 0 && value <= 16_384 ? Int32(value) : nil
+    }
+
+    /// Same-format Apple HE-AAC silence for explicitly authorized finite alignment tails above two seconds.
+    /// Ordinary padding deliberately keeps its existing LC-only gate. Caller owns returned packets and
+    /// frees them with `trackedPacketFree`; unsupported source configurations produce an actionable reason.
+    /// `isCurrent` cancels encoding between PCM blocks and packet reads when its owning generation ends.
+    static func heAACSilencePackets(
+        codecpar: UnsafePointer<AVCodecParameters>,
+        startTicks: Int64,
+        endTicks: Int64,
+        timeBase: AVRational,
+        isCurrent: (() -> Bool)? = nil
+    ) -> Outcome {
+        HEAACSilenceEncoder.packets(codecpar: codecpar, startTicks: startTicks, endTicks: endTicks, timeBase: timeBase, isCurrent: isCurrent)
+    }
+
+    /// Same-format HE leading silence bounded by the first genuine audio timestamp.
+    /// The trailing encoder's priming allowance is removed as whole frames, so no source sample is overlapped.
+    /// Caller owns returned packets and frees them with `trackedPacketFree`; `isCurrent` cancels stale generations.
+    static func heAACLeadingSilencePackets(
+        codecpar: UnsafePointer<AVCodecParameters>,
+        startTicks: Int64,
+        endTicks: Int64,
+        timeBase: AVRational,
+        isCurrent: (() -> Bool)? = nil
+    ) -> Outcome {
+        switch heAACSilencePackets(codecpar: codecpar, startTicks: startTicks, endTicks: endTicks, timeBase: timeBase, isCurrent: isCurrent) {
+        case .unavailable(let reason): return .unavailable(reason)
+        case .packets(let packets, let encoder):
+            var bounded: [UnsafeMutablePointer<AVPacket>] = []
+            for packet in packets {
+                if packet.pointee.dts >= startTicks, packet.pointee.dts <= endTicks,
+                   packet.pointee.duration > 0, packet.pointee.duration <= endTicks - packet.pointee.dts {
+                    bounded.append(packet)
+                } else {
+                    var owned = Optional(packet)
+                    trackedPacketFree(&owned)
+                }
+            }
+            if bounded.isEmpty { return .unavailable("HE-AAC leading span is shorter than one complete frame") }
+            return .packets(bounded, encoder: encoder)
+        }
     }
 
     /// The format to feed the encoder: for the lossless codecs the one that keeps the track's bit

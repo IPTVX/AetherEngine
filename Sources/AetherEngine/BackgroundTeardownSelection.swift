@@ -29,11 +29,18 @@ extension AetherEngine {
         backgroundTeardownSelection = liveSelection(over: backgroundTeardownSelection)
     }
 
+    /// Captures selection without claiming the background snapshot or changing reload transport.
+    func snapshotReloadSelection(over retained: BackgroundTeardownSelection? = nil) -> BackgroundTeardownSelection {
+        liveSelection(over: retained ?? backgroundTeardownSelection)
+    }
+
     /// The selection a session-preserving reload must restore, claiming any parked teardown
     /// snapshot on the way (once: a second reload reads the live session only).
     func consumeReloadSelection() -> BackgroundTeardownSelection {
-        let parked = backgroundTeardownSelection
+        let audioHandoff = ownsLiveAudioDelayRejoin && audioDelayRebuildNeedsSelectionRestore
+        let parked = backgroundTeardownSelection ?? (audioHandoff ? audioDelayRebuildSelection : nil)
         backgroundTeardownSelection = nil
+        if audioHandoff { audioDelayRebuildNeedsSelectionRestore = false }
         return liveSelection(over: parked)
     }
 

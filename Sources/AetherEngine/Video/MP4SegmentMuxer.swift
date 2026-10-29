@@ -253,6 +253,8 @@ final class MP4SegmentMuxer {
     private(set) var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
     private(set) var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
     private let haveAudio: Bool
+    /// Whether this initialization map actually declares an audio track.
+    var carriesAudio: Bool { haveAudio }
 
     /// AE#464: host audio offset for this muxer, in seconds. Fixed for the muxer's life on purpose:
     /// two offsets inside one output track are not splicable (the seam gains a gap or an overlap of
@@ -318,6 +320,7 @@ final class MP4SegmentMuxer {
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioDelaySeconds: Double = 0,
         onStorageExhausted: (@Sendable () -> Void)? = nil,
+        fragmentBytesAdmission: ((Int) -> Bool)? = nil,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
         self.currentSegmentIndex = initialSegmentIndex
@@ -391,6 +394,11 @@ final class MP4SegmentMuxer {
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
+                if let fragmentBytesAdmission,
+                   !fragmentBytesAdmission(counter.bytesWrittenCurrentSegment + count) {
+                    counter.writeFailed = true
+                    return
+                }
                 var written = 0
                 while written < count {
                     let n = write(counter.fd, ptr.advanced(by: written), count - written)

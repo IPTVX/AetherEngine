@@ -105,7 +105,7 @@ struct LiveAudioDelayTests {
         #expect(engine.liveAudioDelayRejoinTask == nil)
         #expect(reader.closeCount == 0)
         #expect(engine.audioDelaySeconds == 0.5)
-        #expect(messages.value.contains { $0.contains("Live audio-delay rejoin refused (customSourceNotSeekable)") })
+        #expect(messages.value.contains { $0.contains("Audio-delay rebuild refused (customSourceNotSeekable)") })
         let actual = try await audioVideoOffset(engine)
         #expect(abs(actual - baseline) < 0.001)
     }
@@ -184,6 +184,99 @@ struct LiveAudioDelayTests {
                 #expect(engine.state == .idle)
             }
         }
+    }
+
+    /// A large correction blocked waiting for future source history is obsolete as soon as reset
+    /// or the opposite sign is requested. Reopening the same source must not await its 180 s warmup.
+    @Test
+    func zeroInterruptsObsoleteLargeWarmup() async throws {
+        try await verifyObsoleteLargeWarmup(latest: 0)
+    }
+
+    /// Opposite-sign requests preempt the captured positive history before a later zero reset.
+    @Test
+    func oppositeSignInterruptsObsoleteLargeWarmup() async throws {
+        try await verifyObsoleteLargeWarmup(latest: -180)
+    }
+
+    /// Uses a source that cannot provide 180 s, so a successful reset cannot be stale catch-up.
+    private func verifyObsoleteLargeWarmup(latest: Double) async throws {
+        let origin = try #require(RangeFilesOrigin())
+        defer { origin.stop() }
+        origin.serve("/head.ts", try LongGOPTransportStreamFixture.data(), contentType: "video/mp2t")
+        origin.serve("/live.m3u8", Data("""
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-TARGETDURATION:32
+            #EXT-X-MEDIA-SEQUENCE:0
+            #EXTINF:32,
+            head.ts
+
+            """.utf8), contentType: "application/vnd.apple.mpegurl")
+        let sidecar = FileManager.default.temporaryDirectory.appendingPathComponent("delay-selection-\(UUID()).vtt")
+        try Data("WEBVTT\n\n00:00.000 --> 01:30.000\nSelection during warmup\n".utf8).write(to: sidecar)
+        defer { try? FileManager.default.removeItem(at: sidecar) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let url = try #require(URL(string: origin.baseURL + "/live.m3u8"))
+        try await engine.load(url: url, options: LoadOptions(isLive: true,
+            liveJoinProfile: .fastZap, liveStartupGraceSeconds: 0.1,
+            liveStartupSingleSegmentMinimumSeconds: 0.1, liveEdgeCushionSeconds: 0.5,
+            maxConcurrentSourceRequests: 1, autoplay: false))
+        try await waitFor { engine.state == .paused }
+        let selected = engine.activeAudioTrackIndex
+        let initial = try #require(engine.nativeVideoSession)
+        engine.setAudioDelay(180)
+        try #require(try await waitFor(upTo: .seconds(8)) {
+            engine.nativeVideoSession !== initial && engine.nativeVideoSession?.audioDelaySeconds == 180
+                && origin.requests(to: "/head.ts").count >= 2
+        })
+        #expect(!engine.isSessionReady, "32 s of source cannot satisfy a 180 s warmup")
+        engine.selectSidecarSubtitle(url: sidecar)
+        try #require(try await waitFor(upTo: .seconds(3)) { engine.loadedSidecarURL == sidecar && engine.isSubtitleActive })
+        let obsolete = try #require(engine.nativeVideoSession)
+        let owner = engine.liveAudioDelayRejoinID
+        let barrier = holdTeardown(obsolete)
+        defer { barrier.open() }
+        engine.play()
+        engine.pause()
+        engine.setAudioDelay(latest)
+        try #require(engine.liveAudioDelayRejoinID != owner)
+        try #require(try await waitFor(upTo: .seconds(5)) { barrier.entered })
+        let requestsAtBarrier = origin.requests.count
+        #expect(!engine.needsForegroundVideoRestore)
+        engine.play()
+        engine.pause()
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(origin.requests.count == requestsAtBarrier,
+            "Successor load's second teardown must retain the interrupted source-close barrier")
+        #expect(engine.nativeVideoSession == nil)
+        barrier.open()
+        try #require(try await waitFor(upTo: .seconds(8)) {
+            engine.nativeVideoSession != nil && engine.nativeVideoSession !== obsolete
+                && engine.nativeVideoSession?.audioDelaySeconds == latest
+        })
+        if latest != 0 {
+            // The unchanged Live manifest withholds the future interval. Resetting again
+            // proves a second generation can supersede the first without a stale owner's cleanup.
+            engine.clearSubtitle()
+            engine.setAudioDelay(0)
+        }
+        // This one-segment upstream has an independent first-window grace. The new producer must
+        // be installed within8 s above; allow that existing startup policy to settle afterward.
+        try #require(try await waitFor(upTo: .seconds(40)) {
+            engine.liveAudioDelayRejoinTask == nil && engine.state == .paused
+        })
+        #expect(engine.audioDelaySeconds == 0)
+        #expect(!engine.sessionPreservingReloadInFlight)
+        #expect(!engine.needsForegroundVideoRestore)
+        #expect(engine.loadedSidecarURL == (latest == 0 ? sidecar : nil))
+        #expect(engine.isSubtitleActive == (latest == 0))
+        #expect(engine.activeAudioTrackIndex == selected)
+        #expect(engine.nativeHost?.transportIntentIsPlaying == false)
+        #expect(engine.liveWindow?.windowSeconds == nil)
+        engine.play()
+        try #require(try await waitFor(upTo: .seconds(5)) { engine.currentTime > 0.1 })
     }
 
     /// Normal Live HLS auto-ingest can rejoin despite its forward-only byte interface. Current

@@ -1313,6 +1313,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         case stopRequested
         case readError(code: Int32)
         case muxerFailed
+        /// The requested correction cannot be buffered safely; retrying the same source cannot fix it.
+        case audioDelayBufferFailed(message: String)
         case videoConfigurationChanged(summary: String)
         /// AE#222: the first cut could not write moov because the audio sample entry is packet-derived
         /// (E-AC-3/AC-3/TrueHD) and the source's first segment carries no audio packet. The pump captured a
@@ -1336,6 +1338,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             case .stopRequested: return "stopRequested"
             case .readError(let code): return "readError(\(code))"
             case .muxerFailed: return "muxerFailed"
+            case .audioDelayBufferFailed: return "audioDelayBufferFailed"
             case .videoConfigurationChanged: return "videoConfigurationChanged"
             case .needsAudioSampleEntryPrime: return "needsAudioSampleEntryPrime"
             case .keyframeStarvation: return "keyframeStarvation"
@@ -2235,6 +2238,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 audioMoovPrimeFrame: audioMoovPrimeFrame,
                 audioDelaySeconds: audioDelaySeconds,
                 onStorageExhausted: { [cache] in cache.noteStorageExhausted() },
+                fragmentBytesAdmission: alignsAudioDelay ? { [unowned self] projectedBytes in
+                    while !self.checkShouldStop() {
+                        switch self.cache.admitStagingBytes(projectedBytes, budget: self.prefetchDiskBudgetBytes) {
+                        case .accepted: return true
+                        case .insufficientCapacity:
+                            self.audioDelayStorageFailure = "The native audio-delay current/next segment window cannot fit the \(self.prefetchDiskBudgetBytes)-byte cache allowance. Free storage or reduce the requested delay."
+                            return false
+                        case .waitForConsumer:
+                            self.cache.waitForStorageConsumerChange(timeout: 0.1)
+                        }
+                    }
+                    return false
+                } : nil,
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if versionedInit {
@@ -2259,6 +2275,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.installMuxer(muxer)
             self.currentMuxerSegmentIndex = initialSegmentIndex
             self.noteSegmentInProgress(initialSegmentIndex, muxer: muxer)
+            if !padFiniteOpeningGap(muxer: muxer, segmentIndex: initialSegmentIndex) { return nil }
             return muxer
         } catch {
             EngineLog.emit(
@@ -2266,6 +2283,84 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
             return nil
+        }
+    }
+
+    /// AVPlayer snaps ready-item seeks inside a leading gap to the first audible timestamp. Each
+    /// leading fragment therefore gets matching silent packets on its own bounded interval, so
+    /// cached seeks retain the video position as well as initial playback. Genuine audio is untouched.
+    private func padFiniteOpeningGap(muxer: MP4SegmentMuxer, segmentIndex: Int) -> Bool {
+        guard !isLive, alignsAudioDelay, !alignmentLeadingGapFilled, let audio = audioConfig,
+              let first = alignmentFirstAudioPTS, videoShiftPts != Int64.min else { return true }
+        let local = segmentIndex - baseIndex
+        guard local >= 0, local + 1 < segmentBoundaries.count else { return true }
+        let shift = Double(videoShiftPts) * sourceVideoTbSeconds
+        let start = Double(segmentBoundaries[local]) * sourceVideoTbSeconds - shift
+        let boundary = Double(segmentBoundaries[local + 1]) * sourceVideoTbSeconds - shift
+        let genuineStart = first - shift + audioDelaySeconds
+        let end = min(genuineStart, boundary)
+        guard end - start > AetherEngine.endOfMediaEpsilonSeconds else { return true }
+        alignmentLeadingGapFilled = genuineStart < boundary
+        guard reserveAudioDelayPadding() else {
+            audioDelayStorageFailure = "The requested audio delay needs temporary finite-gap capacity within the session allowance. Increase the cache budget or choose a smaller delay."
+            return false
+        }
+        defer { releaseAudioDelayPadding() }
+        #if TrueHDObjectAudio || DTSXObjectAudio
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           let spatial = audio.bridge as? SpatialAudioBridge {
+            if genuineStart >= boundary {
+                do {
+                    _ = try spatial.padFiniteLeadingSegment(fromSourceSeconds: start - audioDelaySeconds,
+                        throughSourceSeconds: end - audioDelaySeconds,
+                        isCurrent: { [unowned self] in !self.checkShouldStop() },
+                        packetConsumer: { [unowned self] in self.writeBridgedAudio($0, audio: audio) })
+                } catch {
+                    audioDelayStorageFailure = String(describing: error)
+                    return false
+                }
+            } else {
+                spatial.prepareFiniteLeadingFill(fromSourceSeconds: start - audioDelaySeconds,
+                    isCurrent: { [unowned self] in !self.checkShouldStop() },
+                    packetConsumer: { [unowned self] in self.writeBridgedAudio($0, audio: audio) })
+            }
+            return true
+        }
+        #endif
+        let base = muxer.muxerAudioTimeBase
+        let firstTick = Int64((start / av_q2d(base)).rounded(.up))
+        let endTick = Int64((end / av_q2d(base)).rounded(.down))
+        let extra = audio.codecpar.pointee.extradata.map {
+            Array(UnsafeBufferPointer(start: $0, count: Int(audio.codecpar.pointee.extradata_size)))
+        } ?? []
+        let needsHE = audio.codecpar.pointee.codec_id == AV_CODEC_ID_AAC
+            && !AudioTailPadding.aacIsLowComplexity(profile: audio.codecpar.pointee.profile, extradata: extra)
+        let outcome = needsHE
+            ? AudioTailPadding.heAACLeadingSilencePackets(codecpar: audio.codecpar,
+                startTicks: firstTick, endTicks: endTick, timeBase: base,
+                isCurrent: { [unowned self] in !self.checkShouldStop() })
+            : AudioTailPadding.silencePackets(codecpar: audio.codecpar,
+                startTicks: firstTick, endTicks: endTick, timeBase: base,
+                maximumPacketBytes: 8 << 20, isCurrent: { [unowned self] in !self.checkShouldStop() })
+        switch outcome {
+        case .unavailable(let reason):
+            audioDelayStorageFailure = "The requested audio delay needs an opening gap in this audio format: \(reason). Choose a smaller delay or another source."
+            return false
+        case .packets(let packets, _):
+            let offset = Int64((audioDelaySeconds / av_q2d(base)).rounded())
+            var accepted = true
+            for packet in packets {
+                packet.pointee.stream_index = muxer.audioOutputStreamIndex
+                packet.pointee.pts -= offset
+                packet.pointee.dts -= offset
+                if muxer.writePacket(packet).rc < 0 { accepted = false }
+                var owned = Optional(packet)
+                trackedPacketFree(&owned)
+            }
+            if !accepted {
+                audioDelayStorageFailure = "The required audio-delay opening gap could not be written to the session cache. Free storage or increase the cache allowance and reload."
+            }
+            return accepted
         }
     }
 
@@ -2552,6 +2647,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         currentMuxerSegmentIndex = newIdx
         noteSegmentInProgress(newIdx, muxer: muxer)
+        if !padFiniteOpeningGap(muxer: muxer, segmentIndex: newIdx) { return nil }
         if isLive {
             // Live is source-paced: the pump only runs ahead of real time while draining the join
             // backlog, and the sliding window (notePlaylistBuild -> evictBelow) bounds resident
@@ -2908,7 +3004,206 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// #93 restart latency: the FIRST read of a producer is timed (one line; info when it exceeded
     /// 1 s), because rrgomes' trace shows exactly that read waiting 19-46 s client-side while a
     /// fresh side reader overtakes it in 300 ms.
+    /// A hard cache/staging admission refusal is surfaced once without retrying the same request.
+    private var audioDelayStorageFailure: String?
+    /// Existing mux failures retain their recovery behavior; delay-budget failures do not retry.
+    private var muxFailureExit: PumpExitReason {
+        audioDelayStorageFailure.map { .audioDelayBufferFailed(message: $0) } ?? .muxerFailed
+    }
+    /// Compressed alignment stage is owned and closed on this pump's worker thread.
+    private var delayAlignment: CompressedAudioDelayAlignment?
+    /// Source epoch bookkeeping for queued packets across PCR/format changes.
+    private var alignmentEpoch: UInt64 = 0
+    /// Last source decode time per lane, before presentation ordering.
+    private var alignmentLastDTS: [CompressedAudioDelayAlignment.Lane: Double] = [:]
+    /// Groups an audio/video reset onto the same source epoch.
+    private var alignmentResetTime: Double?
+    /// Compressed configuration marker seen at source input; muxer configuration is changed only
+    /// when the corresponding packet is consumed after old-epoch queues have drained.
+    private var alignmentVideoConfiguration: Data?
+    /// First source video decode time for the fresh Live join's two track anchors.
+    private var alignmentLiveOrigin: Double?
+    /// First admitted genuine audio presentation time, before the consumer's common timeline shift.
+    private var alignmentFirstAudioPTS: Double?
+    /// The first fragment containing genuine audio is primed once, including on a fresh seek run.
+    private var alignmentLeadingGapFilled = false
+    /// Actual keyframe anchors are per epoch; a queued predecessor cannot read its successor's gate.
+    private var alignmentLiveVideoAnchors: [UInt64: Double] = [:]
+    /// Last emitted epoch; configuration/discontinuity is committed only at consumption.
+    private var alignmentDeliveredEpoch: UInt64?
+    /// Repeated unmatched Live epochs share one pause-aware deadline; finite VOD gaps do not.
+    private lazy var alignmentDiscontinuityBudget = AudioDelayDiscontinuityBudget(delaySeconds: audioDelaySeconds)
+    /// Lanes actually emitted in the current source epoch.
+    private var alignmentMatchedLanes: Set<CompressedAudioDelayAlignment.Lane> = []
+    /// Worker-owned compressed spool residency, combined with bounded finite-fill reservations.
+    private var audioDelaySpoolResidentBytes = 0
+    /// Covers generated packet payload plus HE's bounded temporary file in the same session partition.
+    private var audioDelayPaddingReservedBytes = 0
+    /// Shared partition reservation; HE has an8MiB file +8MiB payload ceiling, generic fill keeps
+    /// its payload below8MiB with room for the encoder's fixed frame buffers.
+    private static let audioDelayPaddingReservationBytes = 16 << 20
+
+    /// Claims temporary finite-fill capacity before allocation; every caller releases after packets
+    /// have been written/freed, so returned arrays cannot temporarily escape session accounting.
+    private func reserveAudioDelayPadding() -> Bool {
+        let budget = prefetchDiskBudgetBytes > 0 ? prefetchDiskBudgetBytes : 256 << 20
+        let available = min(budget, max(0, audioDelayAvailableBytes?() ?? budget))
+        guard audioDelayPaddingReservedBytes == 0,
+              available >= Self.audioDelayPaddingReservationBytes,
+              audioDelaySpoolResidentBytes <= available - Self.audioDelayPaddingReservationBytes else { return false }
+        audioDelayPaddingReservedBytes = Self.audioDelayPaddingReservationBytes
+        onAudioDelayResidentBytesChanged?(audioDelaySpoolResidentBytes + audioDelayPaddingReservedBytes)
+        return true
+    }
+
+    /// Releases only this producer's temporary reservation after every owned packet has been freed.
+    private func releaseAudioDelayPadding() {
+        audioDelayPaddingReservedBytes = 0
+        onAudioDelayResidentBytesChanged?(audioDelaySpoolResidentBytes)
+    }
+
+    /// Session-owned remaining storage, including other active producer spools.
+    var audioDelayAvailableBytes: (() -> Int)?
+    /// Reports residency into the same claim as the native segment cache.
+    var onAudioDelayResidentBytesChanged: ((Int) -> Void)?
+    /// Whether this producer uses compressed scheduling rather than the legacy small-offset path.
+    private var alignsAudioDelay: Bool { abs(audioDelaySeconds) > 2 && audioConfig != nil }
+
+    /// Reads original compressed packets in effective presentation-DTS order for larger corrections.
     private func readNextSourcePacket() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin,
+                                                  replaySample: LiveReplaySample?)? {
+        if !alignsAudioDelay { return try readUnalignedSourcePacket() }
+        if delayAlignment == nil {
+            let alignment = try CompressedAudioDelayAlignment(
+                delaySeconds: audioDelaySeconds,
+                byteBudget: prefetchDiskBudgetBytes > 0 ? prefetchDiskBudgetBytes : 256 << 20,
+                endOfSourcePolicy: isLive ? .matchedInterval : .finiteVideoTail,
+                availableBytes: audioDelayAvailableBytes,
+                readSource: { [unowned self] in try self.readAlignmentInput() },
+                isCurrent: { [unowned self] in !self.checkShouldStop() })
+            alignment.onResidentBytesChanged = { [weak self] bytes in
+                guard let self else { return }
+                self.audioDelaySpoolResidentBytes = bytes
+                self.onAudioDelayResidentBytesChanged?(bytes + self.audioDelayPaddingReservedBytes)
+            }
+            delayAlignment = alignment
+        }
+        while let ready = try delayAlignment?.read() {
+            if !isLive, let snapshot = delayAlignment?.snapshot, snapshot.sourceEnded {
+                if ready.lane == .audio, let videoEnd = snapshot.videoEndSeconds {
+                    let record = ready.record
+                    let sourceDTS = Double(record.dts) * Double(record.timeBaseNumerator) / Double(record.timeBaseDenominator)
+                    if sourceDTS + audioDelaySeconds >= videoEnd { continue }
+                }
+            }
+            if isLive, ready.lane == .audio, let anchor = alignmentLiveVideoAnchors[ready.epoch] {
+                let record = ready.record
+                let seconds = Double(record.dts) * Double(record.timeBaseNumerator) / Double(record.timeBaseDenominator)
+                if seconds + audioDelaySeconds < anchor { continue }
+            }
+            if let prior = alignmentDeliveredEpoch, prior != ready.epoch {
+                pendingDiscontinuityFlag = true
+                pendingForceCutFlag = true
+            }
+            if alignmentDeliveredEpoch != ready.epoch { alignmentMatchedLanes.removeAll() }
+            alignmentDeliveredEpoch = ready.epoch
+            if isLive, ready.lane != .other {
+                alignmentMatchedLanes.insert(ready.lane)
+                if alignmentMatchedLanes.contains(.video), alignmentMatchedLanes.contains(.audio) {
+                    alignmentDiscontinuityBudget.noteMatchedOutput()
+                    noCutWatchdog?.setReplayChecking(false, at: Date())
+                }
+            }
+            return (try ready.record.makeAVPacket(), ready.origin == 0 ? .main : .side, nil)
+        }
+        return nil
+    }
+
+    /// Runs source admission and recording once, retaining original time bases and origin identity.
+    private func readAlignmentInput() throws -> CompressedAudioDelayAlignment.Packet? {
+        while let source = try readUnalignedSourcePacket() {
+            let packet = source.packet
+            defer { var owned = Optional(packet); trackedPacketFree(&owned) }
+            if checkShouldStop() { throw CancellationError() }
+            if isLive {
+                alignmentDiscontinuityBudget.setPlaying(wantsToPlayProvider?() ?? true)
+                try alignmentDiscontinuityBudget.check()
+                noCutWatchdog?.noteReplayPacketRead(at: Date())
+            }
+            noCutWatchdog?.notePacketRead()
+            let lane: CompressedAudioDelayAlignment.Lane
+            if source.origin == .main, demuxer.isVideoStream(packet.pointee.stream_index) { lane = .video }
+            else if packet.pointee.stream_index == audioConfig?.sourceStreamIndex,
+                    sideAudioDemuxer == nil || source.origin == .side { lane = .audio }
+            else { lane = .other }
+            var beginsEpoch = false
+            if lane == .video {
+                var size = 0
+                var marker: Data?
+                if let data = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &size), size > 0 {
+                    marker = Data(bytes: data, count: size)
+                } else if let config = extractAdVideoConfig(packet) {
+                    marker = Data(config.extradata)
+                }
+                if let marker {
+                    if let previous = alignmentVideoConfiguration, previous != marker { beginsEpoch = true }
+                    alignmentVideoConfiguration = marker
+                }
+            }
+            let base = lane == .audio ? audioConfig!.sourceTimeBase : sourceVideoTimeBase
+            packet.pointee.time_base = base
+            let ticks = packet.pointee.dts == Int64.min ? packet.pointee.pts : packet.pointee.dts
+            let seconds = ticks == Int64.min ? Double.nan : Double(ticks) * av_q2d(base)
+            if seconds.isFinite {
+                if let last = alignmentLastDTS[lane], seconds < last - 1 || seconds > last + 30 {
+                    if alignmentResetTime.map({ abs($0 - seconds) > 2 }) ?? true {
+                        beginsEpoch = true
+                        alignmentResetTime = seconds
+                    }
+                }
+                alignmentLastDTS[lane] = seconds
+                if beginsEpoch {
+                    alignmentEpoch &+= 1
+                    alignmentLiveOrigin = nil
+                    if isLive { noCutWatchdog?.setReplayChecking(true, at: Date()) }
+                }
+                if isLive {
+                    try alignmentDiscontinuityBudget.observeEpoch(alignmentEpoch)
+                }
+                if lane == .video, alignmentLiveOrigin == nil { alignmentLiveOrigin = seconds }
+                if isLive, let zero = alignmentLiveOrigin {
+                    let target = zero + (lane == .audio ? max(-audioDelaySeconds, 0) : max(audioDelaySeconds, 0))
+                    if seconds < target { continue }
+                    if lane == .video, alignmentLiveVideoAnchors[alignmentEpoch] == nil {
+                        if packet.pointee.flags & AV_PKT_FLAG_KEY == 0 { continue }
+                        alignmentLiveVideoAnchors[alignmentEpoch] = seconds
+                    }
+                }
+                if !isLive, lane == .audio {
+                    let target = restartTargetVideoPts == Int64.min ? Double(planAnchorVideoPts) * sourceVideoTbSeconds
+                        : Double(restartTargetVideoPts) * sourceVideoTbSeconds
+                    let presented = seconds + audioDelaySeconds
+                    if presented < target { continue }
+                    if let video = demuxer.stream(at: videoStreamIndex), video.pointee.duration > 0,
+                       video.pointee.start_time != Int64.min {
+                        let end = Double(video.pointee.start_time + video.pointee.duration) * sourceVideoTbSeconds
+                        if presented >= end { continue }
+                    }
+                }
+            }
+            if !isLive, lane == .audio, alignmentFirstAudioPTS == nil, packet.pointee.pts != Int64.min {
+                alignmentFirstAudioPTS = Double(packet.pointee.pts) * av_q2d(base)
+            }
+            if let sample = source.replaySample {
+                liveReplayGuard.record(sample.signature, sourceSeconds: sample.seconds)
+            }
+            return .init(record: try SoftwareStoredPacket(copying: packet), lane: lane,
+                         origin: source.origin == .main ? 0 : 1, epoch: alignmentEpoch)
+        }
+        return nil
+    }
+
+    private func readUnalignedSourcePacket() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin,
                                                    replaySample: LiveReplaySample?)? {
         guard !pumpFirstReadLogged else { return try readNextSourcePacketMergedTapped() }
         pumpFirstReadLogged = true
@@ -3269,6 +3564,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 stampPackedSideAudio(pkt)
             }
         }
+        // Finite alignment must retain the remaining picture when its companion audio ends first,
+        // and must observe genuine audio EOF before deciding whether a video-only tail is needed.
+        if alignsAudioDelay {
+            if mergeSideEOF, let main = mergeMainLookahead {
+                mergeMainLookahead = nil
+                return (main, .main)
+            }
+            if mergeMainEOF, let side = mergeSideLookahead {
+                mergeSideLookahead = nil
+                return (side, .side)
+            }
+        }
         guard !mergeMainEOF, !mergeSideEOF,
               let main = mergeMainLookahead, let sidePkt = mergeSideLookahead else {
             return nil
@@ -3394,6 +3701,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// The abort costs nothing this exit was going to keep: `.segmentStall` delegates to a host
     /// retune, which tears the demuxer down.
     private func tickNoCutWatchdog(_ watchdog: NoCutStallWatchdog) {
+        if alignsAudioDelay {
+            let playing = wantsToPlayProvider?() ?? true
+            watchdog.setReading(playing, at: Date())
+            alignmentDiscontinuityBudget.setPlaying(playing)
+        }
         guard let decision = watchdog.evaluate(
             now: Date(), servingOutageRunway: outageRunwayProvider?() ?? false) else { return }
         switch decision {
@@ -3473,7 +3785,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // AE#406: the no-cut window used to live in this loop's locals, which is what tied the
         // decision to the read the loop is parked in. It lives in the watchdog now, and a timer
         // reads it; this loop only reports what it read and observes the verdict.
-        if isLive { startNoCutWatchdog() }
+        if isLive {
+            if alignsAudioDelay { alignmentDiscontinuityBudget.setPlaying(wantsToPlayProvider?() ?? true) }
+            startNoCutWatchdog()
+            if alignsAudioDelay { noCutWatchdog?.setReplayChecking(true, at: Date()) }
+        }
+        defer {
+            do { try delayAlignment?.close() }
+            catch { EngineLog.emit("[HLSSegmentProducer] audio-delay spool cleanup failed: \(error)", category: .session) }
+            delayAlignment = nil
+        }
         defer { stopNoCutWatchdog() }
         var vodLedgerLastRoutedSeg = Int.min  // #65 ledger: last VOD segment index logged at the routing site
 
@@ -3525,6 +3846,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         exitReason = .stopRequested
                         break readLoop
                     }
+                    if isLive, alignsAudioDelay, noCutWatchdog == nil { startNoCutWatchdog() }
                     packet = read.packet
                     origin = read.origin
                     replaySample = read.replaySample
@@ -4189,6 +4511,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 sourceVideoTimeBase,
                                 audio.sourceTimeBase
                             )
+                            if alignsAudioDelay {
+                                restartTargetAudioDts -= Int64((audioDelaySeconds / av_q2d(audio.sourceTimeBase)).rounded())
+                            }
                             audioWaitForVideo = false
                         }
                         EngineLog.emit(
@@ -4438,7 +4763,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // marginally negative out-dts. The muxer no longer absorbs negatives
                 // (avoid_negative_ts=disabled so restarts can continue the timeline; tfdt is
                 // unsigned), so drop such frames outright.
-                if !isVideoPkt, packet.pointee.dts != Int64.min, packet.pointee.dts < 0 {
+                if !isVideoPkt, packet.pointee.dts != Int64.min,
+                   SourceTimestampBounds.shifted(packet.pointee.dts, back: alignsAudioDelay
+                    ? -Int64((audioDelaySeconds / av_q2d(audioConfig!.sourceTimeBase)).rounded()) : 0) < 0 {
                     droppedLeadingAudioCount += 1
                     if droppedLeadingAudioCount == 1 {
                         EngineLog.emit(
@@ -4510,7 +4837,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         let lookBehindCuts = pendingVideoPkt != nil && currentMuxer != nil
                             && pendingVideoSegIndex > currentMuxerSegmentIndex
                         if advancesCutter || lookBehindCuts, !writeBridgedAudio(bridge.settle(), audio: audio) {
-                            exitReason = .muxerFailed
+                            exitReason = muxFailureExit
                             break readLoop
                         }
                     }
@@ -4618,7 +4945,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             var pkt: UnsafeMutablePointer<AVPacket>? = prev
                             trackedPacketFree(&pkt)
                             pendingVideoPkt = nil
-                            exitReason = .muxerFailed
+                            exitReason = muxFailureExit
                             break readLoop
                         }
                     }
@@ -4641,7 +4968,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             continue
                         }
                         if !writeBridgedAudio(flacPackets, audio: audio) {
-                            exitReason = .muxerFailed
+                            exitReason = muxFailureExit
                             break readLoop
                         }
                         continue
@@ -4656,7 +4983,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             prevSeg = pendingAudioSegIndex
                         } else {
                             let prevPtsInVideoTb = av_rescale_q(
-                                prev.pointee.pts,
+                                prev.pointee.pts + (alignsAudioDelay ? Int64((audioDelaySeconds / av_q2d(audio.inputTimeBase)).rounded()) : 0),
                                 audio.inputTimeBase,
                                 sourceVideoTimeBase
                             )
@@ -4668,7 +4995,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             var pkt: UnsafeMutablePointer<AVPacket>? = prev
                             trackedPacketFree(&pkt)
                             pendingAudioPkt = nil
-                            exitReason = .muxerFailed
+                            exitReason = muxFailureExit
                             break readLoop
                         }
                     }
@@ -4678,6 +5005,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     continue
                 }
             }
+        } catch let error as AudioDelayDiscontinuityBudget.Failure {
+            exitReason = .audioDelayBufferFailed(message: error.localizedDescription)
+        } catch let error as CompressedAudioDelayAlignment.Failure {
+            exitReason = .audioDelayBufferFailed(message: error.localizedDescription)
+            EngineLog.emit("[HLSSegmentProducer] \(error.localizedDescription)", category: .session)
         } catch is InterruptedSourceReplay {
             exitReason = checkShouldStop() ? .stopRequested : .sourceReplay
         } catch {
@@ -4784,6 +5116,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
             pendingAudioPkt = nil
         }
 
+        #if TrueHDObjectAudio || DTSXObjectAudio
+        // APAC is represented by an ALAC stand-in in codecpar. Only its actual spatial sink can
+        // supply matching packets; padding through a new ALAC encoder would corrupt the sample entry.
+        if #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *),
+           case .eof = exitReason, !isLive, alignsAudioDelay,
+           let audio = audioConfig, let spatial = audio.bridge as? SpatialAudioBridge,
+           let muxer = currentMuxer, muxer.carriesAudio,
+           muxer.writtenVideoEndPts != Int64.min, muxer.segmentVideoStartPts != Int64.min {
+            let videoBase = av_q2d(muxer.muxerVideoTimeBase)
+            let start = Double(muxer.segmentVideoStartPts) * videoBase - audioDelaySeconds
+            let end = Double(muxer.writtenVideoEndPts) * videoBase - audioDelaySeconds
+            do {
+                _ = try spatial.padFiniteTail(fromSourceSeconds: start, throughSourceSeconds: end,
+                    isCurrent: { [unowned self] in !self.checkShouldStop() },
+                    packetConsumer: { [unowned self] in self.writeBridgedAudio($0, audio: audio) })
+            } catch {
+                if checkShouldStop() { exitReason = .stopRequested }
+                else { exitReason = .audioDelayBufferFailed(message: String(describing: error)) }
+            }
+        }
+        #endif
+
         // EOF tail flush for bridge audio: drains ~100-200 ms remainder (per-feed only emits full frames).
         if case .eof = exitReason, let audio = audioConfig, let bridge = audio.bridge {
             for fp in bridge.flush() {
@@ -4799,8 +5153,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
 
         // AE#847: after the bridge tail, so the fill starts where the delivered audio really ends.
-        if case .eof = exitReason, !isLive, let audio = audioConfig {
+        if case .eof = exitReason, !isLive, currentMuxer?.carriesAudio == true, let audio = audioConfig {
             padAudioTailToVideoEnd(audio: audio)
+            if checkShouldStop() { exitReason = .stopRequested }
+            else if let message = audioDelayStorageFailure { exitReason = .audioDelayBufferFailed(message: message) }
         }
 
         if Self.shouldAdoptTeardownSegment(exitReason: exitReason, isLive: isLive) {
@@ -4842,8 +5198,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
             fp.pointee.stream_index = muxer.audioOutputStreamIndex
             av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
             let prime = copyAudioPrimeCandidate(fp)
-            if muxer.writePacket(fp).rc >= 0, let prime {
-                audioMoovPrimeFrame = prime
+            let result = muxer.writePacket(fp)
+            if result.rc >= 0, let prime { audioMoovPrimeFrame = prime }
+            if alignsAudioDelay, result.rc < 0 {
+                audioDelayStorageFailure = "Required audio-delay packets could not be written to the bounded session cache. Free storage or increase the cache allowance and reload."
+                muxerGone = true
             }
         }
         return !muxerGone
@@ -4866,6 +5225,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let segmentStart = Double(muxer.segmentVideoStartPts) * av_q2d(videoTb)
         let audioEnd = muxer.writtenAudioEndPts == Int64.min
             ? nil : Double(muxer.writtenAudioEndPts) * av_q2d(audioTb)
+                + (alignsAudioDelay ? audioDelaySeconds : 0)
         guard let span = AudioTailPadding.span(videoEnd: videoEnd, audioEnd: audioEnd,
                                                segmentStart: segmentStart) else { return }
         let describe = "audio ends at \(audioEnd.map { String(format: "%.3f", $0) } ?? "-")s, "
@@ -4876,20 +5236,53 @@ final class HLSSegmentProducer: @unchecked Sendable {
                            + "the track is a stand-in for its real codec", category: .session)
             return
         }
+        if alignsAudioDelay, !reserveAudioDelayPadding() {
+            audioDelayStorageFailure = "The requested audio delay needs temporary finite-tail capacity within the session allowance. Increase the cache budget or choose a smaller delay."
+            return
+        }
+        defer { if alignsAudioDelay { releaseAudioDelayPadding() } }
         let startTicks = Int64((span.start / av_q2d(audioTb)).rounded(.up))
         let endTicks = Int64((span.end / av_q2d(audioTb)).rounded(.down))
-        switch AudioTailPadding.silencePackets(codecpar: audio.codecpar, startTicks: startTicks,
-                                               endTicks: endTicks, timeBase: audioTb) {
+        let extra = audio.codecpar.pointee.extradata.map {
+            Array(UnsafeBufferPointer(start: $0, count: Int(audio.codecpar.pointee.extradata_size)))
+        } ?? []
+        let needsHE = alignsAudioDelay && audio.codecpar.pointee.codec_id == AV_CODEC_ID_AAC
+            && !AudioTailPadding.aacIsLowComplexity(profile: audio.codecpar.pointee.profile, extradata: extra)
+        let padding = needsHE
+            ? AudioTailPadding.heAACSilencePackets(codecpar: audio.codecpar,
+                startTicks: startTicks, endTicks: endTicks, timeBase: audioTb,
+                isCurrent: { [unowned self] in !self.checkShouldStop() })
+            : AudioTailPadding.silencePackets(codecpar: audio.codecpar,
+                startTicks: startTicks, endTicks: endTicks, timeBase: audioTb,
+                maximumPacketBytes: alignsAudioDelay ? 8 << 20 : nil,
+                isCurrent: alignsAudioDelay ? { [unowned self] in !self.checkShouldStop() } : nil)
+        switch padding {
         case .unavailable(let reason):
+            if alignsAudioDelay {
+                audioDelayStorageFailure = "The requested audio delay needs a finite tail in this audio format: \(reason). Choose a smaller delay or another source."
+            }
             EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail not padded (\(describe)): \(reason)",
                            category: .session)
         case .packets(let packets, let encoder):
             var written = 0
+            var writeFailed = false
             for packet in packets {
                 packet.pointee.stream_index = muxer.audioOutputStreamIndex
-                if muxer.writePacket(packet).rc >= 0 { written += 1 }
+                // Padding is expressed on the presentation axis; the muxer applies D once.
+                if alignsAudioDelay {
+                    let offset = Int64((audioDelaySeconds / av_q2d(audioTb)).rounded())
+                    packet.pointee.pts -= offset
+                    packet.pointee.dts -= offset
+                }
+                if !writeFailed {
+                    if muxer.writePacket(packet).rc >= 0 { written += 1 }
+                    else { writeFailed = true }
+                }
                 var pkt: UnsafeMutablePointer<AVPacket>? = packet
                 trackedPacketFree(&pkt)
+            }
+            if alignsAudioDelay, writeFailed {
+                audioDelayStorageFailure = "The required audio-delay tail could not be written to the bounded session cache. Free storage or increase the cache allowance and reload."
             }
             EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail padded with \(written) silent \(encoder) frame(s) "
                            + "from \(String(format: "%.3f", span.start))s (\(describe))", category: .session)
@@ -4899,7 +5292,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func bridgedAudioSegmentIndex(_ packet: UnsafeMutablePointer<AVPacket>, audio: AudioConfig) -> Int {
         if isLive { return liveCurrentSegmentIndex }
         if audioFollowsVideoCut { return vodCutter.current }
-        return segmentIndex(forSourcePts: av_rescale_q(packet.pointee.pts, audio.inputTimeBase, sourceVideoTimeBase))
+        return segmentIndex(forSourcePts: av_rescale_q(packet.pointee.pts
+            + (alignsAudioDelay ? Int64((audioDelaySeconds / av_q2d(audio.inputTimeBase)).rounded()) : 0),
+            audio.inputTimeBase, sourceVideoTimeBase))
     }
 
     // MARK: - Look-behind finalize helpers

@@ -55,6 +55,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private let video: Stream
     private let audio: Stream?
     private let byteBudget: Int
+    /// Aligned playback shares a fixed disk partition and waits rather than overrunning it.
+    private let maximumResidentBytes: Int?
     private let forwardSeconds: Double
     /// Producer thread only. See `start()` for why this is a class the producer moves itself.
     private var producerQoS: qos_class_t = QOS_CLASS_USER_INITIATED
@@ -122,6 +124,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
+         maximumResidentBytes: Int? = nil,
          initialSourceClock: Double, fifo: any SoftwarePacketStore,
          videoReorderDepth: Int? = nil,
          cacheTiming: (any SoftwarePacketCacheTimingSource)? = nil,
@@ -132,6 +135,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         self.video = video
         self.audio = audio
         self.byteBudget = max(1, byteBudget)
+        self.maximumResidentBytes = maximumResidentBytes
         self.forwardSeconds = max(1, forwardSeconds)
         self.sourceClock = initialSourceClock
         self.fifo = fifo
@@ -624,6 +628,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     let recordReservation = min(byteBudget, data.count)
                         + min(8, byteBudget - min(byteBudget, data.count))
                     try fifo.trimConsumed(toByteBudget: byteBudget - recordReservation)
+                    if try !waitForResidentCapacity(recordBytes: data.count + 8, token: token) {
+                        operations.unlock()
+                        return
+                    }
                     let cursor = try fifo.append(data)
                     let state = fifo.snapshot
                     if packet.streamIndex == video.index {
@@ -671,6 +679,35 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             }
             operations.unlock()
         } catch { recordFailure(error, token: token, origin: failureOrigin) }
+    }
+
+    /// Called with operations held, and always returns with it held. One encoded source record is
+    /// retained while the consumer frees space; a seek/stop retires it before it can be appended.
+    private func waitForResidentCapacity(recordBytes: Int, token: UInt64) throws -> Bool {
+        guard let maximumResidentBytes else { return true }
+        if recordBytes > maximumResidentBytes {
+            throw SoftwarePacketDiskFIFO.Failure.residentCapacityExceeded(
+                requiredBytes: recordBytes, maximumBytes: maximumResidentBytes)
+        }
+        while true {
+            condition.lock()
+            let admitted = token == sourceEpoch && !closed && !sourceRepositioning
+            condition.unlock()
+            if !admitted { return false }
+            try fifo.trimConsumed(toByteBudget: maximumResidentBytes - recordBytes)
+            if fifo.snapshot.diskByteCount <= maximumResidentBytes - recordBytes { return true }
+            operations.unlock()
+            condition.lock()
+            if token == sourceEpoch, !closed, !sourceRepositioning {
+                producerParked = true
+                _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
+                producerParked = false
+            }
+            let current = token == sourceEpoch && !closed && !sourceRepositioning
+            condition.unlock()
+            operations.lock()
+            if !current { return false }
+        }
     }
 
     /// Only bounded metadata work under condition; parser and media I/O have already finished.

@@ -123,7 +123,7 @@ final class SoftwarePlaybackHost {
     nonisolated static func makePacketStore(
         storage: SoftwarePacketCacheStorage, forwardSegments: Int?,
         requestedBytes: Int? = nil, directory: URL = FileManager.default.temporaryDirectory,
-        claims: RetentionClaims = .shared
+        claims: RetentionClaims = .shared, reservingAlignment: Bool = false
     ) throws -> (any SoftwarePacketStore, Int, RetentionClaims.Claim?)? {
         let memoryBudget: (forwardBytes: Int, historyBytes: Int)?
         switch storage {
@@ -148,10 +148,11 @@ final class SoftwarePlaybackHost {
             let diskClaim = claims.claim(volumeAvailableBytes: available) {
                 packetCacheBudgetBytes(requestedBytes: requestedBytes, availableBytes: $0, capRelaxed: capRelaxed)
             }
-            bytes = diskClaim.bytes
+            bytes = reservingAlignment ? diskClaim.bytes / 2 : diskClaim.bytes
             guard bytes > 0 else { return nil }
             fifo = try SoftwarePacketDiskFIFO(
                 chunkTargetBytes: min(4 << 20, max(8, bytes)), retainConsumed: true,
+                maximumResidentBytes: reservingAlignment ? bytes : nil,
                 parentDirectory: directory)
             claim = diskClaim
         }
@@ -419,6 +420,17 @@ final class SoftwarePlaybackHost {
     /// rebuild) starts out carrying it rather than at zero.
     private(set) var audioDelaySeconds: Double = 0
 
+    /// One reservation shared by the ordinary source cache and the compressed alignment queues.
+    private var audioAlignmentReservation: RetentionClaims.Claim?
+    /// The fixed alignment partition prevents the existing cache producer exceeding the total cap.
+    private var audioAlignmentBudget = 0
+    /// Live-only repeated resets cannot extend alignment warmup forever; finite silence is exempt.
+    private var alignmentDiscontinuityBudget: AudioDelayDiscontinuityBudget?
+    /// The configured public DVR window excludes internal alignment retention.
+    private var configuredDVRWindow: Double?
+    /// Source-reader frontier mapped onto the latest video moment whose shifted audio exists.
+    nonisolated(unsafe) private var alignedVideoEdgeAdjustment: Double = 0
+
     /// AE#462: how this host delivers audio, as a typed fact for the engine's published
     /// `audioDelivery`. Set once the audio decoder has been given its chance.
     private(set) var audioDelivery: AudioDelivery = .none
@@ -480,7 +492,12 @@ final class SoftwarePlaybackHost {
             let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
                 PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0)
             }
-            let budget = claim.bytes
+            let aligned = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds).requiresAlignment
+            let budget = aligned ? claim.bytes / 2 : claim.bytes
+            if aligned {
+                audioAlignmentReservation = claim
+                audioAlignmentBudget = claim.bytes - budget
+            }
             let ring = try PacketRingBuffer(windowSeconds: window, scratch: scratch,
                                             byteBudget: budget, retention: retention)
             claim.track { [weak ring] in ring?.diskBytes ?? 0 }
@@ -498,6 +515,14 @@ final class SoftwarePlaybackHost {
     @discardableResult
     func setLiveDVRLimits(_ limits: LiveDVRLimits, availableBytes: Int64?) -> Bool {
         guard let ring = dvrRing, !dvrRingHoldsCushionOnly else { return false }
+        configuredDVRWindow = limits.windowSeconds
+        if SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds).requiresAlignment {
+            let internalLimits = LiveDVRLimits(
+                windowSeconds: limits.windowSeconds.map { $0 + abs(audioDelaySeconds) },
+                maximumBytes: limits.maximumBytes, minimumFreeBytes: limits.minimumFreeBytes,
+                capacityValidUntil: limits.capacityValidUntil)
+            return ring.setLimits(internalLimits, availableBytes: availableBytes)
+        }
         return ring.setLimits(limits, availableBytes: availableBytes)
     }
     var liveDVRBytes: Int? { dvrRing?.retainedBytes }
@@ -506,12 +531,19 @@ final class SoftwarePlaybackHost {
     /// publishes no rewind window, so a seek stays refused as on any live-only session.
     nonisolated(unsafe) private var dvrRingHoldsCushionOnly = false
 
-    var liveDVRWindowSeconds: Double? { dvrRingHoldsCushionOnly ? nil : dvrRing?.retainedWindowSeconds }
+    var liveDVRWindowSeconds: Double? {
+        if dvrRingHoldsCushionOnly { return nil }
+        guard let retained = dvrRing?.retainedWindowSeconds else { return nil }
+        return configuredDVRWindow.map { min($0, retained) } ?? retained
+    }
     var liveDVRResidentFloor: Double? {
         guard !dvrRingHoldsCushionOnly, let pts = dvrRing?.oldestKeyframePts else { return nil }
         liveEdgeLock.lock(); defer { liveEdgeLock.unlock() }
         guard sessionStartPts.isFinite else { return nil }
-        return max(0, pts - sessionStartPts)
+        let timeline = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds)
+        guard let available = timeline.playableVideoRange(
+            sourceFloor: pts, sourceEdge: newestSourcePts, publicWindow: configuredDVRWindow) else { return nil }
+        return max(0, available.lowerBound - sessionStartPts)
     }
 
     /// AE#560: the live recording sink, read on the demux thread for every source packet.
@@ -584,7 +616,7 @@ final class SoftwarePlaybackHost {
         liveEdgeLock.lock()
         defer { liveEdgeLock.unlock() }
         guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return 0 }
-        return max(0, newestSourcePts - sessionStartPts)
+        return max(0, newestSourcePts + alignedVideoEdgeAdjustment - sessionStartPts)
     }
 
     /// The DVR ring's rewind floor on the session axis once byte or time eviction has moved it past
@@ -684,8 +716,28 @@ final class SoftwarePlaybackHost {
                   self.seekGeneration == generation, self.readFeedCursor() == old,
                   old < ring.seqBounds.first,
                   PausedFirstFrame.loopsMayRun(isPlaying: self.isPlaying,
-                      pausedBeforeFirstFrame: self.pausedBeforeFirstFrame),
-                  let target = self.liveDVRResidentFloor else { return }
+                      pausedBeforeFirstFrame: self.pausedBeforeFirstFrame) else { return }
+            let target: Double
+            let timeline = SoftwareAudioDelayTimeline(delaySeconds: self.audioDelaySeconds)
+            if timeline.requiresAlignment {
+                let sourceEdge = self.liveEdgeLock.withLock { self.newestSourcePts }
+                do {
+                    guard let sourceTarget = try timeline.evictionRecoveryTarget(
+                        sourceFloor: ring.oldestKeyframePts, sourceEdge: sourceEdge,
+                        isPlaying: self.isPlaying) else { return }
+                    target = self.liveSessionSeconds(forSource: sourceTarget) ?? 0
+                } catch {
+                    self.failure = PlaybackErrorInfo(kind: .softwarePipelineFailed,
+                                                     message: error.localizedDescription)
+                    self.isPlaying = false
+                    self.alignmentDiscontinuityBudget?.setPlaying(false)
+                    self.audioOutput?.pause()
+                    return
+                }
+            } else {
+                guard let floor = self.liveDVRResidentFloor else { return }
+                target = floor
+            }
             EngineLog.emit("[SWHost] DVR eviction recovery: cursor=\(old) targetSession=\(target)",
                            category: .swPlayback)
             // Reuse the live seek's decoder/renderer/audio flush, look-ahead reset and
@@ -809,7 +861,7 @@ final class SoftwarePlaybackHost {
         liveEdgeLock.lock()
         defer { liveEdgeLock.unlock() }
         guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return nil }
-        return max(0, newestSourcePts - sessionStartPts)
+        return max(0, newestSourcePts + alignedVideoEdgeAdjustment - sessionStartPts)
     }
 
     private var timeTimer: AnyCancellable?
@@ -1214,13 +1266,19 @@ final class SoftwarePlaybackHost {
         armReadyForDisplayObserver()
 
         dvrRingHoldsCushionOnly = false
+        configuredDVRWindow = dvrWindowSeconds
+        let alignmentTimeline = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds)
+        alignmentDiscontinuityBudget = isLive && alignmentTimeline.requiresAlignment
+            ? AudioDelayDiscontinuityBudget(delaySeconds: audioDelaySeconds) : nil
+        alignedVideoEdgeAdjustment = alignmentTimeline.requiresAlignment ? min(audioDelaySeconds, 0) : 0
         if isLive, let window = dvrWindowSeconds {
-            _ = prepareLiveDVR(windowSeconds: window, retention: dvrRetention)
+            _ = prepareLiveDVR(windowSeconds: window + (alignmentTimeline.requiresAlignment ? abs(audioDelaySeconds) : 0), retention: dvrRetention)
         } else if isLive, let cushion = LiveEdgePolicy.edgeCushion(liveEdgeCushionSeconds) {
             // The plain live feeder plays packets as the demuxer reads them, so there is nothing to
             // play behind. A ring as deep as the loopback's cushion window gives the join one.
             dvrRingHoldsCushionOnly = prepareLiveDVR(
-                windowSeconds: cushion + LiveWindowSizing.edgeCushionWindowMarginSeconds, retention: nil) != nil
+                windowSeconds: cushion + LiveWindowSizing.edgeCushionWindowMarginSeconds
+                    + (alignmentTimeline.requiresAlignment ? abs(audioDelaySeconds) : 0), retention: nil) != nil
         }
 
         // Resolve the audio stream up front so the session-start log and the decoder agree. #133:
@@ -1583,7 +1641,8 @@ final class SoftwarePlaybackHost {
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            let outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
+            let readStart = alignmentTimeline.sourceReadStart(videoPosition: sourceStart)
+            let outcome = await reposition(dem, readStart, Self.seekBudgetSeconds, seekQueue,
                                            { [weak self] in self?.stopRequested ?? true })
             // Like the others (the audio route choice, the cache setup, the primer wait), this
             // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
@@ -1622,11 +1681,12 @@ final class SoftwarePlaybackHost {
             let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                 guard let (fifo, bytes, claim) = try Self.makePacketStore(
-                    storage: packetCacheStorage, forwardSegments: segments,
-                    requestedBytes: sessionCacheByteBudget) else { return nil }
+                    storage: alignmentTimeline.requiresAlignment ? .disk : packetCacheStorage, forwardSegments: segments,
+                    requestedBytes: sessionCacheByteBudget, reservingAlignment: alignmentTimeline.requiresAlignment) else { return nil }
                 let readAhead = SoftwarePacketReadAhead(
                     video: video, audio: audio, byteBudget: bytes,
                     forwardSeconds: Double(segments) * 4,
+                    maximumResidentBytes: alignmentTimeline.requiresAlignment ? bytes : nil,
                     initialSourceClock: initialSourceClock, fifo: fifo,
                     videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming
                 ) { isCurrent in
@@ -1641,7 +1701,13 @@ final class SoftwarePlaybackHost {
             switch cacheResult {
             case .success(let cache):
                 readAhead = cache?.0
-                if !stopRequested, let claim = cache?.1 ?? nil { retentionClaims.append(claim) }
+                if !stopRequested, let claim = cache?.1 ?? nil {
+                    retentionClaims.append(claim)
+                    if alignmentTimeline.requiresAlignment {
+                        audioAlignmentReservation = claim
+                        audioAlignmentBudget = claim.bytes / 2
+                    }
+                }
             case .failure:
                 // A cache-directory failure must not stop a source that the old direct loop can
                 // still play. Runtime spool corruption is explicit, never silently skipped.
@@ -1651,6 +1717,22 @@ final class SoftwarePlaybackHost {
             guard !stopRequested else { readAhead?.close(); return }
             vodPacketReadAhead = readAhead
             readAhead?.start()
+        }
+
+        if alignmentTimeline.requiresAlignment, audioAlignmentReservation == nil {
+            let requested = sessionCacheByteBudget
+            let claim = await BlockingWork.detached(priority: .utility) {
+                let directory = FileManager.default.temporaryDirectory
+                let available = (try? directory.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+                    .volumeAvailableCapacity.map(Int64.init)
+                return RetentionClaims.shared.claim(volumeAvailableBytes: available) {
+                    Self.packetCacheBudgetBytes(requestedBytes: requested, availableBytes: $0, capRelaxed: false)
+                }
+            }.value
+            guard !stopRequested, !Task.isCancelled else { claim.release(); throw CancellationError() }
+            retentionClaims.append(claim)
+            audioAlignmentReservation = claim
+            audioAlignmentBudget = claim.bytes
         }
 
         // The Atmos decoder registration started when the route was chosen and has run alongside the
@@ -1676,6 +1758,7 @@ final class SoftwarePlaybackHost {
 
     func play() {
         guard !stopRequested, failure == nil else { return }
+        alignmentDiscontinuityBudget?.setPlaying(true)
         renderer.recoverAfterSuspensionIfNeeded()
         audioOutput?.setPlaybackEnabled(true)
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
@@ -1824,6 +1907,7 @@ final class SoftwarePlaybackHost {
     }
 
     func pause() {
+        alignmentDiscontinuityBudget?.setPlaying(false)
         // Latch even before arming: stale decoder and rebuffer work cannot restart the clock
         // after this pause while the host publishes its transport state.
         audioOutput?.setPlaybackEnabled(false)
@@ -1877,7 +1961,8 @@ final class SoftwarePlaybackHost {
         guard clockArmed, let aOut = audioOutput else { return }
         let tail = SoftwareEndOfMediaClock.tailPlayoutSeconds(
             clockSeconds: aOut.currentTimeSeconds,
-            lastAudioPts: demuxDiag.snapshot.lastAudioPts
+            lastAudioPts: SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds)
+                .audioPresentationTime(demuxDiag.snapshot.lastAudioPts)
         )
         guard tail > 0 else { return parkClockNow() }
         // The deferral aims at the end of the queued tail; a task that runs late must not park past it.
@@ -2148,7 +2233,13 @@ final class SoftwarePlaybackHost {
     /// decoded a frame.
     var videoQueueFlushOwedForTesting: Bool { videoQueueFlushOwed }
     var audioRendererForTesting: AVSampleBufferAudioRenderer? { audioOutput?.renderer }
+    /// Observes samples only after the real audio renderer accepted their retimed buffers.
+    func observeDeliveredAudioForTesting(_ handler: (@Sendable (Double, Double) -> Void)?) {
+        audioOutput?.setDeliveredTimingForTesting(handler)
+    }
     var videoRendererForTesting: SampleBufferRenderer { renderer }
+    /// Separates source-reader EOF from decoder drain so Live tests can use the final matched edge.
+    var liveSourceEndForTesting: (hasEnded: Bool, edge: Double?) { (sourceEnded, liveEdgeSessionTime) }
     var keyframeLedgerForTesting: SWKeyframeLedger { keyframeLedger }
     func setLiveForTesting(_ live: Bool) { isLive = live }
     func setVideoDecoderForTesting(_ decoder: any VideoDecodingPipeline) { videoDecoder = decoder }
@@ -2311,7 +2402,8 @@ final class SoftwarePlaybackHost {
             forSession: seconds,
             sessionZeroSeconds: clockSessionZero
         )
-        let cacheGeneration = packetSource?.beginSeek(to: sourceSeconds)
+        let readStart = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds).sourceReadStart(videoPosition: sourceSeconds)
+        let cacheGeneration = packetSource?.beginSeek(to: readStart)
         // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
         // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
         let wasPlaying = SeekResumeIntent.resolve(isPlaying: isPlaying,
@@ -2363,7 +2455,7 @@ final class SoftwarePlaybackHost {
         var cacheHit = false
         if let packetSource, let cacheGeneration {
             let preparation = await BlockingWork.detached(priority: .userInitiated) {
-                try packetSource.prepareSeek(cacheGeneration, to: sourceSeconds)
+                try packetSource.prepareSeek(cacheGeneration, to: readStart)
             }.result
             guard seekGeneration == generation, !stopRequested else { return .superseded }
             switch preparation {
@@ -2400,7 +2492,7 @@ final class SoftwarePlaybackHost {
             // existing frontier; seeking it too would duplicate or skip already retained packets.
             outcome = .landed
         } else {
-            outcome = await reposition(dem, sourceSeconds, Self.seekBudgetSeconds, seekQueue,
+            outcome = await reposition(dem, readStart, Self.seekBudgetSeconds, seekQueue,
                 { [weak self] in
                     self?.seekGeneration != generation || (self?.stopRequested ?? true)
                 })
@@ -2609,7 +2701,8 @@ final class SoftwarePlaybackHost {
         // Reposition cursor to the newest keyframe at or before target. If the target precedes every
         // retained keyframe, fall to the EARLIEST keyframe, not seqBounds.first, which can be a mid-GOP
         // leading entry before the ring's first eviction and would decode as garbage until the next keyframe.
-        let seq = ring.seq(forKeyframeAtOrBefore: targetSource)
+        let readStart = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds).sourceReadStart(videoPosition: targetSource)
+        let seq = ring.seq(forKeyframeAtOrBefore: readStart)
             ?? ring.firstKeyframeSeq()
             ?? ring.seqBounds.first
         setFeedCursor(seq)
@@ -2680,6 +2773,8 @@ final class SoftwarePlaybackHost {
     }
 
     func stop() {
+        alignmentDiscontinuityBudget?.setPlaying(false)
+        alignmentDiscontinuityBudget = nil
         stopRequested = true
         pausedBeforeFirstFrame = false
         isPlaying = false
@@ -2705,6 +2800,10 @@ final class SoftwarePlaybackHost {
         dvrRing = nil
         retentionClaims.forEach { $0.release() }
         retentionClaims.removeAll()
+        audioAlignmentReservation = nil
+        audioAlignmentBudget = 0
+        configuredDVRWindow = nil
+        alignedVideoEdgeAdjustment = 0
         liveEdgeLock.lock()
         sessionStartPts = .nan
         liveJoinPolicy = SoftwareLiveJoinPolicy()
@@ -2874,6 +2973,71 @@ final class SoftwarePlaybackHost {
             self?.onClockSessionZero?(resolvedZero)
         }
 
+        let delay = audioDelaySeconds
+        let alignmentBudget = audioAlignmentBudget
+        let alignmentReservation = audioAlignmentReservation
+        let discontinuityBudget = alignmentDiscontinuityBudget
+        let diag = demuxDiag
+        let keyframeLedger = keyframeLedger
+        let readAhead = vodPacketReadAhead
+        let videoEnd: Double? = !liveSession && dem.duration > 0
+            ? dem.resolvedSourceStartOrigin + dem.duration : nil
+        func launchCombined(on queue: DispatchQueue,
+                            admission: (@Sendable () -> Bool)? = nil,
+                            readOverride: (@Sendable (UInt64) throws -> CompressedAudioDelayAlignment.Packet?)? = nil) {
+            queue.async {
+            Self.runDemuxLoop(
+                demuxer: dem,
+                readAhead: readAhead,
+                videoDecoder: vDec,
+                videoStreamIndex: vIdx,
+                audioDecoder: aDec,
+                audioOutput: aOut,
+                audioStreamIndex: aIdx,
+                renderer: rndr,
+                condition: condition,
+                initialClockTime: initialClock,
+                currentRate: currentRate,
+                diag: diag,
+                ring: readOverride == nil ? ring : nil,
+                videoTimeBaseSeconds: vTbSec,
+                audioTimeBaseSeconds: aTbSec,
+                isLive: liveSession,
+                foldTimeline: Self.shouldFoldTimeline(
+                    isLive: liveSession, sourceSeekable: dem.isSourceSeekable),
+                noteEdge: noteEdge,
+                isPlaying: admission ?? getIsPlaying,
+                stopRequested: getStopRequested,
+                clockArmed: getClockArmed,
+                markClockArmed: setClockArmed,
+                onClockAnchored: onClockAnchored,
+                seekGeneration: getSeekGeneration,
+                admitsRead: admitsRead,
+                seekWindowOpen: getSeekWindowOpen,
+                setDecodeGeneration: setDecodeGeneration,
+                noteDecodeGeneration: noteDecodeGeneration,
+                backgroundAudioOnly: getBackgroundAudioOnly,
+                onError: onErrorForGeneration,
+                onEnd: onEndForGeneration,
+                audioTapSink: getAudioTapSink,
+                subtitleStreamIndices: subIndices,
+                subtitleTimeBases: subTimeBases,
+                splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
+                subtitleTapSink: getSubtitleTapSink,
+                recordingTap: recordingTap,
+                playedMedia: playedMediaLedger,
+                keyframeLedger: keyframeLedger,
+                noteRebuffering: noteRebuffering,
+                audioDelaySeconds: delay, alignmentBudget: alignmentBudget,
+                alignmentReservation: alignmentReservation,
+                discontinuityBudget: discontinuityBudget,
+                videoEndTime: videoEnd,
+                readOverride: readOverride,
+                sourceRetainedBytes: { ring?.diskBytes ?? 0 }
+            )
+            }
+        }
+
         if liveSession, let ring {
             let getFeederPlaying: @Sendable () -> Bool = { [weak self] in
                 guard let self else { return false }
@@ -2941,8 +3105,41 @@ final class SoftwarePlaybackHost {
                     splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
                     subtitleTapSink: getSubtitleTapSink,
                     recordingTap: recordingTap,
-                    playedMedia: playedMediaLedger
+                    playedMedia: playedMediaLedger,
+                    preservesPacketEnvelopes: SoftwareAudioDelayTimeline(delaySeconds: delay).requiresAlignment
                 )
+            }
+            if SoftwareAudioDelayTimeline(delaySeconds: delay).requiresAlignment {
+                launchCombined(on: feedQueue, admission: getFeederPlaying) { generation in
+                    func waitForRingChange() {
+                        condition.lock()
+                        _ = condition.wait(until: Date(timeIntervalSinceNow: 0.05))
+                        condition.unlock()
+                    }
+                    while !getStopRequested() && admitsRead(generation) {
+                        if !getFeederPlaying() { waitForRingChange(); continue }
+                        let cursor = readCursor()
+                        if cursor < ring.seqBounds.first {
+                            recoverCursor(cursor)
+                            waitForRingChange()
+                            continue
+                        }
+                        if let packet = try ring.alignmentPacket(atSeq: cursor), let record = packet.storedPacket {
+                            advanceCursor(cursor)
+                            return .init(record: record, lane: packet.isVideo ? .video : .audio,
+                                         epoch: packet.alignmentEpoch)
+                        }
+                        if cursor < ring.seqBounds.first {
+                            recoverCursor(cursor)
+                            waitForRingChange()
+                            continue
+                        }
+                        if getSourceEnded() { return nil }
+                        waitForRingChange()
+                    }
+                    throw CancellationError()
+                }
+                return
             }
             let lookahead = audioLookahead
             feedQueue.async {
@@ -2982,54 +3179,7 @@ final class SoftwarePlaybackHost {
             return
         }
 
-        let diag = demuxDiag
-        let keyframeLedger = keyframeLedger
-        let readAhead = vodPacketReadAhead
-        demuxQueue.async {
-            Self.runDemuxLoop(
-                demuxer: dem,
-                readAhead: readAhead,
-                videoDecoder: vDec,
-                videoStreamIndex: vIdx,
-                audioDecoder: aDec,
-                audioOutput: aOut,
-                audioStreamIndex: aIdx,
-                renderer: rndr,
-                condition: condition,
-                initialClockTime: initialClock,
-                currentRate: currentRate,
-                diag: diag,
-                ring: ring,
-                videoTimeBaseSeconds: vTbSec,
-                audioTimeBaseSeconds: aTbSec,
-                isLive: liveSession,
-                foldTimeline: Self.shouldFoldTimeline(
-                    isLive: liveSession, sourceSeekable: dem.isSourceSeekable),
-                noteEdge: noteEdge,
-                isPlaying: getIsPlaying,
-                stopRequested: getStopRequested,
-                clockArmed: getClockArmed,
-                markClockArmed: setClockArmed,
-                onClockAnchored: onClockAnchored,
-                seekGeneration: getSeekGeneration,
-                admitsRead: admitsRead,
-                seekWindowOpen: getSeekWindowOpen,
-                setDecodeGeneration: setDecodeGeneration,
-                noteDecodeGeneration: noteDecodeGeneration,
-                backgroundAudioOnly: getBackgroundAudioOnly,
-                onError: onErrorForGeneration,
-                onEnd: onEndForGeneration,
-                audioTapSink: getAudioTapSink,
-                subtitleStreamIndices: subIndices,
-                subtitleTimeBases: subTimeBases,
-                splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
-                subtitleTapSink: getSubtitleTapSink,
-                recordingTap: recordingTap,
-                playedMedia: playedMediaLedger,
-                keyframeLedger: keyframeLedger,
-                noteRebuffering: noteRebuffering
-            )
-        }
+        launchCombined(on: demuxQueue)
     }
 
     // MARK: - Live reader loop (DVR sessions)
@@ -3053,13 +3203,15 @@ final class SoftwarePlaybackHost {
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
         subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
-        playedMedia: PlayedMediaLedger? = nil
+        playedMedia: PlayedMediaLedger? = nil,
+        preservesPacketEnvelopes: Bool = false
     ) {
         let discontinuityThresholdSeconds = 10.0
         var prevRawVideoPtsSec = Double.nan
         var frameIntervalSec = 0.0
         var discontinuityOffsetSec = 0.0
         var loggedSWDiscontinuity = false
+        var alignmentEpoch: UInt64 = 0
         var lastSeenExtradata: Data? = nil
         let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
             videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
@@ -3154,6 +3306,7 @@ final class SoftwarePlaybackHost {
                         let expectedContinuation = prevRawVideoPtsSec
                             + (frameIntervalSec > 0 ? frameIntervalSec : 0)
                         discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
+                        alignmentEpoch &+= 1
                         if !loggedSWDiscontinuity {
                             loggedSWDiscontinuity = true
                             EngineLog.emit(
@@ -3197,8 +3350,22 @@ final class SoftwarePlaybackHost {
                         let isKey = isVideo && (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                         // Best-effort: a write failure just shrinks the
                         // rewind window, it must not stall the reader.
-                        try? ring.append(pts: ptsSec, isKeyframe: isKey, isVideo: isVideo,
-                                         bytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
+                        if preservesPacketEnvelopes {
+                            do {
+                                packet.pointee.time_base = demuxer.stream(at: streamIdx)?.pointee.time_base
+                                    ?? AVRational(num: 1, den: 1)
+                                try ring.append(packet: SoftwareStoredPacket(copying: packet),
+                                                pts: ptsSec, isKeyframe: isKey, isVideo: isVideo,
+                                                epoch: alignmentEpoch)
+                            } catch {
+                                av_packet_unref(packet); av_packet_free_safe(packet)
+                                onError("Live audio alignment could not retain the required compressed media: \(error.localizedDescription)")
+                                return false
+                            }
+                        } else {
+                            try? ring.append(pts: ptsSec, isKeyframe: isKey, isVideo: isVideo,
+                                             bytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)))
+                        }
                         condition.lock()
                         condition.broadcast()
                         condition.unlock()
@@ -3719,14 +3886,14 @@ final class SoftwarePlaybackHost {
         audioTimeBaseSeconds: Double,
         isLive: Bool,
         foldTimeline: Bool,
-        noteEdge: @Sendable (Double) -> Void,
+        noteEdge: @escaping @Sendable (Double) -> Void,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
         clockArmed: @Sendable () -> Bool,
         markClockArmed: @Sendable () -> Void,
         onClockAnchored: @Sendable (Double) -> Void,
         seekGeneration: @Sendable () -> UInt64,
-        admitsRead: @Sendable (UInt64) -> Bool,
+        admitsRead: @escaping @Sendable (UInt64) -> Bool,
         seekWindowOpen: @Sendable () -> Bool,
         setDecodeGeneration: @Sendable (UInt64) -> Void,
         noteDecodeGeneration: @Sendable () -> Void,
@@ -3741,7 +3908,14 @@ final class SoftwarePlaybackHost {
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
         playedMedia: PlayedMediaLedger? = nil,
         keyframeLedger: SWKeyframeLedger? = nil,
-        noteRebuffering: @Sendable (Bool) -> Void = { _ in }
+        noteRebuffering: @Sendable (Bool) -> Void = { _ in },
+        audioDelaySeconds: Double = 0,
+        alignmentBudget: Int = 0,
+        alignmentReservation: RetentionClaims.Claim? = nil,
+        discontinuityBudget: AudioDelayDiscontinuityBudget? = nil,
+        videoEndTime: Double? = nil,
+        readOverride: (@Sendable (UInt64) throws -> CompressedAudioDelayAlignment.Packet?)? = nil,
+        sourceRetainedBytes: @escaping @Sendable () -> Int = { 0 }
     ) {
         // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
         func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
@@ -3788,6 +3962,93 @@ final class SoftwarePlaybackHost {
             audioTimeBase: audioTimeBaseSeconds) : nil
         var replayGeneration = seekGeneration()
 
+        let delayTimeline = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds)
+        let alignmentEnabled = delayTimeline.requiresAlignment && audioDecoder != nil
+        let initialAlignmentGeneration = seekGeneration()
+        var alignment: CompressedAudioDelayAlignment?
+        var alignmentSource: SoftwareAudioDelayPacketSource?
+        var alignmentVideoOrigins: [UInt64: Double] = [:]
+        var alignmentGeneration = initialAlignmentGeneration
+        var alignmentDecodeEpoch = SoftwareAudioDelayEpochBoundary()
+        var alignmentVideoStart = initialClockTime.seconds
+        var alignmentWaitsForLiveKeyframe = alignmentEnabled && isLive
+        var alignmentVideoDeliveryBaseline = renderer.takeCadence().handedOver
+        var alignmentHasMatchedVideoOutput = false
+        defer { try? alignment?.close() }
+
+        func rawRead(_ generation: UInt64) throws -> UnsafeMutablePointer<AVPacket>? {
+            if let readAhead { return try readAhead.read(isCurrent: { admitsRead(generation) })?.makeAVPacket() }
+            if replayGeneration != generation { replayReader?.reset(); replayGeneration = generation }
+            if let replayReader {
+                return try replayReader.read(isCurrent: { admitsRead(generation) }) {
+                    try demuxer.readPacket(isCurrent: { admitsRead(generation) })
+                }
+            }
+            return try demuxer.readPacket(isCurrent: { admitsRead(generation) })
+        }
+
+        func readAligned(_ generation: UInt64) throws -> CompressedAudioDelayAlignment.Packet? {
+            try discontinuityBudget?.check()
+            if alignment == nil || alignmentGeneration != generation {
+                try alignment?.close()
+                alignmentGeneration = generation
+                if generation != initialAlignmentGeneration { discontinuityBudget?.resetForSourceChange() }
+                alignmentVideoDeliveryBaseline = renderer.takeCadence().handedOver
+                alignmentHasMatchedVideoOutput = false
+                alignmentVideoOrigins.removeAll()
+                alignmentDecodeEpoch = SoftwareAudioDelayEpochBoundary()
+                alignmentWaitsForLiveKeyframe = isLive && generation == initialAlignmentGeneration
+                alignmentVideoStart = clockArmed() ? (audioOutput?.currentTimeSeconds ?? initialClockTime.seconds) : initialClockTime.seconds
+                let source = SoftwareAudioDelayPacketSource(
+                    video: videoStreamIndex, audio: audioStreamIndex,
+                    foldsTimeline: readOverride == nil && foldTimeline,
+                    timeBase: { stream in
+                        demuxer.stream(at: stream)?.pointee.time_base ?? AVRational(num: 1, den: 1)
+                    },
+                    readSource: { try rawRead(generation) }, isCurrent: { admitsRead(generation) },
+                    recordingTap: { packet in if readOverride == nil { recordingTap(packet) } },
+                    prepared: { packet, pts in
+                        if readOverride == nil, pts.isFinite {
+                            let stream = packet.pointee.stream_index
+                            if stream == videoStreamIndex || stream == audioStreamIndex {
+                                playedMedia?.record(stream == videoStreamIndex ? .video : .audio,
+                                                    pts: pts, bytes: Int(packet.pointee.size))
+                                if isLive { noteEdge(pts) }
+                            }
+                        }
+                    }
+                )
+                alignmentSource = source
+                let stage = try CompressedAudioDelayAlignment(
+                    delaySeconds: audioDelaySeconds, byteBudget: alignmentBudget,
+                    endOfSourcePolicy: isLive ? .matchedInterval : .finiteVideoTail,
+                    readSource: {
+                        let packet: CompressedAudioDelayAlignment.Packet?
+                        if let readOverride { packet = try readOverride(generation) }
+                        else { packet = try source.read() }
+                        if let packet { try discontinuityBudget?.observeEpoch(packet.epoch) }
+                        if let packet, packet.lane == .video, alignmentVideoOrigins[packet.epoch] == nil,
+                           packet.record.pts != Int64.min, packet.record.timeBaseDenominator > 0 {
+                            alignmentVideoOrigins[packet.epoch] = Double(packet.record.pts)
+                                * Double(packet.record.timeBaseNumerator) / Double(packet.record.timeBaseDenominator)
+                        }
+                        return packet
+                    }, isCurrent: { admitsRead(generation) })
+                alignment = stage
+                alignmentReservation?.track {
+                    stage.snapshot.residentBytes + (readAhead?.snapshot.residentBytes ?? 0)
+                        + sourceRetainedBytes()
+                }
+            }
+            let result = try alignment?.read()
+            if isLive, generation == initialAlignmentGeneration, alignmentWaitsForLiveKeyframe,
+               let origin = result.flatMap({ alignmentVideoOrigins[$0.epoch] }) ?? alignmentSource?.firstVideoSeconds {
+                alignmentVideoStart = delayTimeline.videoAnchor(
+                    sourceOrigin: origin, requestedPosition: alignmentVideoStart, isLive: true)
+            }
+            return result
+        }
+
         // Clock-arming fallback bookkeeping: a declared audio track whose
         // decoder never produces buffers (corrupt stream) must not leave
         // the session unarmed forever. See the video-branch arming below.
@@ -3831,7 +4092,7 @@ final class SoftwarePlaybackHost {
         // not eat a rebuffer pause at every session start.
         var everHadLead = false
         var parkedSeekGeneration = seekGeneration()
-        let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
+        let decoupleAudio = (!isLive || alignmentEnabled) && audioDecoder != nil && audioOutput != nil
         // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
         // is the pacing input and only exists where audio is decoupled, so a live session's line read
         // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
@@ -4002,7 +4263,7 @@ final class SoftwarePlaybackHost {
                 atRingEnd: true,
                 // End of media releases the hold explicitly in the read path below; there is no
                 // ring here whose end this could be read from.
-                sourceEnded: false
+                sourceEnded: alignment?.snapshot.sourceEnded ?? false
             ) {
             case .pauseForRebuffer:
                 rebuffering = true
@@ -4062,7 +4323,10 @@ final class SoftwarePlaybackHost {
             audioOutput: AudioOutput,
             expectedAudioEpoch: UInt64
         ) -> UInt64 {
+            // Compressed alignment deliberately creates leading/trailing silence. Its explicit
+            // video anchor owns the timeline; treating that gap as stale preroll would reset P.
             guard
+                !alignmentEnabled,
                 !didEvaluateInitialAVSkew,
                 firstAudioSampleSeconds.isFinite,
                 firstVideoSampleSeconds.isFinite
@@ -4085,7 +4349,7 @@ final class SoftwarePlaybackHost {
             guard let correctedEpoch = audioOutput.flush(ifEpoch: expectedAudioEpoch) else {
                 return expectedAudioEpoch
             }
-            discardAudioBeforeSeconds = correction.discardAudioBeforeSeconds
+            discardAudioBeforeSeconds = correction.discardAudioBeforeSeconds - (alignmentEnabled ? audioDelaySeconds : 0)
             armClock(
                 audioOutput,
                 resolution: correction.clockResolution,
@@ -4191,23 +4455,44 @@ final class SoftwarePlaybackHost {
             var audioEpochBeforeRead = audioOutput?.epoch ?? 0
             // And the producer's own: a seek's flush that lands between the generation check below and
             // the feed would let a pre-seek packet re-anchor the APAC bridge for the whole post-seek run.
-            let audioFeedEpochBeforeRead = audioDecoder?.feedEpoch ?? 0
+            var audioFeedEpochBeforeRead = audioDecoder?.feedEpoch ?? 0
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
-                if let readAhead {
-                    packet = try readAhead.read(isCurrent: { admitsRead(genBeforeRead) })?.makeAVPacket()
-                } else {
-                    if replayGeneration != genBeforeRead {
-                        replayReader?.reset()
-                        replayGeneration = genBeforeRead
-                    }
-                    if let replayReader {
-                        packet = try replayReader.read(isCurrent: { admitsRead(genBeforeRead) }) {
-                            try demuxer.readPacket(isCurrent: { admitsRead(genBeforeRead) })
+                if alignmentEnabled {
+                    let aligned = try readAligned(genBeforeRead)
+                    if let aligned, alignmentDecodeEpoch.consumes(aligned.epoch) {
+                        waitForRenderer(.drainAll)
+                        freeParkedVideo()
+                        videoDecoder.drainForEndOfStream()
+                        videoDecoder.flush()
+                        audioDecoder?.flush()
+                        renderer.drainReorderBuffer()
+                        alignmentVideoDeliveryBaseline = renderer.takeCadence().handedOver
+                        alignmentHasMatchedVideoOutput = false
+                        if isLive, let origin = alignmentVideoOrigins[aligned.epoch] {
+                            // A source seam retires unmatched old tails. The new source epoch needs
+                            // its own compressed warmup before either shifted stream is presented.
+                            alignmentVideoStart = delayTimeline.videoAnchor(
+                                sourceOrigin: origin, requestedPosition: origin, isLive: true)
+                            alignmentWaitsForLiveKeyframe = true
+                            let anchor = CMTime(seconds: alignmentVideoStart, preferredTimescale: 90_000)
+                            videoDecoder.skipUntilPTS = anchor
+                            renderer.setSkipThreshold(anchor)
+                            _ = audioOutput?.flush()
+                            audioOutput?.seekClock(to: anchor, rate: currentRate())
+                            markClockArmed()
+                            lastEnqueuedAudioPtsSec = .nan
+                            everHadLead = false
+                            releaseRebufferHold("new audio-delay source epoch")
                         }
-                    } else {
-                        packet = try demuxer.readPacket(isCurrent: { admitsRead(genBeforeRead) })
+                        alignmentVideoOrigins = alignmentVideoOrigins.filter { $0.key >= aligned.epoch }
                     }
+                    packet = try aligned?.record.makeAVPacket()
+                    epochBeforeRead = videoDecoder.feedEpoch
+                    audioEpochBeforeRead = audioOutput?.epoch ?? 0
+                    audioFeedEpochBeforeRead = audioDecoder?.feedEpoch ?? 0
+                } else {
+                    packet = try rawRead(genBeforeRead)
                 }
             } catch {
                 // Stop/seek cancellation is not a playback failure, including a normal .closed
@@ -4235,7 +4520,9 @@ final class SoftwarePlaybackHost {
                 // What the audio producer still holds (the APAC encoder's last packets) goes in
                 // first, so the drain below plays it too.
                 if let aDec = audioDecoder, let aOut = audioOutput {
-                    for buf in aDec.endOfStream() {
+                    for buf in aDec.endOfStream() where delayTimeline.admitsAudio(
+                        sourceSeconds: CMSampleBufferGetPresentationTimeStamp(buf).seconds,
+                        videoStart: alignmentVideoStart, videoEnd: videoEndTime) {
                         guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpochBeforeRead) else { break }
                     }
                 }
@@ -4253,12 +4540,13 @@ final class SoftwarePlaybackHost {
                 return !isLive
             }
 
+            let streamIdx = packet.pointee.stream_index
+            if !alignmentEnabled {
             // AE#560: record before any branch. The DVR ring append further down sits inside
             // `if let ring`, so a tap placed there would silently do nothing for a live session
             // loaded without dvrWindowSeconds.
             recordingTap(packet)
 
-            let streamIdx = packet.pointee.stream_index
 
             // Discontinuity runs before any timestamp read; offset applied to both streams.
             if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
@@ -4356,6 +4644,20 @@ final class SoftwarePlaybackHost {
                 }
             }
 
+            }
+            if alignmentEnabled {
+                let pts = packet.pointee.pts == Int64.min ? Double.nan : Double(packet.pointee.pts)
+                    * (streamIdx == videoStreamIndex ? videoTimeBaseSeconds : audioTimeBaseSeconds)
+                if streamIdx == videoStreamIndex, alignmentWaitsForLiveKeyframe {
+                    if !pts.isFinite || pts < alignmentVideoStart || packet.pointee.flags & AV_PKT_FLAG_KEY == 0 {
+                        av_packet_unref(packet); av_packet_free_safe(packet)
+                        return true
+                    }
+                    alignmentVideoStart = pts
+                    alignmentWaitsForLiveKeyframe = false
+                }
+            }
+
             if liveJoinAwaitsKeyframe {
                 if clockArmed() || backgroundAudioOnly() {
                     liveJoinAwaitsKeyframe = false
@@ -4423,7 +4725,7 @@ final class SoftwarePlaybackHost {
                     // requires a DECLARED audio track, not a producing one). The stream that
                     // produces NO packets at all is #337's case and exits at the read gate.
                     if !clockArmed(), let aOut = audioOutput,
-                       audioPacketsSeen >= audioFirstBufferPacketBudget, !audioBuffersProduced {
+                       (alignmentEnabled && !isLive) || (audioPacketsSeen >= audioFirstBufferPacketBudget && !audioBuffersProduced) {
                         armFromVideoPacket(packet, aOut)
                     }
                     drainParkedVideoNonblocking()
@@ -4507,7 +4809,7 @@ final class SoftwarePlaybackHost {
                 reassertGateIfRefused(verdict, epoch: epochBeforeRead)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (no buffer within the producer's first-buffer budget = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
-                   audioDecoder == nil || (audioPacketsSeen >= audioFirstBufferPacketBudget && !audioBuffersProduced) {
+                   (alignmentEnabled && !isLive) || audioDecoder == nil || (audioPacketsSeen >= audioFirstBufferPacketBudget && !audioBuffersProduced) {
                     armFromVideoPacket(packet, aOut)
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
@@ -4546,11 +4848,11 @@ final class SoftwarePlaybackHost {
                     return true
                 }
                 audioPacketsSeen += 1
-                let buffers = aDec.decode(packet: packet, epoch: audioFeedEpochBeforeRead)
+                let buffers = aDec.decode(packet: packet, epoch: alignmentEnabled ? aDec.feedEpoch : audioFeedEpochBeforeRead)
                 if !buffers.isEmpty { audioBuffersProduced = true }
                 if !firstAudioSampleSeconds.isFinite, let firstBuffer = buffers.first {
                     let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
-                    firstAudioSampleSeconds = firstPTS.isValid ? firstPTS.seconds : .nan
+                    firstAudioSampleSeconds = firstPTS.isValid ? delayTimeline.audioPresentationTime(firstPTS.seconds) : .nan
                 }
                 audioEpochBeforeRead = applyInitialAVSkewCorrectionIfNeeded(
                     audioOutput: aOut,
@@ -4559,7 +4861,11 @@ final class SoftwarePlaybackHost {
                 // Renderer admission can clear its gate before a compressed producer decodes
                 // the tap's PCM. Both outputs must use the same packet's startup cutoff.
                 let tapStartupSnapshot = (cutoff: discardAudioBeforeSeconds, generation: startupSeekGeneration)
-                let playableBuffers = buffers.filter { !shouldDiscardStartupAudioBuffer($0) }
+                let playableBuffers = buffers.filter {
+                    !shouldDiscardStartupAudioBuffer($0) && delayTimeline.admitsAudio(
+                        sourceSeconds: CMSampleBufferGetPresentationTimeStamp($0).seconds,
+                        videoStart: alignmentVideoStart, videoEnd: videoEndTime)
+                }
                 let tapSink = audioTapSink()
                 // The flush can also land inside `decode`, so the buffers are checked out again.
                 if seekGeneration() != genBeforeRead {
@@ -4573,6 +4879,12 @@ final class SoftwarePlaybackHost {
                         av_packet_free_safe(packet)
                         return true
                     }
+                }
+                if discontinuityBudget != nil, !playableBuffers.isEmpty, !alignmentWaitsForLiveKeyframe {
+                    if !alignmentHasMatchedVideoOutput {
+                        alignmentHasMatchedVideoOutput = renderer.takeCadence().handedOver > alignmentVideoDeliveryBaseline
+                    }
+                    if alignmentHasMatchedVideoOutput { discontinuityBudget?.noteMatchedOutput() }
                 }
                 // #95: mirrored behind the accept, so a refused buffer is not transcribed. The tap
                 // transcribes PCM, so a producer that hands the renderer compressed audio decodes it here.
@@ -4588,7 +4900,7 @@ final class SoftwarePlaybackHost {
                 if let last = playableBuffers.last {
                     let pts = CMSampleBufferGetPresentationTimeStamp(last)
                     if pts.isValid {
-                        if decoupleAudio { lastEnqueuedAudioPtsSec = pts.seconds }
+                        if decoupleAudio { lastEnqueuedAudioPtsSec = delayTimeline.audioPresentationTime(pts.seconds) }
                         diagAudioPtsSec = pts.seconds
                         diagAudioPtsGeneration = genBeforeRead
                     }
@@ -4600,7 +4912,7 @@ final class SoftwarePlaybackHost {
                     let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
                     let resolution = SWClockAnchorPolicy.resolve(
                         initialSeconds: initialClockTime.seconds,
-                        firstSampleSeconds: firstPTS.isValid ? firstPTS.seconds : .nan
+                        firstSampleSeconds: firstPTS.isValid ? delayTimeline.audioPresentationTime(firstPTS.seconds) : .nan
                     )
                     armClock(
                         aOut,

@@ -1013,6 +1013,59 @@ final class SegmentCache: @unchecked Sendable {
         return _totalBytes
     }
 
+    /// A strict large-delay cache partition either accepts staging, waits behind already-playable
+    /// forward media, or rejects a mandatory current+next window that can never fit.
+    enum StagingAdmission { case accepted, waitForConsumer, insufficientCapacity }
+
+    /// Evicts optional consumed history before enforcing the combined segment/staging allowance.
+    /// Existing zero/small-delay caches never call this admission path. No in-use/current segment
+    /// is unlinked, and a full forward cache parks production until the consumer advances.
+    func admitStagingBytes(_ count: Int, budget: Int) -> StagingAdmission {
+        condition.lock()
+        var doomed: [URL] = []
+        if _totalBytes + count > budget {
+            for index in entries.keys.sorted() where index < currentTargetIndex {
+                if nativeLiveDVRPolicy != nil && isNativeLiveMandatory(index) { continue }
+                if let url = entries.removeValue(forKey: index) {
+                    _totalBytes -= entryBytes.removeValue(forKey: index) ?? 0
+                    videoReaches.removeValue(forKey: index)
+                    doomed.append(url)
+                }
+                if _totalBytes + count <= budget { break }
+            }
+        }
+        // A cold seek cannot advance until its missing current target is produced. Future cached
+        // extras must make room rather than being used as evidence that the consumer can progress.
+        if entries[currentTargetIndex] == nil, _totalBytes + count > budget {
+            for index in entries.keys.sorted(by: >) where index > currentTargetIndex {
+                if nativeLiveDVRPolicy != nil && isNativeLiveMandatory(index) { continue }
+                if let url = entries.removeValue(forKey: index) {
+                    _totalBytes -= entryBytes.removeValue(forKey: index) ?? 0
+                    videoReaches.removeValue(forKey: index)
+                    doomed.append(url)
+                }
+                if _totalBytes + count <= budget { break }
+            }
+        }
+        _evictionCount += doomed.count
+        let result: StagingAdmission
+        if count > budget { result = .insufficientCapacity }
+        else if _totalBytes + count <= budget { result = .accepted }
+        else if entries[currentTargetIndex] != nil, entries.keys.contains(where: { $0 > currentTargetIndex }) { result = .waitForConsumer }
+        else { result = .insufficientCapacity }
+        condition.unlock()
+        for url in doomed { try? FileManager.default.removeItem(at: url) }
+        if !doomed.isEmpty { onResidentSetChanged?() }
+        return result
+    }
+
+    /// Parks a bounded worker wait until a consumer target/storage update or teardown wakes it.
+    func waitForStorageConsumerChange(timeout: TimeInterval) {
+        condition.lock()
+        if !closed { _ = condition.wait(until: Date().addingTimeInterval(timeout)) }
+        condition.unlock()
+    }
+
     /// AE#443: mean on-disk size of a resident segment, which is what turns a window in seconds into a
     /// window in bytes (`LiveWindowSizing.affordableSegments`). nil while nothing is resident, so an
     /// empty cache states that it cannot answer rather than answering zero.

@@ -115,7 +115,12 @@ extension AetherEngine {
     /// After a long pause the sliding DVR window may have evicted the playhead. Clamp to the retained
     /// floor plus a margin, or for live-only (no DVR) snap to the edge when far enough behind.
     func clampLiveResumeIfBehindWindow() {
-        guard isLive, let w = liveWindow else { return }
+        guard isLive, var w = liveWindow else { return }
+        // A retained seek publishes its landed clock before the next Live-window timer tick.
+        // Large software warmup can put that stale playhead outside the retained interval.
+        if videoRoute == .software, AudioDelayPolicy.usesAlignment(loadedOptions.audioDelaySeconds) {
+            w.notePlayhead(currentTime)
+        }
         let scheduledLoadGeneration = loadGeneration
         let scheduledSeekGeneration = currentSeekGeneration
         let action = Self.liveResumeAction(
@@ -921,8 +926,9 @@ extension AetherEngine {
     /// AE#851: the loopback's first-serve gate, waited out before AVPlayer asks for the playlist.
     /// Returns when the gate does (window ready, degraded at its deadline, or cancelled by a stop),
     /// so a superseded load still has to check its generation afterwards.
-    nonisolated static func awaitFirstLiveWindow(_ provider: VideoSegmentProvider) async {
+    nonisolated static func awaitFirstLiveWindow(_ provider: VideoSegmentProvider, audioDelayWarmupSeconds: Double = 0) async {
         let timeout = LiveEdgePolicy.firstServeTimeoutSeconds(edgeCushionSeconds: provider.liveEdgeCushionSeconds)
+            + max(0, audioDelayWarmupSeconds)
         let started = DispatchTime.now()
         let ready = await BlockingWork.detached(priority: .userInitiated) {
             provider.waitForFirstLiveSegment(timeout: timeout)

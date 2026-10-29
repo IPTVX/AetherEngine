@@ -87,7 +87,7 @@ extension HLSVideoEngine {
             return true
         case .sourceReplay, .eof, .readError, .keyframeStarvation:
             return !sourceReopenable
-        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged:
+        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged, .audioDelayBufferFailed:
             // muxerFailed / needsAudioSampleEntryPrime: handleLiveMuxerFailure and the AE#222 arm rebuild
             // the producer into the SAME provider, so an eager halt here would 503 the very provider the
             // rebuild is about to serve; both arms halt themselves once their budget is exhausted.
@@ -256,6 +256,11 @@ extension HLSVideoEngine {
             return
         }
         guard !alreadyRecovering else { return }
+        if case .audioDelayBufferFailed(let message) = reason {
+            provider?.markLiveProductionHalted()
+            surfaceVODSourceFailure(FFmpegErr.eio, message)
+            return
+        }
         if case .videoConfigurationChanged(let summary) = reason {
             recordVODVideoConfigurationMismatch(prod, summary: summary)
             return
@@ -394,7 +399,7 @@ extension HLSVideoEngine {
             provider?.markLiveProductionHalted()
         }
         switch reason {
-        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged:
+        case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime, .videoConfigurationChanged, .audioDelayBufferFailed:
             // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
             return
         case .sourceReplay:

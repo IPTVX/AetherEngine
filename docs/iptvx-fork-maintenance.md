@@ -60,10 +60,42 @@ Preserve these properties:
   while the previous source reader is tearing down.
 - Rapid changes converge on the latest value; stop, source replacement and late
   teardown completions cannot revive or mutate a retired session.
-- VOD correction and software audio retiming keep their existing behavior;
-  remote-HLS bypass remains explicitly unsupported.
-- Keep the existing bounded delay range. Enlarging it requires separate timestamp,
-  buffering, latency and memory validation; it is not part of applying this patch.
+- Keep the explicitly requested -180...180-second range aligned with IPTVX's
+  adapter and picker. Positive values present audio later; the host step remains
+  half a second. Reject non-finite timestamps and clamp out-of-range values at
+  the engine boundary as well as the host boundary.
+- Preserve the existing path for corrections within two seconds. Larger offsets
+  require compressed packet alignment; increasing a numeric clamp alone does not
+  produce correct playback. Leaving that path, including reset to zero, must
+  reconstruct its timing state.
+- Keep source-order admission, recording and timeline normalization before
+  cross-track scheduling. Preserve original DTS, PTS, duration, flags and side
+  data, including the opt-in DVR packet envelope. At Live EOF retain only the
+  matched A/V interval; finite VOD retains its intentional silent video tail.
+  Apply the audio offset once at
+  the renderer or muxer, and keep video/subtitle position on the source axis.
+- Bound compressed disk queues within the session's retention allowance. Include
+  actual resident disk bytes in accounting. Capacity or spool errors must fail
+  explicitly; never discard required packets or retain minutes of decoded media
+  to make the requested value appear accepted.
+- Live can need up to the absolute offset in source history before playback is
+  possible. Startup/first-frame policy must distinguish that intentional warmup
+  from a failed source; cancellation must still interrupt it. Internal alignment
+  does not enable a public DVR window. A DVR window must represent the available
+  audio/video intersection, not raw source retention alone. After a DVR seek,
+  resume clamping must use the current video position rather than a stale
+  published window snapshot; otherwise play can immediately undo the seek.
+- A large Live delay change rejoins the source even when DVR is enabled, retaining
+  transport intent rather than the old paused DVR position. Source timeline or
+  format discontinuities retire unmatched old-epoch tails and restart alignment.
+  A source that resets more frequently than the requested offset may be unable to
+  provide a stable matched interval; bounded failure must remain explicit rather
+  than an endless warmup or a silently reduced delay.
+- VOD must retain the requested video position. Missing source audio at the
+  beginning or end is an intentional gap; it must not skip video, stall a tail
+  seek or end the title early. Preserve native codecs, Dolby Vision and object
+  audio rather than changing the playback route to hide a gap-handling defect.
+- Remote-HLS bypass remains explicitly unsupported.
 
 ### Porting boundaries
 
@@ -72,6 +104,34 @@ source teardown ownership, `HLSSegmentProducer` and `MP4SegmentMuxer`. The origi
 failure is the combination of a Live-without-DVR re-anchor refusal and an immutable
 producer offset. Updating only the parent session's value does not update the
 producer already serving the viewer.
+
+The expanded range additionally crosses compressed packet scheduling, software
+clock/lead/preroll decisions, native segment audio admission and seek read-start
+selection, finite-media tail framing, and shared disk retention. Inspect
+`CompressedAudioDelayAlignment`, `SoftwareAudioDelayPacketSource`,
+`SoftwareAudioDelayTimeline`, `SoftwarePlaybackHost`, `PacketRingBuffer` and
+`HLSVideoEngine`, `AudioDelayDiscontinuityBudget`, `AudioTailPadding`,
+`HEAACSilenceEncoder` and `SpatialAudioBridge` when porting. A source/configuration epoch must not apply new
+decoder or muxer state to queued old-format packets. Small-offset behavior stays
+outside the new alignment stage.
+
+The large-offset storage policy divides one session reservation between the
+ordinary compressed cache/ring and alignment. Include consumed chunk prefixes,
+staging bytes and record headers in residency; do not confuse a retention claim
+with enforcement. Normal saturation must evict optional cache or wait for
+consumer progress. Only an unsatisfiable required span/record is a capacity
+failure. Preserve this distinction when upstream changes cache admission.
+
+Native finite gaps reuse the segment muxer and audio-padding boundaries. Do not
+reintroduce an HLS-period rewrite or route fallback to hide missing audio.
+Leading fragments must be seekable before the first genuine audio packet, and
+final padding must allow video to reach its normalized final frame. Genuine
+source audio packets and codec configuration remain unchanged. APAC fill uses
+the existing encoder/cookie/layout in bounded chunks. HE-AAC fill accepts only
+verified compatible mono/stereo, 1024-core-frame, 2x-SBR configurations (including
+PS); PCE, 960-frame and other unsupported configurations are explicit failures
+when fill is required. Temporary and returned compressed bytes count toward the
+same retention policy. No new binary dependency is introduced.
 
 Patch snapshot:
 [`Patches/IPTVX/live-audio-delay-without-dvr.patch`](../Patches/IPTVX/live-audio-delay-without-dvr.patch).
@@ -88,7 +148,7 @@ Run this suite on the native macOS loopback route through the repository's
 FlowDeck validation harness. Keep VOD loopback and software runtime-setter
 regressions in the verification matrix as separate checks.
 
-Initial validation used synthetic H.264/AAC media on the native macOS pipeline,
+Initial bounded-range validation used synthetic H.264/AAC media on the native macOS pipeline,
 including actual fMP4 packet timestamps. The complete `LiveAudioDelayTests` suite
 passed five tests (six argument cases), with no failures or skips.
 HLS/refusal and six related AE#464 policy
@@ -97,6 +157,92 @@ tests. iOS and tvOS builds passed with the existing OS16 floors. The check/apply
 script was verified on the uncorrected baseline, then repeated to prove
 idempotence and byte-identical corrected sources. These checks do not establish
 physical-device lip-sync or a guaranteed rejoin duration for every Live origin.
+
+### Expanded-range verification matrix
+
+The full-range correction must be verified separately from the initial bounded
+Live fix. Exercise -180, -30, -3, -2.5, zero and their positive counterparts as
+appropriate to each boundary; a clamp/picker test does not establish delivery.
+
+- Native and software Live: actual corrected audio timestamps and advancing
+  video, both signs, source epochs, EOF, stop and source replacement.
+- An owned Live warmup interrupted by zero or the opposite sign: no concurrent
+  outgoing/incoming source access, latest transport and subtitle intent retained,
+  no stale reload hold or foreground-restore request.
+- Native finite VOD: initial mixed-fragment audio gaps, seeks inside a leading
+  gap, an uncached middle gap, final-frame presentation and tail seeks, and an
+  entirely empty shifted audio overlap. Verify decoded video, not only clock or
+  seek-completion callbacks.
+- Software finite VOD and DVR: preserve requested video position and source packet
+  metadata; public DVR availability must use the shifted A/V intersection.
+- Retention: account on-disk record overhead and staging, test normal saturation
+  and consumer progress, and refuse records or spans that cannot fit explicitly.
+- Same-format native silence: retain source codec configuration and genuine
+  compressed packets, verify HE-AAC/HE-AACv2 implicit and explicit ASC forms, and
+  preserve APAC cookie/layout and timestamp continuity. Unsupported required
+  fill must not masquerade as a successful gap fix.
+- Existing small-offset, ring, lifecycle and audio-delay policy regressions,
+  followed by iOS/tvOS compilation with the retained OS16 floors.
+
+Opt-in fixture tests must report missing fixtures as skips. A skipped native
+fixture matrix is not evidence for a release. Preserve the fixture identity,
+run configuration and test results with the validation record.
+
+### Full-range validation record
+
+The final native macOS closure passed 11 tests across three suites, with no
+failures or skips; complete logs confirm all signed parameter cases. It covers
+actual decoded video and native playback at both 180-second limits, finite gap
+seeks at +/-2.5, +/-3 and +/-30 seconds, stop/source replacement, rotating HLS
+headers, ordinary small offsets and spatial encoder continuity. Held-teardown
+warmup replacement tests separately verify latest transport/subtitle intent and
+absence of overlapping source I/O. A separate seekable custom-reader regression
+also passed with its outgoing teardown held. Shared alignment, Live EOF, cache saturation,
+padding byte caps and cancellation regressions also passed.
+
+Software validation passed the 61-test pipeline group and the 23-test budget
+closure. Final DVR and Live-EOF checks passed two parameterized tests with four
+signed cases. The retained-DVR test now asserts immediate landing and new video
+within three seconds, preventing natural playback from disguising an ignored or
+undone seek. Finite silent-title and tail-EOF checks passed separately.
+
+HE-AAC/HE-AACv2 validation passed 15 compatibility/padding tests, one cancellation
+test with two cases and four native leading-gap cases. The native checks verify
+source ASC and genuine packet preservation, prefix seeking and the final decoded
+video frame. Final iOS/tvOS core builds passed with the existing OS16 floors.
+The 43-file code/test snapshot passes reverse-check on this core, applies to the
+uncorrected baseline, remains idempotent and reproduces byte-identical files.
+These checks do not establish physical-device lip-sync or production-origin
+warmup latency.
+
+### Reproducing native full-range checks
+
+The native integration suite accepts a seekable indexed H.264/AAC fixture with
+real keyframes, hardware-decodable dimensions and at least about 25 seconds of
+media. Validation used the public SMBClient fixture
+`Tests/SMBClientTests/Fixtures/shares/bob/test_files/file_example_MP4_1920_18MG.mp4`,
+SHA256 `d6617a009c0c6c9aebf7398d43cad6d1985ddc1b9ab0479e2ea977362b8af5b0`.
+Tests remux/repeat its compressed packets and use actual per-track endpoints.
+A tiny synthetic source that silently chooses software is not a native proof.
+
+Use the repository's generated FlowDeck harness with its saved My Mac /
+`AetherEngineMacTests` configuration. Set the fixture path locally:
+
+```sh
+fixture_path=/path/to/file_example_MP4_1920_18MG.mp4
+flowdeck test \
+  --xcodebuild-env "AETHER_NATIVE_DELAY_FIXTURE=$fixture_path" \
+  --xcodebuild-env "TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE=$fixture_path" \
+  --only AetherEngineMacTests/NativeLargeAudioDelayTests --json
+```
+
+Run the accompanying software, lifecycle, alignment/budget, generic padding,
+HE-AAC and spatial-bridge regressions too. Inspect complete Swift Testing output
+for actual signed parameter cases: some FlowDeck method filters can select zero
+parameterized cases without failing the run. Use a suite selector or the exact
+`-only-testing` method signature through its supported `--xcodebuild-options`
+pass-through. Preserve the complete log and result bundle before another run
+replaces them. Final release checks require zero unexpected skips.
 
 ### Retirement condition
 

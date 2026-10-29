@@ -1246,6 +1246,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     public var onSessionCacheStatusChanged: (@Sendable (SessionCacheStatus) -> Void)?
     /// #687: this session's entry in the process-wide ledger, released on `stop()`.
     private var retentionClaim: RetentionClaims.Claim?
+    /// All compressed alignment spools share this session’s existing cache claim.
+    private let audioDelaySpoolUsage = AudioDelaySpoolUsage()
 
     /// Clamp for `forwardWindowSegments`: below 4 the window would undercut AVPlayer's own ~5-7-segment
     /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`). The 2700 ceiling (~3 h at 4 s
@@ -1796,11 +1798,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let retentionBudget = claim.bytes
         let segmentCache = SegmentCache(
             forwardWindow: forwardWindowSegments,
-            retentionBudgetBytes: retentionBudget,
+            retentionBudgetBytes: abs(audioDelaySeconds) > 2 ? retentionBudget / 2 : retentionBudget,
             nativeLiveDVRPolicy: isLiveSession ? nativeLiveDVRPolicy : nil,
             onResidentSetChanged: { [weak self] in self?.noteResidentSetChanged() }
         )
-        claim.track { [weak segmentCache] in segmentCache?.totalBytes ?? 0 }
+        let delayUsage = audioDelaySpoolUsage
+        claim.track { [weak segmentCache] in (segmentCache?.totalBytes ?? 0) + delayUsage.total }
         restartLock.lock()
         self.retentionBudgetBytes = retentionBudget
         self.sessionCacheVolumeSafetyLimitBytes = budget.volumeSafetyLimitBytes
@@ -2273,6 +2276,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // 6b. Run the stream-copy / FLAC-bridge / video-only cascade.
         let prod: HLSSegmentProducer
+        let videoTrack = dem.stream(at: videoStreamIndex)
+        let audioTrack = audioDem.stream(at: audioStreamIndex)
+        let omitsEmptyAudio: Bool = {
+            guard !isLiveSession, abs(audioDelaySeconds) > 2,
+                  let videoTrack, let audioTrack,
+                  videoTrack.pointee.duration > 0, audioTrack.pointee.duration > 0,
+                  videoTrack.pointee.start_time != Int64.min, audioTrack.pointee.start_time != Int64.min else { return false }
+            let vBase = av_q2d(videoTrack.pointee.time_base)
+            let aBase = av_q2d(audioTrack.pointee.time_base)
+            let vStart = Double(videoTrack.pointee.start_time) * vBase
+            let vEnd = vStart + Double(videoTrack.pointee.duration) * vBase
+            let aStart = Double(audioTrack.pointee.start_time) * aBase + audioDelaySeconds
+            let aEnd = aStart + Double(audioTrack.pointee.duration) * aBase
+            return aStart >= vEnd || aEnd <= vStart
+        }()
+        if omitsEmptyAudio {
+            savedAudioConfig = nil
+            audioDelivery = .none
+            audioPipelineDescription = "Muted: no source audio overlaps the delayed finite video window"
+            audioHLSCodecs = nil
+            prod = try makeProducer(baseIndex: initialProducerBaseIndex)
+        } else {
         prod = try buildProducerWithAudioCascade(
             preferBridge: bridgePreferred,
             streamCopyAudio: streamCopyAudio,
@@ -2283,8 +2308,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioHLSCodecs: &audioHLSCodecs,
             audioLanguage: audioLanguage
         )
+        }
         self.producer = prod
-        self.activeAudioSourceStreamIndex = savedAudioConfig != nil ? audioStreamIndex : -1
+        self.activeAudioSourceStreamIndex = savedAudioConfig != nil || omitsEmptyAudio ? audioStreamIndex : -1
         // AE#458: only when the audio actually reached the variant. A cascade that fell through to
         // video-only must not advertise an audio rendition that is not in the segments, and must not
         // force the master for one either.
@@ -3714,6 +3740,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
 
         let producerEpoch = nextProducerEpoch()
+        let spoolOwner = UUID()
+        let delayUsage = audioDelaySpoolUsage
         let prod = try HLSSegmentProducer(
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
@@ -3744,7 +3772,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             packedSideAudioStartPts: packedSideAudioStartPts,
             packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
             bufferAheadSegments: forwardWindowSegments,
-            prefetchDiskBudgetBytes: retentionBudgetBytes,
+            prefetchDiskBudgetBytes: abs(audioDelaySeconds) > 2 ? retentionBudgetBytes / 2 : retentionBudgetBytes,
             // AE#222: nil until a pump proved this source cuts its first segment before any audio packet
             // arrives; from then on every producer of the session muxes moov from this frame.
             audioMoovPrimeFrame: sessionAudioMoovPrimeFrame,
@@ -3757,6 +3785,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             servesSegmentsProgressively: servesSegmentsProgressively,
             epoch: producerEpoch
         )
+        let alignmentBudget = retentionBudgetBytes / 2
+        prod.audioDelayAvailableBytes = {
+            max(0, alignmentBudget - delayUsage.otherBytes(excluding: spoolOwner))
+        }
+        prod.onAudioDelayResidentBytesChanged = { delayUsage.set($0, for: spoolOwner) }
+
         // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
         // below. The side readers read one gate for the whole session, so a restart must not leave
         // a gap where nobody claims the link.
@@ -5206,8 +5240,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // seek fails fast instead of racing teardown.
         let seekStart = DispatchTime.now()
         // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
-        if activeDem.isDiscSource || !activeDem.seek(to: targetStartPts, streamIndex: videoStreamIndex) {
-            let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
+        let readTarget = audioDelaySeconds > 2
+            ? max(0, targetStartPts - Int64((audioDelaySeconds / av_q2d(videoTb)).rounded())) : targetStartPts
+        let needsEarlierAudio = audioDelaySeconds > 2 && readTarget < firstKeyframePts
+        if activeDem.isDiscSource || needsEarlierAudio || !activeDem.seek(to: readTarget, streamIndex: videoStreamIndex) {
+            let absoluteTargetSeconds = Double(readTarget) * Double(videoTb.num) / Double(videoTb.den)
             activeDem.seek(to: absoluteTargetSeconds)
         }
         // AE#782: after the seek, so a container whose seek reads (a TS bisection) spends none of it.
@@ -5285,9 +5322,13 @@ extension HLSVideoEngine {
     func seekToInitialProducerStart(_ dem: Demuxer) {
         let plan = segmentPlan
         guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return }
-        let targetPts = plan[initialProducerBaseIndex].startPts
+        let plannedTarget = plan[initialProducerBaseIndex].startPts
+        let base = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+        let targetPts = audioDelaySeconds > 2
+            ? max(0, plannedTarget - Int64((audioDelaySeconds / av_q2d(base)).rounded())) : plannedTarget
         // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
-        if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
+        let needsEarlierAudio = audioDelaySeconds > 2 && targetPts < firstKeyframePts
+        if dem.isDiscSource || needsEarlierAudio || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
             let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
             dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
         }

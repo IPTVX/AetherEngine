@@ -179,6 +179,56 @@ struct AudioTailPaddingTests {
         }
     }
 
+    /// Builds an owned LC parameter block without sharing encoder state between parallel tests.
+    private static func withAACParameters(
+        _ body: (UnsafeMutablePointer<AVCodecParameters>) throws -> Void
+    ) throws {
+        var owned = avcodec_parameters_alloc()
+        defer { avcodec_parameters_free(&owned) }
+        let parameters = try #require(owned)
+        try #require(avcodec_find_encoder(AV_CODEC_ID_AAC) != nil)
+        parameters.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        parameters.pointee.codec_id = AV_CODEC_ID_AAC
+        parameters.pointee.profile = AV_PROFILE_AAC_LOW
+        parameters.pointee.sample_rate = 48_000
+        parameters.pointee.bit_rate = 64_000
+        av_channel_layout_default(&parameters.pointee.ch_layout, 2)
+        try body(parameters)
+    }
+
+    /// Optional reservations reject partial output instead of returning packets beyond the caller's byte cap.
+    @Test(arguments: [1, 65_536])
+    func optInPacketByteLimitIsEnforced(maximumBytes: Int) throws {
+        try Self.withAACParameters { parameters in
+            let outcome = AudioTailPadding.silencePackets(codecpar: parameters, startTicks: 0, endTicks: 48_000,
+                timeBase: AVRational(num: 1, den: 48_000), maximumPacketBytes: maximumBytes)
+            if maximumBytes == 1 {
+                guard case .unavailable(let reason) = outcome else { Issue.record("Encoder published packets beyond its byte cap"); return }
+                #expect(reason.contains("output limit"))
+            } else {
+                guard case .packets(let packets, _) = outcome else { Issue.record("Encoder rejected an adequate reservation"); return }
+                defer { for packet in packets { var owned = Optional(packet); trackedPacketFree(&owned) } }
+                #expect(!packets.isEmpty)
+                #expect(packets.reduce(0) { $0 + Int($1.pointee.size) } <= maximumBytes)
+            }
+        }
+    }
+
+    /// A generation ending before or during encoding never publishes an owned partial result.
+    @Test(arguments: [false, true])
+    func optInCancellationRejectsPartialOutput(cancelBeforeEncoding: Bool) throws {
+        try Self.withAACParameters { parameters in
+            var checks = 0
+            let outcome = AudioTailPadding.silencePackets(codecpar: parameters, startTicks: 0, endTicks: 48_000,
+                timeBase: AVRational(num: 1, den: 48_000), maximumPacketBytes: 65_536, isCurrent: {
+                    checks += 1
+                    return !cancelBeforeEncoding && checks < 12
+                })
+            guard case .unavailable(let reason) = outcome else { Issue.record("Cancelled encoder published partial packets"); return }
+            #expect(reason.contains("audio-delay buffering cancelled"))
+        }
+    }
+
     private static func installEncoderExtradata(on par: UnsafeMutablePointer<AVCodecParameters>) throws {
         let codec = try #require(avcodec_find_encoder(par.pointee.codec_id))
         var encOpt = avcodec_alloc_context3(codec)

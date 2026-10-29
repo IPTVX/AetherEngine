@@ -30,7 +30,8 @@ extension AetherEngine {
     /// rule). So a change is brought to the playhead rather than left to arrive when that media
     /// drains, and what that costs differs:
     ///
-    /// - `.software`: a seek to the current position. Measured on a 30 fps H.264 fixture: set at
+    /// - `.software`, when both the previous and requested offsets are within +/-2 seconds: a seek
+    ///   to the current position. Measured on a 30 fps H.264 fixture: set at
     ///   t=4.90 s, landed at 4.90 s, the new offset delivered on the next buffer.
     /// - `.loopback`: the session-preserving reload (#460). A seek is not enough and measuring it is
     ///   what settled this: seeking to the position AVPlayer already holds is a buffer hit, so it
@@ -39,7 +40,13 @@ extension AetherEngine {
     ///   makes AVPlayer let go. Measured on the same fixture: about 0.3 s of held picture, position
     ///   preserved to the sample (7.80 s to 7.80 s).
     ///
-    /// Live loopback without DVR rejoins the Live edge with a fresh producer, after the previous
+    /// Offsets beyond +/-2 seconds use compressed track alignment. Entering, changing or leaving
+    /// that mode (including reset to zero) rebuilds either video route. VOD retains its video position;
+    /// finite boundaries may have intentionally absent audio. Live rejoins rather than returning to
+    /// its old DVR position, including a paused mount: fresh video/audio anchors need up to the
+    /// requested absolute offset of source warmup. Public DVR configuration is preserved.
+    ///
+    /// Live loopback without DVR also rejoins the Live edge with a fresh producer, after the previous
     /// source has closed. This preserves transport and selections without enabling DVR or seeking
     /// an unavailable position. A custom stream that cannot seek or reopen keeps the value for its
     /// next independently created producer and logs the refusal.
@@ -60,7 +67,16 @@ extension AetherEngine {
             )
         }
         guard AudioDelayPolicy.isChange(from: loadedOptions.audioDelaySeconds, to: clamped) else { return }
+        let previous = loadedOptions.audioDelaySeconds
+        let rebuildsAlignment = AudioDelayPolicy.requiresRebuild(from: previous, to: clamped)
         setLoadedAudioDelay(clamped)
+
+        // A producer has already captured its offset before a long warmup starts. Cancel that
+        // owned generation now; waiting for its obsolete history would make reset wait minutes.
+        if liveAudioDelayRejoinID != nil, rebuildsAlignment {
+            interruptAudioDelayWarmup()
+            return
+        }
 
         // Round 3: a session being rebuilt has no route to ask. `videoRoute` drops to `.none` at
         // teardown, which is the ABSENCE of a route rather than a route that cannot carry an offset,
@@ -90,6 +106,10 @@ extension AetherEngine {
             // The renderer takes the new stamp on the next buffer. What is already decoded still
             // carries the old one, so re-anchor to bring the change to the playhead: on this path
             // that is a flush and a demuxer reposition, and it lands inside a seek.
+            if rebuildsAlignment {
+                rebuildForAudioDelay()
+                return
+            }
             softwareHost?.setAudioDelay(clamped)
             EngineLog.emit(
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the software path",
@@ -113,8 +133,8 @@ extension AetherEngine {
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the loopback path",
                 category: .engine
             )
-            if isLive, liveWindow?.windowSeconds == nil {
-                rejoinLiveForAudioDelay()
+            if rebuildsAlignment || (isLive && liveWindow?.windowSeconds == nil) {
+                rebuildForAudioDelay()
                 return
             }
             reanchorForAudioDelay { _, delay in
@@ -172,20 +192,55 @@ extension AetherEngine {
         liveAudioDelayRejoinID = nil
         liveAudioDelayRejoinTask?.cancel()
         liveAudioDelayRejoinTask = nil
+        audioDelayRebuildSelection = nil
+        audioDelayRebuildNeedsSelectionRestore = false
+        audioDelayRebuildSubtitleIntentGeneration = nil
     }
 
-    /// Coalesces Live corrections onto fresh-edge reloads. Every pass reads the latest requested
+    /// Retires an obsolete owned warmup before reopening. Normal teardown invalidates callbacks and
+    /// cancels the old task first; the successor load then awaits that exact source-close barrier.
+    /// This deliberately does not retune an unrelated initial load.
+    private func interruptAudioDelayWarmup() {
+        if isCustomSource, !customSourceIsSeekable, !(customReader is HLSLiveIngestReader) { return }
+        var selection = snapshotReloadSelection(over: audioDelayRebuildSelection)
+        if let priorIntent = audioDelayRebuildSubtitleIntentGeneration,
+           priorIntent != externalSubtitleIntentGeneration {
+            selection.subtitles = captureSubtitleSessionCarryover()
+        }
+        let predecessor = liveAudioDelayRejoinTask
+        let position = positionForSessionRebuild
+        let playing = transportIntentUnderReconstruction ?? sessionRebuildResumesPlaying
+        let backend = playbackBackend
+        let hadNativeHost = nativeHost != nil
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: hadNativeHost,
+                     keepCustomReader: true, preserveAudioDelaySourceTeardown: true)
+        audioDelayRebuildSelection = selection
+        audioDelayRebuildNeedsSelectionRestore = true
+        audioDelayRebuildSubtitleIntentGeneration = externalSubtitleIntentGeneration
+        positionUnderReconstruction = position
+        transportIntentUnderReconstruction = playing
+        setLoadedAutoplay(playing)
+        playbackBackend = hadNativeHost ? .native : backend
+        state = .loading
+        rebuildForAudioDelay(after: predecessor)
+    }
+
+    /// Coalesces corrections onto owned session-preserving reloads (fresh-edge rejoins for Live). Every pass reads the latest requested
     /// offset; a change after the producer captured it requires another pass. URL and reconstructible
     /// HLS-ingest sources reopen; a genuinely forward-only custom source is explicitly refused.
-    private func rejoinLiveForAudioDelay() {
+    private func rebuildForAudioDelay(after predecessor: Task<Void, Never>? = nil) {
         if liveAudioDelayRejoinID != nil { return }
         if let refusal = sessionReloadRefusal, !(customReader is HLSLiveIngestReader) {
             EngineLog.emit(
-                "[AetherEngine] AE#464: Live audio-delay rejoin refused (\(refusal.rawValue)); "
+                "[AetherEngine] AE#464: Audio-delay rebuild refused (\(refusal.rawValue)); "
                 + "the requested offset is kept for the next producer",
                 category: .engine
             )
             return
+        }
+        if audioDelayRebuildSelection == nil {
+            audioDelayRebuildSelection = snapshotReloadSelection()
+            audioDelayRebuildSubtitleIntentGeneration = externalSubtitleIntentGeneration
         }
         let ownerID = UUID()
         let initialGeneration = loadGeneration
@@ -196,9 +251,16 @@ extension AetherEngine {
                 if self.liveAudioDelayRejoinID == ownerID {
                     self.liveAudioDelayRejoinID = nil
                     self.liveAudioDelayRejoinTask = nil
+                    self.audioDelayRebuildSelection = nil
+                    self.audioDelayRebuildNeedsSelectionRestore = false
+                    self.audioDelayRebuildSubtitleIntentGeneration = nil
                 }
             }
-            guard self.loadGeneration == initialGeneration else { return }
+            // Retired reloads restore a stack-scoped external-playback hold in defer. They must
+            // unwind before the successor enters that scope; overlapping scopes are not nested.
+            await predecessor?.value
+            guard self.loadGeneration == initialGeneration,
+                  self.liveAudioDelayRejoinID == ownerID, !Task.isCancelled else { return }
             repeat {
                 let delay = self.loadedOptions.audioDelaySeconds
                 let context = LiveAudioDelayRejoinContext(ownerID: ownerID, generation: self.loadGeneration)
@@ -210,16 +272,18 @@ extension AetherEngine {
                     return
                 } catch {
                     guard self.liveAudioDelayRejoinID == ownerID else { return }
-                    EngineLog.emit("[AetherEngine] AE#464: Live audio-delay rejoin failed (\(error))",
+                    EngineLog.emit("[AetherEngine] AE#464: Audio-delay rebuild failed (\(error))",
                                    category: .engine)
                     return
                 }
                 guard self.liveAudioDelayRejoinID == ownerID, !Task.isCancelled else { return }
-                let delivered = self.nativeVideoSession?.audioDelaySeconds ?? delay
-                EngineLog.emit("[AetherEngine] AE#464: rejoined Live with audio delay \(Self.ms(delivered))",
+                let delivered = self.videoRoute == .software
+                    ? (self.softwareHost?.audioDelaySeconds ?? delay)
+                    : (self.nativeVideoSession?.audioDelaySeconds ?? delay)
+                EngineLog.emit("[AetherEngine] AE#464: rebuilt session with audio delay \(Self.ms(delivered))",
                                category: .engine)
                 if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds) { return }
-            } while self.isLive && self.liveWindow?.windowSeconds == nil && self.videoRoute == .loopback
+            } while self.videoRoute == .loopback || self.videoRoute == .software
         }
     }
 

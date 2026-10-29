@@ -24,14 +24,16 @@ import Foundation
 /// `currentTime`, seeking and the subtitle axis are untouched by a nudge.
 enum AudioDelayPolicy {
 
-    /// Largest offset the engine carries, either direction, in seconds.
-    ///
-    /// The correction this exists for is tens to a couple hundred milliseconds; the bound is a
-    /// generous ceiling rather than a target. It is well inside the muxer's 8 s interleave window
-    /// (`MP4SegmentMuxer.maxBufferedFragmentSeconds`), which a constant A/V offset consumes at
-    /// `|delay|`, so an out-of-range value cannot turn into a stalled interleaver or a live session
-    /// that has spent its edge on a typo.
-    static let maxAbsSeconds: Double = 2.0
+    /// Full host range. Offsets above the legacy small-correction window require compressed alignment.
+    static let maxAbsSeconds: Double = 180.0
+
+    /// Preserves the established small-offset pipeline; larger corrections reorder compressed tracks.
+    static func usesAlignment(_ seconds: Double) -> Bool { abs(seconds) > 2 }
+
+    /// Leaving an aligned producer also requires reconstruction, including a reset to zero.
+    static func requiresRebuild(from previous: Double, to next: Double) -> Bool {
+        usesAlignment(previous) || usesAlignment(next)
+    }
 
     /// Bring a host value into range. A non-finite value (NaN from an unset stepper, an infinity out
     /// of a division) becomes 0 rather than propagating into a timestamp.

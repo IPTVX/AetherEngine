@@ -2514,7 +2514,11 @@ public final class AetherEngine: ObservableObject {
     /// custom-source branch reaches `reloadWithAudioOverride`, which reads these fields one by one.
     /// Callers go through `reloadAtCurrentPosition(applying:)`, which refuses the load-identity
     /// fields first; this setter does not re-check them.
-    func applySessionOptionCorrection(_ options: LoadOptions) { loadedOptions = options }
+    func applySessionOptionCorrection(_ options: LoadOptions) {
+        var normalized = options
+        normalized.audioDelaySeconds = AudioDelayPolicy.clamp(options.audioDelaySeconds)
+        loadedOptions = normalized
+    }
 
     #if DEBUG
     /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
@@ -3882,6 +3886,12 @@ public final class AetherEngine: ObservableObject {
     var liveAudioDelayRejoinTask: Task<Void, Never>?
     /// Guards cleanup so a retired correction cannot clear a successor's ownership.
     var liveAudioDelayRejoinID: UUID?
+    /// The original selection survives cancellation of an alignment warmup before reload restores it.
+    var audioDelayRebuildSelection: BackgroundTeardownSelection?
+    /// A preempted correction consumes this dedicated selection handoff, not background state.
+    var audioDelayRebuildNeedsSelectionRestore = false
+    /// Distinguishes a new explicit subtitle pick/off action from teardown's temporarily empty table.
+    var audioDelayRebuildSubtitleIntentGeneration: UInt64?
 
     /// The playhead a rebuild of this session has to come back to (#464 round 2).
     var positionForSessionRebuild: Double {
@@ -3899,7 +3909,7 @@ public final class AetherEngine: ObservableObject {
     /// rather than on `.loading`, because `play()` itself moves `.loading` to `.playing` and a pause
     /// after it would otherwise go unrecorded. Read back where each rebuild settles its transport.
     func recordTransportDuringRebuild(playing: Bool) {
-        guard sessionPreservingReloadInFlight else { return }
+        guard sessionPreservingReloadInFlight || liveAudioDelayRejoinID != nil else { return }
         transportIntentUnderReconstruction = playing
     }
 
@@ -4350,6 +4360,7 @@ public final class AetherEngine: ObservableObject {
         var startPosition = startPosition
         var options = options
         options = Self.applyingSharedOutputRole(options)
+        options.audioDelaySeconds = AudioDelayPolicy.clamp(options.audioDelaySeconds)
         SharedOutputCoordinator.shared.join(ObjectIdentifier(self), role: options.sharedOutputRole, tag: logTag, owner: self)
         // #436: a speed the host set belongs to the item it was set on. The rebuilds a session makes
         // on its own (reload at position, audio-track switch, AirPlay LAN swap, background return)
@@ -4473,6 +4484,7 @@ public final class AetherEngine: ObservableObject {
         // host-initiated reload would resurrect a stale session snapshot.
         loadedOptions.subtitleSessionCarryover = nil
         isLive = options.isLive
+        if AudioDelayPolicy.usesAlignment(options.audioDelaySeconds) { playIntentMirror.set(options.autoplay) }
         isSequentialOrigin = !options.isLive && options.sequentialOrigin
         // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
         // an over-wide published bound only affects range width, not seek landing.
@@ -5989,6 +6001,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func play() {
+        if AudioDelayPolicy.usesAlignment(loadedOptions.audioDelaySeconds) { playIntentMirror.set(true) }
         recordTransportDuringRebuild(playing: true)
         if deferPlayForInterruption() { return }
         // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
@@ -6020,6 +6033,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
+        if AudioDelayPolicy.usesAlignment(loadedOptions.audioDelaySeconds) { playIntentMirror.set(false) }
         recordTransportDuringRebuild(playing: false)
         resumeAfterInterruption = false
         playDeferredByInterruption = false
@@ -6079,6 +6093,7 @@ public final class AetherEngine: ObservableObject {
         // that path the live state every snapshot below reads is wiped long before this call. When
         // nothing was parked this is exactly the pre-#357 live read.
         let resumesTornDownSession = backgroundTeardownSelection != nil
+            || (ownsLiveAudioDelayRejoin && audioDelayRebuildNeedsSelectionRestore)
         let selection = consumeReloadSelection()
         // AE#464 round 2: come back in the transport state the session is IN, not the one its first
         // mount was given. Written before the branch because only the URL branch below carries a
@@ -8093,11 +8108,13 @@ public final class AetherEngine: ObservableObject {
     ///   black-screen latency per audio switch on the old fixed 5 s
     ///   poll; capped at ~2 s since #117, but still worth skipping).
     func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false,
-                      cacheCleanupReason: SessionCacheCleanupReason = .sourceChanged) {
+                      cacheCleanupReason: SessionCacheCleanupReason = .sourceChanged,
+                      preserveAudioDelaySourceTeardown: Bool = false) {
         // AE#560: a recording never outlives its session. This covers stop(), a new load() and
         // every reload, all of which pass through here before the demuxer goes away.
         endRecordingIfRunning(reason: .sessionEnded)
-        if !ownsLiveAudioDelayRejoin { cancelLiveAudioDelayRejoin() }
+        let ownedAudioDelayReload = ownsLiveAudioDelayRejoin
+        if !ownedAudioDelayReload { cancelLiveAudioDelayRejoin() }
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
         scrubPreviewSourceGeneration = UUID()
@@ -8185,7 +8202,11 @@ public final class AetherEngine: ObservableObject {
         if diagnostics.sessionCacheStatus.route == .nativeRemoteHLS {
             diagnostics.sessionCacheStatus = .inactive
         }
-        nativeSourceTeardownTask = nativeVideoSession?.stop(reason: cacheCleanupReason)
+        if let session = nativeVideoSession {
+            nativeSourceTeardownTask = session.stop(reason: cacheCleanupReason)
+        } else if !ownedAudioDelayReload && !preserveAudioDelaySourceTeardown {
+            nativeSourceTeardownTask = nil
+        }
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
         dolbyVisionConversion = nil

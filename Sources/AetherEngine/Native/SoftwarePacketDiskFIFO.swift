@@ -40,7 +40,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         let hasFailure: Bool
     }
 
-    enum Failure: Error, Equatable {
+    enum Failure: Error, Equatable, LocalizedError {
         case invalidChunkTarget
         case closed
         case corruptRecord
@@ -48,6 +48,16 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         case sessionLeaseLost
         case retentionDisabled
         case invalidCursor
+        /// An opt-in shared-session partition would be exceeded by the next complete record.
+        case residentCapacityExceeded(requiredBytes: Int, maximumBytes: Int)
+
+        /// Large-delay storage cannot silently borrow capacity reserved for the other stream queue.
+        var errorDescription: String? {
+            if case let .residentCapacityExceeded(required, maximum) = self {
+                return "Audio-delay packet storage needs \(required) resident bytes, but its session partition is \(maximum). Free storage or reduce the requested delay."
+            }
+            return nil
+        }
     }
 
     static let directoryPrefix = "aether-software-packets-"
@@ -57,6 +67,8 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     let storageDirectory: URL
     let staleSweepResult: StaleSweepResult
     private let chunkTargetBytes: Int
+    /// Optional hard disk residency cap, including headers and protected consumed chunk prefixes.
+    private let maximumResidentBytes: Int?
     private let retainConsumed: Bool
     var retainsConsumedPackets: Bool { retainConsumed }
     private let lock = NSLock()
@@ -84,14 +96,18 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     /// A partial disk operation cannot be retried as if it had succeeded. Only reset recovers it.
     private var failure: (any Error)?
 
+    /// Creates a unique session spool. The optional residency ceiling includes complete records
+    /// and consumed prefixes; callers must provide backpressure before appending beyond it.
     init(chunkTargetBytes: Int = 4 * 1024 * 1024,
          retainConsumed: Bool = false,
+         maximumResidentBytes: Int? = nil,
          parentDirectory: URL = FileManager.default.temporaryDirectory,
          now: Date = Date(),
          leaseAcquisition: ((URL) throws -> Int32)? = nil) throws {
         guard chunkTargetBytes >= 8 else { throw Failure.invalidChunkTarget }
         self.chunkTargetBytes = chunkTargetBytes
         self.retainConsumed = retainConsumed
+        self.maximumResidentBytes = maximumResidentBytes
         storageDirectory = parentDirectory.appendingPathComponent(
             "\(Self.directoryPrefix)\(UUID().uuidString)", isDirectory: true)
         // mkdir, not createDirectory's existing-directory success: cleanup must own this root.
@@ -133,6 +149,9 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
             let nextCount = try checkedSum(recordCount, 1)
             let nextPayloadBytes = try checkedSum(payloadBytes, data.count)
             let nextDiskBytes = try checkedSum(diskBytes, recordBytes)
+            if let maximumResidentBytes, nextDiskBytes > maximumResidentBytes {
+                throw Failure.residentCapacityExceeded(requiredBytes: nextDiskBytes, maximumBytes: maximumResidentBytes)
+            }
             let nextWrittenCount = try checkedSum(writtenRecordCount, 1)
             let nextWrittenBytes = try checkedSum(writtenPayloadBytes, data.count)
             if writer == nil {
@@ -302,6 +321,13 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         try requireUsable()
         guard retainConsumed else { return }
         do {
+            // A hard partition can fill entirely with its consumed active chunk. Roll an empty
+            // writer before retirement so making room never depends on appending over the cap.
+            if maximumResidentBytes != nil, recordCount == 0, diskBytes > max(0, budget),
+               headID == tailID, tailBytes > 0 {
+                try openNextChunk()
+                try advanceRetainedHead()
+            }
             while diskBytes > max(0, budget), oldestChunkID < headID, oldestChunkID < tailID {
                 let url = chunkURL(oldestChunkID)
                 var info = stat()

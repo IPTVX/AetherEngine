@@ -349,6 +349,12 @@ final class AudioOutput: @unchecked Sendable {
         renderer.enqueue(delivered)
         #if DEBUG
         afterRendererEnqueueForTesting?()
+        if let deliveredTimingForTesting {
+            let source = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+            let actual = CMSampleBufferGetPresentationTimeStamp(delivered).seconds
+                + timeline.offset(latchingFrom: sampleBuffer).seconds
+            deliveredTimingForTesting(source, actual)
+        }
         #endif
         lock.unlock()
         if let offsetLine { EngineLog.emit(offsetLine, category: .swPlayback) }
@@ -384,6 +390,16 @@ final class AudioOutput: @unchecked Sendable {
     /// Test-only: runs inside `enqueue`'s locked section, right after the renderer took the buffer, which
     /// is where a renderer that posts its notifications from inside `enqueue` would post them.
     var afterRendererEnqueueForTesting: (@Sendable () -> Void)?
+
+    /// Observes the actual renderer-admitted stamp on the source/video axis, after retiming.
+    private var deliveredTimingForTesting: (@Sendable (Double, Double) -> Void)?
+
+    /// Installs a race-free timing observer before a test starts its playback loop.
+    func setDeliveredTimingForTesting(_ handler: (@Sendable (Double, Double) -> Void)?) {
+        lock.lock()
+        deliveredTimingForTesting = handler
+        lock.unlock()
+    }
 
     /// Holds a pending start without its timeout, so transport tests exercise cancellation
     /// independently of how long the main actor takes to run on a loaded test runner.

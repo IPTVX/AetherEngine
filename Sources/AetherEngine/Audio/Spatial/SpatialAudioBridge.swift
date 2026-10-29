@@ -29,9 +29,18 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     enum BridgeError: Error, CustomStringConvertible {
         case codecparAllocFailed
         case unsupportedSampleRate(Int)
+        /// The owning source retired while finite silence was being encoded.
+        case finitePaddingCancelled
+        /// Encoded padding could not be admitted by the owning bounded mux/cache.
+        case finitePaddingWriteFailed
+        /// Standalone callers must stream a fill whose retained packets exceed this small batch cap.
+        case finitePaddingRetentionExceeded
 
         var description: String {
             switch self {
+            case .finitePaddingCancelled: return "Finite audio-delay padding was cancelled by source replacement or stop"
+            case .finitePaddingWriteFailed: return "Finite audio-delay padding could not be written to the session cache"
+            case .finitePaddingRetentionExceeded: return "Finite audio-delay padding exceeds its retained packet allowance; stream the encoded output"
             case .codecparAllocFailed: return "SpatialAudioBridge: avcodec_parameters_alloc failed"
             case .unsupportedSampleRate(let r): return "SpatialAudioBridge: object audio at \(r) Hz (48 kHz only)"
             }
@@ -80,6 +89,14 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private var encoderFramesIn: Int64 = 0
     private var nextExpectedInputOffset: Int64?
     private var drainedAtEOF = false
+    /// One-shot start on the pre-delay source axis, fulfilled by the first genuine decoded block.
+    private var finiteLeadingStartFrame: Int64?
+    /// Silence may be submitted before source blocks; source audio can never be prefixed afterward.
+    private var hasRenderedSourceFrames = false
+    /// Source cancellation is checked between bounded encoder batches.
+    private var finiteLeadingIsCurrent: (() -> Bool)?
+    /// Production drains packets directly into the existing mux/cache instead of retaining a long PCM bed.
+    private var finiteLeadingPacketConsumer: (([UnsafeMutablePointer<AVPacket>]) -> Bool)?
     /// The decoder reset itself after an internal failure: its offsets count from zero again, so the
     /// next block re-anchors on the next packet's timestamp instead of being appended to the encoder.
     private var decoderSelfResetsSeen = 0
@@ -309,6 +326,121 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         return results
     }
 
+    /// Arms one finite opening gap; the first genuine decoded block supplies the exact end after
+    /// decoder priming/metadata hold. Decoder origin and offsets remain those of the original source.
+    func prepareFiniteLeadingFill(fromSourceSeconds start: Double, isCurrent: (() -> Bool)? = nil,
+                                  packetConsumer: (([UnsafeMutablePointer<AVPacket>]) -> Bool)? = nil) {
+        opLock.lock()
+        defer { opLock.unlock() }
+        guard !drainedAtEOF, !hasRenderedSourceFrames, start.isFinite else { return }
+        finiteLeadingStartFrame = Int64((start * Double(Self.sampleRate)).rounded(.up))
+        finiteLeadingIsCurrent = isCurrent
+        finiteLeadingPacketConsumer = packetConsumer
+    }
+
+    /// Streams an entirely empty leading fragment before the first genuine decoded block. The same
+    /// encoder continues across fragments; decoder priming/origin remains untouched until source feed.
+    func padFiniteLeadingSegment(fromSourceSeconds start: Double, throughSourceSeconds end: Double,
+                                 isCurrent: (() -> Bool)? = nil,
+                                 packetConsumer: (([UnsafeMutablePointer<AVPacket>]) -> Bool)? = nil) throws -> [UnsafeMutablePointer<AVPacket>] {
+        opLock.lock()
+        defer { opLock.unlock() }
+        guard !drainedAtEOF, !hasRenderedSourceFrames, start.isFinite, end.isFinite, end > start else { return [] }
+        let first = Int64((start * Double(Self.sampleRate)).rounded(.up))
+        let target = Int64((end * Double(Self.sampleRate)).rounded(.down))
+        if encoderStartFrame == nil { encoderStartFrame = first }
+        let currentEnd = (encoderStartFrame ?? first) + encoderFramesIn + Int64(pendingFrames)
+        var results: [UnsafeMutablePointer<AVPacket>] = []
+        do {
+            if target > currentEnd {
+                try encodeFiniteSilence(frames: Int(target - currentEnd), into: &results,
+                    isCurrent: isCurrent, packetConsumer: packetConsumer)
+            }
+            return results
+        } catch {
+            for packet in results { var owned = Optional(packet); trackedPacketFree(&owned) }
+            throw error
+        }
+    }
+
+    /// Emits a finite missing-audio tail with this bridge's real encoder, cookie and speaker bed.
+    /// Positions use the bridge's pre-delay 48 kHz source axis. A long middle gap is re-anchored,
+    /// while zero PCM is submitted in existing bounded chunks for the final segment only.
+    /// Call after genuine source EOF and before `flush`; encoded source packets are drained first.
+    func padFiniteTail(fromSourceSeconds start: Double, throughSourceSeconds end: Double,
+                       isCurrent: (() -> Bool)? = nil,
+                       packetConsumer: (([UnsafeMutablePointer<AVPacket>]) -> Bool)? = nil) throws -> [UnsafeMutablePointer<AVPacket>] {
+        opLock.lock()
+        defer { opLock.unlock() }
+        guard !drainedAtEOF, start.isFinite, end.isFinite, end > start else { return [] }
+        var results: [UnsafeMutablePointer<AVPacket>] = []
+        renderHeldBlocks(into: &results)
+        encodePending()
+        let genuine = sink.settle()
+        wrap(genuine.packets, into: &results)
+        noteEncodeErrors(genuine.errors)
+        let first = Int64((start * Double(Self.sampleRate)).rounded(.up))
+        let target = Int64((end * Double(Self.sampleRate)).rounded(.down))
+        if encoderStartFrame == nil { encoderStartFrame = first }
+        guard let anchor = encoderStartFrame else { return results }
+        let currentEnd = anchor + encoderFramesIn + Int64(pendingFrames)
+        if first > currentEnd {
+            // Earlier middle gaps stay absent; only the final segment needs matching packets.
+            // Do not let place(at:) fill its ordinary <=5 s gap into a retained sink queue.
+            sink.restart()
+            limiter.reset()
+            encoderStartFrame = first
+            encoderFramesIn = 0
+        }
+        let actualEnd = (encoderStartFrame ?? first) + encoderFramesIn + Int64(pendingFrames)
+        do {
+            if let packetConsumer, !results.isEmpty {
+                let genuine = results
+                results.removeAll()
+                guard packetConsumer(genuine) else { throw BridgeError.finitePaddingWriteFailed }
+            }
+            if target > actualEnd {
+                try encodeFiniteSilence(frames: Int(target - actualEnd), into: &results,
+                    isCurrent: isCurrent, packetConsumer: packetConsumer)
+            }
+            return results
+        } catch {
+            for packet in results { var owned = Optional(packet); trackedPacketFree(&owned) }
+            throw error
+        }
+    }
+
+    /// Streams fixed-size encoded batches; standalone/test callers have an explicit8MiB retention
+    /// limit. Even PCM bed output cannot accumulate minutes of packets in a returned array.
+    private func encodeFiniteSilence(frames: Int, into results: inout [UnsafeMutablePointer<AVPacket>],
+                                     isCurrent: (() -> Bool)?,
+                                     packetConsumer: (([UnsafeMutablePointer<AVPacket>]) -> Bool)?) throws {
+        var remaining = frames
+        var retainedBytes = results.reduce(0) { $0 + Int(max($1.pointee.size, 0)) }
+        while remaining > 0 {
+            if isCurrent?() == false { throw BridgeError.finitePaddingCancelled }
+            let count = min(remaining, Self.encodeChunkFrames)
+            encodeSilence(frames: count)
+            encodePending()
+            remaining -= count
+            let encoded = sink.settle()
+            var batch: [UnsafeMutablePointer<AVPacket>] = []
+            wrap(encoded.packets, into: &batch)
+            noteEncodeErrors(encoded.errors)
+            if let packetConsumer {
+                guard packetConsumer(batch) else { throw BridgeError.finitePaddingWriteFailed }
+            } else {
+                let size = batch.reduce(0) { $0 + Int(max($1.pointee.size, 0)) }
+                if retainedBytes + size > 8 << 20 {
+                    for packet in batch { var owned = Optional(packet); trackedPacketFree(&owned) }
+                    throw BridgeError.finitePaddingRetentionExceeded
+                }
+                retainedBytes += size
+                results += batch
+            }
+        }
+    }
+
     func flush() -> [UnsafeMutablePointer<AVPacket>] {
         opLock.lock()
         defer { opLock.unlock() }
@@ -342,6 +474,10 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         encoderFramesIn = 0
         nextExpectedInputOffset = nil
         drainedAtEOF = false
+        hasRenderedSourceFrames = false
+        finiteLeadingStartFrame = nil
+        finiteLeadingIsCurrent = nil
+        finiteLeadingPacketConsumer = nil
         decoderSelfResetsSeen = decoder.selfResetCount
         reanchorPending = false
         consecutiveFeedFailures = 0
@@ -406,6 +542,21 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         levelMeter.measureInput(roles: block.roles, planes: block.planes, frameCount: block.frameCount)
         let activity = levelMeter.activity
         activityLock.withLock { latestActivity = activity }
+        if let leadingStart = finiteLeadingStartFrame {
+            finiteLeadingStartFrame = nil
+            let genuineStart = (originFrame ?? 0) + block.inputFrameOffset
+            if encoderStartFrame == nil { encoderStartFrame = leadingStart }
+            let currentEnd = (encoderStartFrame ?? leadingStart) + encoderFramesIn + Int64(pendingFrames)
+            let isCurrent = finiteLeadingIsCurrent
+            let consumer = finiteLeadingPacketConsumer
+            finiteLeadingIsCurrent = nil
+            finiteLeadingPacketConsumer = nil
+            if genuineStart > currentEnd {
+                try encodeFiniteSilence(frames: Int(genuineStart - currentEnd), into: &results,
+                    isCurrent: isCurrent, packetConsumer: consumer)
+            }
+        }
+        hasRenderedSourceFrames = true
         // Anchor the encoder on the first block after a reset, and keep the encoder's input
         // contiguous with the source afterwards: a gap the decoder skipped (corrupt access units) is
         // filled with silence so everything after it stays on its timestamp.

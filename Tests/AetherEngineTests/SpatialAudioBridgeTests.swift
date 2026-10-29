@@ -187,6 +187,104 @@ struct SpatialAudioBridgeTests {
     #endif
 
     #if TrueHDObjectAudio || DTSXObjectAudio
+    /// Empty leading fragments retain one spatial encoder run until exact genuine block priming.
+    @Test
+    func leadingFragmentsAndGenuineAPACRemainOnOneSourceGrid() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(srcTimeBase: AVRational(num: 1, den: 1000),
+            layout: .l714, decoder: SyntheticDecoder(skipAfterReset: 5))
+        defer { bridge.close() }
+        let cookie = bridge.soundSampleEntryOverride
+        var positions: [Int64] = []
+        let consumer: ([UnsafeMutablePointer<AVPacket>]) -> Bool = { packets in
+            for packet in packets {
+                positions.append(packet.pointee.pts)
+                var owned = Optional(packet)
+                trackedPacketFree(&owned)
+            }
+            return true
+        }
+        _ = try bridge.padFiniteLeadingSegment(fromSourceSeconds: -6, throughSourceSeconds: -3, packetConsumer: consumer)
+        _ = try bridge.padFiniteLeadingSegment(fromSourceSeconds: -3, throughSourceSeconds: 0, packetConsumer: consumer)
+        bridge.prepareFiniteLeadingFill(fromSourceSeconds: 0, packetConsumer: consumer)
+        let genuine = try feed(bridge, startMs: 1000, count: 100)
+        positions += genuine.map(\.pts)
+        _ = consumer(bridge.flush())
+        #expect(positions.first == -288_000)
+        #expect(zip(positions, positions.dropFirst()).allSatisfy { $1 - $0 == 1024 })
+        #expect(positions.last! >= 143_000)
+        #expect(bridge.soundSampleEntryOverride == cookie)
+    }
+
+    /// PCM bed fill streams more than8MiB while keeping each output batch bounded. A caller that
+    /// asks to retain all output instead receives an explicit failure before unbounded growth.
+    @Test
+    func finitePCMBedFillStreamsAndBoundsStandaloneRetention() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(srcTimeBase: AVRational(num: 1, den: 1000),
+            layout: .l714, decoder: SyntheticDecoder(skipAfterReset: 0), format: .lpcm)
+        defer { bridge.close() }
+        var total = 0
+        var largest = 0
+        _ = try bridge.padFiniteLeadingSegment(fromSourceSeconds: -10, throughSourceSeconds: 0, packetConsumer: { packets in
+            let bytes = packets.reduce(0) { $0 + Int($1.pointee.size) }
+            total += bytes
+            largest = max(largest, bytes)
+            for packet in packets { var owned = Optional(packet); trackedPacketFree(&owned) }
+            return true
+        })
+        #expect(total > 8 << 20)
+        #expect(largest <= 1 << 20)
+        let retained = try SpatialAudioBridge(srcTimeBase: AVRational(num: 1, den: 1000),
+            layout: .l714, decoder: SyntheticDecoder(skipAfterReset: 0), format: .lpcm)
+        defer { retained.close() }
+        #expect(throws: SpatialAudioBridge.BridgeError.self) {
+            _ = try retained.padFiniteLeadingSegment(fromSourceSeconds: -10, throughSourceSeconds: 0)
+        }
+    }
+
+    /// Leading fill waits for genuine decoded offsets, including skipped/held input, on one APAC run.
+    @Test
+    func finiteLeadingFillPreservesAPACDecoderOriginAndConfiguration() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(srcTimeBase: AVRational(num: 1, den: 1000),
+            layout: .l714, decoder: SyntheticDecoder(skipAfterReset: 5))
+        defer { bridge.close() }
+        let cookie = bridge.soundSampleEntryOverride
+        bridge.prepareFiniteLeadingFill(fromSourceSeconds: -2)
+        var packets = try feed(bridge, startMs: 1000, count: 100)
+        packets += bridge.flush().map { packet in
+            defer { var owned = Optional(packet); trackedPacketFree(&owned) }
+            return (packet.pointee.pts, packet.pointee.flags & AV_PKT_FLAG_KEY != 0, packet.pointee.size)
+        }
+        #expect(packets.first?.pts == -96_000)
+        #expect(zip(packets, packets.dropFirst()).allSatisfy { $1.pts - $0.pts == 1024 })
+        #expect(packets.last!.pts >= 143_000)
+        #expect(packets.allSatisfy { $0.key && $0.size > 0 })
+        #expect(bridge.soundSampleEntryOverride == cookie)
+    }
+
+    /// Finite padding stays on the actual APAC encoder and source grid instead of the ALAC stand-in.
+    @Test
+    func finiteTailPreservesAPACConfigurationAndSourcePosition() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(srcTimeBase: AVRational(num: 1, den: 1000),
+            layout: .l714, decoder: SyntheticDecoder(skipAfterReset: 0))
+        defer { bridge.close() }
+        _ = try feed(bridge, startMs: 1000, count: 10)
+        let cookie = bridge.soundSampleEntryOverride
+        var packets = try bridge.padFiniteTail(fromSourceSeconds: 10, throughSourceSeconds: 10.5)
+        packets += bridge.flush()
+        defer { for packet in packets { var owned = Optional(packet); trackedPacketFree(&owned) } }
+        let tail = packets.filter { $0.pointee.pts >= 480_000 }
+        #expect(!tail.isEmpty)
+        #expect(tail.allSatisfy { $0.pointee.size > 0 })
+        #expect(tail.first?.pointee.pts == 480_000)
+        #expect(tail.last!.pointee.pts + tail.last!.pointee.duration >= 504_000)
+        #expect(bridge.soundSampleEntryOverride == cookie)
+        #expect(bridge.flush().isEmpty)
+    }
+
     @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024")
     func anchorsOnSource() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }

@@ -1939,7 +1939,8 @@ extension AetherEngine {
         // could not fill in that time. The gate is the same one the request would have waited on, so
         // the request is then answered at once.
         if isLive, let provider = nativeVideoSession?.provider {
-            await Self.awaitFirstLiveWindow(provider)
+            await Self.awaitFirstLiveWindow(provider, audioDelayWarmupSeconds:
+                abs(loadedOptions.audioDelaySeconds) > 2 ? abs(loadedOptions.audioDelaySeconds) : 0)
             try checkLoadCurrent(generation)
         }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch

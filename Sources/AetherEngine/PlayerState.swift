@@ -1160,7 +1160,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.progressiveSegmentDelivery = progressiveSegmentDelivery
         self.autoplay = autoplay
         self.teletextPage = teletextPage
-        self.audioDelaySeconds = audioDelaySeconds
+        self.audioDelaySeconds = AudioDelayPolicy.clamp(audioDelaySeconds)
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath

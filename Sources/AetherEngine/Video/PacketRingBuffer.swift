@@ -21,15 +21,31 @@ final class PacketRingBuffer: @unchecked Sendable {
         let isKeyframe: Bool
         let isVideo: Bool
         let bytes: Data
+        /// Present only for alignment-aware readers; keeps original DTS, side data and duration.
+        var storedPacket: SoftwareStoredPacket? = nil
+        /// Source discontinuity carried only by the opt-in alignment envelope.
+        var alignmentEpoch: UInt64 = 0
     }
 
     /// Writes all of `bytes` at `offset` or throws. Injectable so tests can fill the disk.
     typealias WriteAll = @Sendable (_ fd: Int32, _ bytes: UnsafeRawBufferPointer, _ offset: off_t) throws -> Void
 
-    enum Failure: Error, Equatable {
+    enum Failure: Error, Equatable, LocalizedError {
         case closed
         case packetTooLarge
         case capacityExceeded
+        /// An alignment reader found an invalid or missing lossless envelope in a resident slot.
+        case corruptEnvelope
+
+        /// Explains storage failures at the playback boundary instead of exposing an opaque error.
+        var errorDescription: String? {
+            switch self {
+            case .closed: return "The Live packet buffer was closed. Reload the stream to resume playback."
+            case .packetTooLarge: return "A source packet exceeds the Live buffer's supported record size."
+            case .capacityExceeded: return "The Live packet buffer has insufficient disk capacity. Reduce the audio delay or free disk space."
+            case .corruptEnvelope: return "The Live audio-delay buffer contains an invalid packet record. Reload the stream to rebuild the buffer."
+            }
+        }
     }
 
     /// The software live route plays FROM this ring, so it is a playback buffer before it is seek
@@ -56,6 +72,8 @@ final class PacketRingBuffer: @unchecked Sendable {
 
         static let keyframeFlag: UInt8 = 1
         static let videoFlag: UInt8 = 2
+        /// Records encoded with the lossless software envelope instead of payload bytes alone.
+        static let envelopeFlag: UInt8 = 4
         var isKeyframe: Bool { flags & Self.keyframeFlag != 0 }
         var isVideo: Bool { flags & Self.videoFlag != 0 }
     }
@@ -188,9 +206,22 @@ final class PacketRingBuffer: @unchecked Sendable {
         }
     }
 
+    /// Stores an original packet envelope for effective-DTS alignment while ordinary readers still
+    /// receive its payload bytes. The existing compact index and source-time eviction are unchanged.
+    func append(packet: SoftwareStoredPacket, pts: Double, isKeyframe: Bool, isVideo: Bool,
+                epoch: UInt64 = 0) throws {
+        var storedEpoch = epoch.littleEndian
+        var encoded = withUnsafeBytes(of: &storedEpoch) { Data($0) }
+        encoded.append(try packet.encoded())
+        try encoded.withUnsafeBytes {
+            try append(pts: pts, isKeyframe: isKeyframe, isVideo: isVideo, bytes: $0, storesEnvelope: true)
+        }
+    }
+
     /// Takes the packet's memory as is, so the host appends straight from the `AVPacket` without an
     /// intermediate copy.
-    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, bytes: UnsafeRawBufferPointer) throws {
+    func append(pts: Double, isKeyframe: Bool, isVideo: Bool, bytes: UnsafeRawBufferPointer,
+                storesEnvelope: Bool = false) throws {
         guard bytes.count <= Int(UInt32.max / 2) else { throw Failure.packetTooLarge }
         writeLock.lock()
         defer { writeLock.unlock() }
@@ -245,6 +276,7 @@ final class PacketRingBuffer: @unchecked Sendable {
         var flags: UInt8 = 0
         if isKeyframe { flags |= Entry.keyframeFlag }
         if isVideo { flags |= Entry.videoFlag }
+        if storesEnvelope { flags |= Entry.envelopeFlag }
         let entry = Entry(pts: pts, offset: UInt32(placement.offset), length: UInt32(bytes.count),
                           chunk: placement.chunk, flags: flags)
 
@@ -351,7 +383,31 @@ final class PacketRingBuffer: @unchecked Sendable {
         lock.unlock()
         guard let handle = cached ?? openReadHandle(entry.chunk),
               let bytes = Self.read(handle.fd, offset: entry.offset, length: entry.length) else { return nil }
+        if entry.flags & Entry.envelopeFlag != 0 {
+            guard bytes.count >= MemoryLayout<UInt64>.size,
+                  let stored = try? SoftwareStoredPacket.decode(Data(bytes.dropFirst(8))) else { return nil }
+            let epoch = bytes.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(as: UInt64.self)) }
+            return Packet(pts: entry.pts, isKeyframe: entry.isKeyframe, isVideo: entry.isVideo,
+                          bytes: stored.bytes, storedPacket: stored, alignmentEpoch: epoch)
+        }
         return Packet(pts: entry.pts, isKeyframe: entry.isKeyframe, isVideo: entry.isVideo, bytes: bytes)
+    }
+
+    /// Reads an original compressed envelope for an aligned consumer. Eviction is a missing slot;
+    /// corruption in a still-resident slot is a failure, never an indefinite live-edge wait.
+    func storedPacket(atSeq seq: Int) throws -> SoftwareStoredPacket? {
+        try alignmentPacket(atSeq: seq)?.storedPacket
+    }
+
+    /// Includes the source epoch so queued old media drains before a discontinuity resets decoders.
+    func alignmentPacket(atSeq seq: Int) throws -> Packet? {
+        if let packet = packet(atSeq: seq) {
+            guard packet.storedPacket != nil else { throw Failure.corruptEnvelope }
+            return packet
+        }
+        let bounds = seqBounds
+        if seq >= bounds.first && seq < bounds.end { throw Failure.corruptEnvelope }
+        return nil
     }
 
     func seq(forKeyframeAtOrBefore target: Double) -> Int? {
