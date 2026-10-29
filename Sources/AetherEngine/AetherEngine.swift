@@ -5012,8 +5012,8 @@ public final class AetherEngine: ObservableObject {
         attempt.probe = sourceProbe
         // Resolve the initial audio track: an explicit host override wins, else the ordered language
         // preference (#72) resolved from this single probe. selectedAudio is nil when neither applies,
-        // so the session keeps its own default pick (empty preferences + no override is a behavioural
-        // no-op). Passing selectedAudio into session start lets the host honor a saved language on the
+        // so the session keeps its own default pick unless accessibility or object-audio policy improves it.
+        // Passing selectedAudio into session start lets the host honor a saved language on the
         // first frame without a separate pre-probe or a selectAudioTrack reload.
         // On probe failure (probedAudioTracks empty) the override can't be validated, so honor it
         // verbatim and let the reopened session re-validate it: an explicit audioSourceStreamIndex
@@ -5028,6 +5028,7 @@ public final class AetherEngine: ObservableObject {
             // and no heights, so the default track keeps its place there.
             prefersObjectAudio: options.objectAudioRendering != .off && ObjectAudioRendering.isAvailable
                 && !options.isLive && !options.audioOnly,
+            preferAudioDescriptions: options.preferAudioDescriptions,
             defaultIndex: probedDefaultAudioIndex
         ) ?? (probeOpened ? nil : audioSourceStreamIndex)
         let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
@@ -6464,6 +6465,7 @@ public final class AetherEngine: ObservableObject {
             // #93 retest: remember the target as recovery intent BEFORE awaiting; a wedged seek
             // never lands and the recovery chain must aim here, not at the frozen clock.
             setPendingRecoverySeekTarget(clockTarget)
+            refreshNativeBufferedPosition()
             pendingSeekProgressAccum = 0
             let renderedAtSeekStart = nativeHost?.renderedTime ?? 0
             pendingSeekInitialRenderedPosition = renderedAtSeekStart

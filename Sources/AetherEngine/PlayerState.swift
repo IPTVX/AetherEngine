@@ -885,6 +885,11 @@ public struct LoadOptions: Sendable, Equatable {
     /// Ordered audio-language preference (ISO 639-1 / 639-2 codes or English names, e.g. `["en", "de"]`). When non-empty and no explicit `audioSourceStreamIndex` is passed to `load`, the engine resolves the first-frame audio track from its single internal probe: the first track whose language matches an entry (preferences scanned in order, case-insensitive, ISO 639-1/2 B+T and English-name synonyms), falling back to the container default when none match. This lets a host honor a saved language preference on the first frame from one open, instead of probing separately or reloading via `selectAudioTrack` after load (#72). An explicit `audioSourceStreamIndex` still wins. Default empty.
     public var preferredAudioLanguages: [String]
 
+    /// Selects container-marked audio description within the chosen language before opening playback.
+    /// Set from the host's system accessibility preference. Explicit audio stream overrides win;
+    /// absent descriptions retain the normal language/default fallback. Default false.
+    public var preferAudioDescriptions: Bool
+
     /// Ordered subtitle-language preference (ISO 639-1 / 639-2 codes or English names, e.g. `["en", "de"]`).
     /// When non-empty, at the end of a successful load the engine activates the best subtitle track whose
     /// language matches a preference (preferences scanned in order, case-insensitive, ISO 639-1/2 B+T and
@@ -1084,6 +1089,7 @@ public struct LoadOptions: Sendable, Equatable {
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
         preferredAudioLanguages: [String] = [],
+        preferAudioDescriptions: Bool = false,
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
         initialSubtitleTrackID: Int? = nil,
@@ -1144,6 +1150,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.probesize = probesize
         self.maxAnalyzeDuration = maxAnalyzeDuration
         self.preferredAudioLanguages = preferredAudioLanguages
+        self.preferAudioDescriptions = preferAudioDescriptions
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
         self.initialSubtitleTrackID = initialSubtitleTrackID
@@ -1354,6 +1361,9 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let isHearingImpaired: Bool
     /// Container disposition `COMMENT` (director / cast commentary tracks). Applies to audio and subtitle.
     public let isCommentary: Bool
+    /// Container disposition `VISUAL_IMPAIRED` (audio description: narration of what happens on screen,
+    /// for blind and low-vision viewers). Set by MKV `FlagVisualImpaired`, MP4 and MPEG-TS (AE#919).
+    public let isVisualImpaired: Bool
     /// EAC3 with JOC profile (Dolby Atmos). Lets the UI surface "Atmos" instead of the bed channel count (typically 5.1).
     /// Settable inside the module so `probeDetectingAtmos` can confirm it post-decode without rebuilding the struct field by field.
     public internal(set) var isAtmos: Bool
@@ -1388,7 +1398,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// nil when undeclared. This is where DTS:X and TrueHD Atmos show up; `isAtmos` covers E-AC-3 JOC only.
     public let profile: String?
 
-    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isVisualImpaired: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate
         self.bitsPerSample = bitsPerSample
         self.sampleFormat = sampleFormat
@@ -1404,6 +1414,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
         self.isForced = isForced
         self.isHearingImpaired = isHearingImpaired
         self.isCommentary = isCommentary
+        self.isVisualImpaired = isVisualImpaired
         self.isAtmos = isAtmos
         self.isDTSX = isDTSX || Self.profileNamesDTSX(codec: codec, profile: profile)
         self.assHeader = assHeader

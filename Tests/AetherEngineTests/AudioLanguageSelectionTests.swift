@@ -86,10 +86,10 @@ struct AudioLanguageSelectionTests {
     // MARK: - #731: TrueHD Atmos and DTS:X win within a language when object rendering is on
 
     private func audio(_ id: Int, _ lang: String?, codec: String, atmos: Bool = false, commentary: Bool = false,
-                       profile: Int32? = nil) -> TrackInfo {
+                       described: Bool = false, profile: Int32? = nil) -> TrackInfo {
         let codecID = codec == "dca" ? AV_CODEC_ID_DTS : AV_CODEC_ID_TRUEHD
         return TrackInfo(id: id, name: "a\(id)", codec: codec, language: lang, channels: 8, isDefault: id == 1,
-                         isCommentary: commentary,
+                         isCommentary: commentary, isVisualImpaired: described,
                          profile: atmos ? VideoStreamFormat.profileName(codecID: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS)
                              : profile.flatMap { VideoStreamFormat.profileName(codecID: codecID, profile: $0) })
     }
@@ -213,4 +213,111 @@ struct AudioLanguageSelectionTests {
         #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: ["en"],
                                               prefersObjectAudio: true) == Int32(expected))
     }
+
+    // MARK: - AE#919: audio description and commentary rank behind the programme mix
+
+    @Test("within a language the programme mix wins over an audio description or commentary listed first")
+    func describedAndCommentaryRankBehind() {
+        let described = [audio(1, "eng", codec: "ac3", described: true), audio(2, "eng", codec: "ac3"),
+                         audio(3, "ger", codec: "ac3")]
+        #expect(AetherEngine.selectAudioIndex(tracks: described, override: nil, preferredLanguages: ["en"]) == 2)
+        let commentary = [audio(1, "eng", codec: "ac3", commentary: true), audio(2, "eng", codec: "ac3")]
+        #expect(AetherEngine.selectAudioIndex(tracks: commentary, override: nil, preferredLanguages: ["en"]) == 2)
+    }
+
+    @Test("an audio description still beats a later preference and is picked when it is the language's only track")
+    func describedNeverCrossesLanguage() {
+        let tracks = [audio(1, "ger", codec: "ac3"), audio(2, "eng", codec: "ac3", described: true)]
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: ["en", "de"]) == 2)
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: 2, preferredLanguages: ["de"]) == 2)
+    }
+
+    @Test("an audio description in TrueHD Atmos neither displaces the film nor replaces the default",
+          .enabled(if: AetherEngine.linksTrueHDObjectDecoder))
+    func describedAtmosStaysBehind() {
+        let tracks = [audio(1, "eng", codec: "dts"), audio(2, "eng", codec: "truehd", atmos: true, described: true)]
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: ["en"],
+                                              prefersObjectAudio: true) == 1)
+        #expect(AetherEngine.selectAudioIndex(tracks: tracks, override: nil, preferredLanguages: [],
+                                              prefersObjectAudio: true, defaultIndex: 1) == nil)
+    }
+    // Failure modes:
+    // - A described track starts after a normal first frame and forces a reload.
+    // - An unavailable description or another language displaces the preferred programme.
+    // - Object-audio ranking or a fresh probe replaces an explicit host override.
+
+    /// Resolves the system accessibility preference before playback opens, preserving language order.
+    @Test("audio descriptions are selected at load within the first matching language")
+    func test_audioSelection_descriptionPreferred_selectsDescribedTrack() {
+        let tracks = [audio(1, "eng", codec: "ac3"), audio(2, "eng", codec: "ac3", described: true),
+                      audio(3, "ger", codec: "ac3", described: true)]
+
+        let selected = AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["en", "de"], preferAudioDescriptions: true)
+
+        #expect(selected == 2)
+    }
+
+    /// A described default can be corrected without crossing a language when no language matches.
+    @Test("description preference uses the default language and never guesses across tagged dubs")
+    func test_audioSelection_unmatchedLanguages_usesDefaultLanguage() {
+        let tracks = [audio(1, "eng", codec: "ac3"), audio(2, "eng", codec: "ac3", described: true),
+                      audio(3, "ger", codec: "ac3", described: true)]
+
+        let selected = AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["fr"],
+            preferAudioDescriptions: true, defaultIndex: 1)
+
+        #expect(selected == 2)
+        #expect(AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["fr"], defaultIndex: 2) == 1)
+    }
+
+    /// Missing description keeps the preferred programme, and manual selection outranks accessibility.
+    @Test("missing descriptions and explicit overrides preserve language and manual selection")
+    func test_audioSelection_missingDescriptionOrOverride_preservesProgrammeChoice() {
+        let tracks = [audio(1, "eng", codec: "ac3"), audio(2, "ger", codec: "ac3", described: true)]
+
+        let selected = AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["en", "de"], preferAudioDescriptions: true)
+
+        #expect(selected == 1)
+        #expect(AetherEngine.selectAudioIndex(
+            tracks: tracks, override: 1, preferredLanguages: ["de"], preferAudioDescriptions: true) == 1)
+    }
+
+    /// Object rendering cannot replace a compatible description; untagged files keep the same policy.
+    @Test("descriptions outrank object audio and untagged defaults use disposition")
+    func test_audioSelection_objectAudioAndUntagged_preservesDescriptionPriority() {
+        let tracks = [audio(1, "eng", codec: "truehd", atmos: true),
+                      audio(2, "eng", codec: "ac3", described: true)]
+        let untagged = [audio(1, nil, codec: "ac3"), audio(2, "und", codec: "ac3", described: true)]
+
+        let selected = AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["en"],
+            prefersObjectAudio: true, preferAudioDescriptions: true)
+
+        #expect(selected == 2)
+        #expect(AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: [], prefersObjectAudio: true,
+            preferAudioDescriptions: true, defaultIndex: 2) == nil)
+        #expect(AetherEngine.selectAudioIndex(
+            tracks: untagged, override: nil, preferredLanguages: ["en"],
+            preferAudioDescriptions: true, defaultIndex: 1) == 2)
+    }
+
+    /// Both flags remain container truth: description class wins before commentary quality.
+    @Test("an only available description marked as commentary still honors accessibility")
+    func test_audioSelection_descriptionAlsoCommentary_preservesDescriptionClass() {
+        let tracks = [audio(1, "eng", codec: "ac3"),
+                      audio(2, "eng", codec: "ac3", commentary: true, described: true)]
+
+        let selected = AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["en"], preferAudioDescriptions: true)
+
+        #expect(selected == 2)
+        #expect(AetherEngine.selectAudioIndex(
+            tracks: tracks, override: nil, preferredLanguages: ["en"]) == 1)
+    }
+
 }

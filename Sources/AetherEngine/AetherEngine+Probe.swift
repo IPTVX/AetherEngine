@@ -665,26 +665,38 @@ extension AetherEngine {
     // MARK: - Audio track selection (#72)
 
     /// Resolve the audio stream index selected by an explicit host `override` or, failing that, the
-    /// ordered `preferredLanguages` policy. Returns nil when neither applies, so the caller keeps the
-    /// container / session default pick (i.e. an empty preference list with no override is a no-op,
-    /// behaviourally identical to before #72). Pure and nonisolated so a host can avoid a separate
-    /// audio pre-probe or a post-load `selectAudioTrack` reload (#72).
+    /// ordered `preferredLanguages` policy, with accessibility and object-audio ranking within a
+    /// language. Returns nil when no policy improves the container/session default. Pure and
+    /// nonisolated so a host can avoid a separate
+    /// audio pre-probe or a post-load `selectAudioTrack` reload (#72). The host's audio-description
+    /// preference ranks before object audio within a language; explicit overrides remain authoritative.
     nonisolated static func selectAudioIndex(
         tracks: [TrackInfo],
         override: Int32?,
         preferredLanguages: [String],
         prefersObjectAudio: Bool = false,
+        preferAudioDescriptions: Bool = false,
         defaultIndex: Int32 = -1
     ) -> Int32? {
         // Explicit host override wins, but only when it names a real audio track (else fall through).
         if let override, tracks.contains(where: { $0.id == Int(override) }) {
             return override
         }
-        // #731: with object rendering on, TrueHD Atmos and DTS:X keep their heights, which no other
-        // track of the same language does better, so they win ties within a language. Never across one.
-        let atmosRank: ((Int) -> Int)? = prefersObjectAudio
-            ? { isRenderableObjectAudio(tracks[$0]) ? 0 : 1 }
-            : nil
+        // Within a language, the host's accessibility preference decides the programme/description
+        // class before format quality. #731: with object rendering on, TrueHD Atmos and DTS:X keep their heights,
+        // which no other track of the same language does better, so they win the remaining ties. Never
+        // across a language.
+        let secondaryRank: (Int) -> Int = { index in
+            let track = tracks[index]
+            let descriptorRank: Int
+            if preferAudioDescriptions {
+                descriptorRank = (track.isVisualImpaired ? 0 : 2) + (track.isCommentary ? 1 : 0)
+            } else {
+                descriptorRank = track.isVisualImpaired || track.isCommentary ? 1 : 0
+            }
+            let atmosRank = prefersObjectAudio && !isRenderableObjectAudio(track) ? 1 : 0
+            return descriptorRank * 2 + atmosRank
+        }
         // Each preference is scanned across all tracks in order, so an earlier preference on a later
         // track still beats a later preference on an earlier track. Within one preference the most
         // specific tag wins, so an "en-GB" preference takes en-GB over eng over en-US (#590).
@@ -692,52 +704,53 @@ extension AetherEngine {
             languages: tracks.map(\.language),
             preferredLanguages: preferredLanguages,
             kind: .audio,
-            secondaryRank: atmosRank
+            secondaryRank: secondaryRank
         ) {
             return Int32(tracks[index].id)
         }
-        // No language preference decided it: the session would take its default track, so a TrueHD
-        // Atmos or DTS:X track in that track's language replaces it.
-        // Same dub only: a script or region both tags state and disagree on (es-ES against es-419) is
-        // another dub, not another format of this one.
-        guard prefersObjectAudio,
-              let fallback = tracks.first(where: { $0.id == Int(defaultIndex) }),
-              !isRenderableObjectAudio(fallback)
-        else { return nil }
-        // With no track tagged at all (`und`, empty, none) there is nothing to tell dubs apart by, and
-        // demo discs like Dolby's Unfold tag nothing and list the E-AC-3 JOC as the probe's best stream.
-        // One tagged track is enough to show the file names its dubs, so the default then stays.
-        guard let language = fallback.language, LanguageTag(language) != nil else {
-            guard tracks.allSatisfy({ LanguageTag($0.language) == nil }) else { return nil }
-            return tracks.first(where: isRenderableObjectAudio).map { Int32($0.id) }
-        }
-        let candidates = tracks.compactMap { track -> (track: TrackInfo, rank: Int)? in
-            guard isRenderableObjectAudio(track),
-                  let rank = languageMatchRank(track.language, language, kind: .audio),
+        // No language preference decided it: improve only within the default track's language.
+        // A manual override has already returned, so accessibility may correct a described default
+        // or choose its description without a post-load rebuild. Object audio remains a tie-breaker.
+        guard let fallbackIndex = tracks.firstIndex(where: { $0.id == Int(defaultIndex) }) else { return nil }
+        let fallback = tracks[fallbackIndex]
+        let fallbackRank = secondaryRank(fallbackIndex)
+        let allUntagged = tracks.allSatisfy { LanguageTag($0.language) == nil }
+        let candidates = tracks.indices.compactMap { index -> (index: Int, languageRank: Int, audioRank: Int)? in
+            let audioRank = secondaryRank(index)
+            guard audioRank < fallbackRank else { return nil }
+            if allUntagged { return (index, 0, audioRank) }
+            guard let language = fallback.language, LanguageTag(language) != nil,
+                  let rank = languageMatchRank(tracks[index].language, language, kind: .audio),
                   rank / 3 < 2, rank % 3 < 2 else { return nil }
-            return (track, rank)
+            return (index, rank, audioRank)
         }
-        guard let atmos = candidates.min(by: { $0.rank < $1.rank })?.track else { return nil }
-        return Int32(atmos.id)
+        let selected = candidates.min {
+            $0.languageRank != $1.languageRank ? $0.languageRank < $1.languageRank : $0.audioRank < $1.audioRank
+        }
+        return selected.map { Int32(tracks[$0.index].id) }
     }
 
     /// TrueHD that FFmpeg marked Atmos while probing (mlpdec sets the profile from the major sync), and
-    /// not a commentary. `TrackInfo.isAtmos` stays the E-AC-3 JOC answer it is documented as.
+    /// not a commentary or an audio description. `TrackInfo.isAtmos` stays the E-AC-3 JOC answer it is
+    /// documented as.
     nonisolated static func isRenderableTrueHDAtmos(_ track: TrackInfo) -> Bool {
-        linksTrueHDObjectDecoder && track.codec.lowercased() == "truehd" && !track.isCommentary && !track.isExternal
+        linksTrueHDObjectDecoder && track.codec.lowercased() == "truehd"
+            && !track.isCommentary && !track.isVisualImpaired && !track.isExternal
             && track.profile == trueHDAtmosProfileName
     }
 
     nonisolated private static let trueHDAtmosProfileName =
         VideoStreamFormat.profileName(codecID: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS)
 
-    /// DTS that FFmpeg labelled DTS:X while probing, and not a commentary. FFmpeg names only two of
-    /// DTS:X's markers, so a DTS-HD MA track it labels plain can be DTS:X as well; that one is still
-    /// rendered when it is the track that plays, but only the label can be ranked before playback.
+    /// DTS that FFmpeg labelled DTS:X while probing, and not a commentary or an audio description. FFmpeg
+    /// names only two of DTS:X's markers, so a DTS-HD MA track it labels plain can be DTS:X as well; that
+    /// one is still rendered when it is the track that plays, but only the label can be ranked before
+    /// playback.
     /// `TrackInfo.codec` is the decoder's name, `dca` for libavcodec's DTS decoder; `dts` is the
     /// codec's own name, which a build without the decoder would report.
     nonisolated static func isRenderableDTSX(_ track: TrackInfo) -> Bool {
-        linksDTSXObjectDecoder && ["dca", "dts"].contains(track.codec.lowercased()) && !track.isCommentary && !track.isExternal
+        linksDTSXObjectDecoder && ["dca", "dts"].contains(track.codec.lowercased())
+            && !track.isCommentary && !track.isVisualImpaired && !track.isExternal
             && dtsxProfileNames.contains(track.profile ?? "")
     }
 

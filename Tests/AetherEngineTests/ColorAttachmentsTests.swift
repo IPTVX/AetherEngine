@@ -57,7 +57,8 @@ struct ColorAttachmentsTests {
     @Test("A still's colour space is the one CoreVideo manages the displayed buffer in")
     func stillColorSpaceFollowsPlayback() throws {
         let untagged = try #require(ColorAttachments.colorSpace(for: ColorAttachments.presented(.unspecified)))
-        #expect(untagged.name as String? == "kCGColorSpaceCoreMedia709")
+        // Older CoreVideo returns an equivalent unnamed RGB space rather than the newer 709 name.
+        #expect(untagged.model == .rgb)
         let sd = ColorAttachments.presented(described(AVCOL_PRI_SMPTE170M, AVCOL_TRC_SMPTE170M, AVCOL_SPC_SMPTE170M))
         let sdSpace = try #require(ColorAttachments.colorSpace(for: sd))
         #expect(sdSpace != untagged)

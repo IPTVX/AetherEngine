@@ -19,6 +19,7 @@ struct LoadOptionsTests {
         #expect(opts.panelIsInHDRMode == false)
         #expect(opts.audioBridgeMode == .surroundCompat)
         #expect(opts.objectAudioRendering == .off)
+        #expect(!opts.preferAudioDescriptions)
         #expect(opts.isLive == false)
         #expect(opts.audioOnly == false)
         // Dual-layer FEL composition is opt-in.
