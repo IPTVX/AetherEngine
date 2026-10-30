@@ -13,8 +13,10 @@ Run from the fork root:
 bash Scripts/apply-iptvx-patches.sh --check
 ```
 
-An already-applied patch is accepted without duplicate edits. If a patch is
-missing and applies cleanly, apply it explicitly and inspect the result:
+The active stack is ordered oldest first in `Scripts/iptvx-patch-stack.py`.
+Each successor is authored against all preceding corrections. An already-applied
+stack is accepted without duplicate edits. If a correction is missing and the
+complete stack applies cleanly, apply it explicitly and inspect the result:
 
 ```sh
 bash Scripts/apply-iptvx-patches.sh --apply
@@ -23,6 +25,28 @@ git diff --check
 
 Apply corrections in the isolated fork checkout before tag publication. Do not
 modify a host app's SwiftPM cache or apply patches during client builds.
+
+The checker uses Git and Python 3, already used by the repository's scripts.
+It copies only correction paths into a disposable scratch repository, peels
+applied successors in reverse order, then replays the complete stack in forward
+order. A missing successor is not required to apply until its predecessors have
+been replayed. This is necessary when a new correction changes a line introduced
+by the earlier audio-delay snapshot: independently reverse-checking the older
+snapshot against the final tree would incorrectly report a conflict.
+
+`--check` never changes the checkout. `--apply` preflights every correction and
+applies a single validated net diff; a later conflict cannot leave an earlier
+missing correction applied. The host index, unrelated files, and permissions are
+preserved. Partial application, drifted contexts, malformed snapshots, and missing
+patch files remain failures requiring an explicit port. Archive and remove
+unrelated local instrumentation before release validation rather than weakening
+context checks or adding instrumentation to a correction snapshot.
+
+Run the maintenance script regressions without Apple tooling:
+
+```sh
+python3 -m unittest discover -s Scripts/tests -p 'test_iptvx_patch_stack.py' -v
+```
 
 A conflict is a required porting decision, not permission to skip the patch.
 Read the changed upstream implementation, preserve its new behavior, port this
@@ -342,3 +366,117 @@ apply/check script and retire its snapshot in the same change. Retain the tests
 or equivalent behavior coverage.
 A changed file, passing merge, renamed API or silently accepted delay value is not
 an equivalence proof.
+
+
+## IPTVX-DIRECT-LIVE-AUDIO-READ-AHEAD — active
+
+Pre-read-ahead baseline: commit
+`23b3161da3efb4e486622c14f72fadb9195211bd`, originally published as
+`7.52.0-iptvx`, which already contains the maintained 44-path expanded audio-delay
+correction. Use this immutable ancestor SHA when reproducing the successor;
+the user explicitly authorized replacing the `7.52.0-iptvx` delivery with the
+clean correction. This change prepares that replacement. Remote tag publication
+and peeled-commit verification are separate delivery steps; this registry does
+not claim they have occurred.
+
+Active application order:
+
+1. `IPTVX-LIVE-AUDIO-DELAY` — retain the complete existing snapshot unchanged.
+2. `IPTVX-DIRECT-LIVE-AUDIO-READ-AHEAD` — apply this correction on top of it.
+
+Snapshot:
+[`Patches/IPTVX/direct-live-audio-read-ahead.patch`](../Patches/IPTVX/direct-live-audio-read-ahead.patch).
+It contains exactly five correctness source/test paths. It excludes temporary
+`AudioBuf` diagnostics, instrumentation hooks, and their test suite. The overlap
+with the earlier `SoftwarePlaybackHost` and packet-read-ahead changes is intended:
+use the ordered checker instead of independently reverse-checking the old patch
+against the final tree.
+
+### Contract to preserve
+
+Ordinary software Live with audio and without DVR or large-offset alignment must
+not stop reading audio because the video renderer is full. A bounded forward-only
+worker owns the already-open demuxer/source, while the consumer can park compressed
+video and continue delivering eligible audio. A source read held in I/O must not
+prevent already-queued video from reaching a ready renderer. An idle consumer
+wait is a scheduling opportunity, not EOF, a discarded packet, or a second source
+connection.
+
+Preserve these boundaries:
+
+- No new host setting, public seek/DVR window, packet-cache still capability,
+  route change, or dependency. The native, VOD, DVR and expanded-delay paths
+  retain their existing ownership and behavior.
+- Preserve original packet timestamps and side data. Park only bounded compressed
+  records; do not retain decoded media to manufacture audio lead.
+- One retention reservation covers the FIFO, parked packets, transient envelope
+  copies and replay quarantine. Oversized packets or quarantine overflow fail
+  explicitly. Keep the reservation alive until both the source worker/FIFO and
+  consumer-held compressed packets retire, including close during blocked I/O.
+- Pause retains transport intent, stop/close is idempotent, finite Live drains
+  queued media before ending, and small signed offsets still reach the renderer.
+- After waiting for park capacity, recheck background-audio-only intent before
+  appending video; retire the current packet and existing park when appropriate.
+- Crossing the large-delay boundary retires the prior worker; an ordinary small
+  offset update retains it. Keep the previous +/-180 alignment correction intact.
+
+### Reproduction and verification
+
+Use the maintenance files and both snapshots from this change on an isolated
+checkout of the published baseline above. `--check` must report only the new
+correction missing; `--apply` must produce the five clean correctness files.
+Repeat `--check` and `--apply` and compare every affected source/test file byte for
+byte. For the complete-stack case, reverse the old snapshot from that isolated
+baseline first: both corrections must then apply in order. A drifted/partial
+successor must fail without applying an earlier missing correction.
+
+The maintenance script's nine Git/Python regressions cover overlapping applied
+patches, both missing, the old-only state, partial successors, older drift,
+transactional failure, missing snapshots, new/deleted files, unrelated files,
+permissions and the host index. These checks establish source reconstruction;
+they do not establish audio/video delivery.
+
+Run `DirectLiveAudioReadAheadTests` through FlowDeck on the cleaned correctness
+tree, without the temporary diagnostics. Its nine methods / ten argument cases
+cover audio while the video gate is closed, video while source I/O is held,
+reservation lifetime during held teardown, delivered +/-0.5 offsets, idle reads,
+side-data accounting, replay capacity refusal, large/small ownership transitions
+and finite Live EOF. Retain the default packet-read-ahead, replay, software delay,
+DVR and +/-180 regressions, plus iOS/tvOS compilation with the OS16 floors. Record
+the actual clean-tree test/build result separately; a diagnostic-tree pass does
+not prove that extracting the correctness patch preserved behavior.
+
+### Local validation record (2026-10-30)
+
+The extracted correctness-only tree, built from the published baseline and the
+five-file successor, passed FlowDeck on My Mac: 30 test methods in five suites,
+32 argument cases, zero failures and zero skips. Complete Swift Testing output
+confirms the final result. This includes all nine DirectLive methods / ten cases,
+`LiveReplayPacketReaderTests`, default read-ahead audio coverage without durations,
+read-ahead EOF and VOD park regressions. The clean build contains no temporary
+AudioBuf implementation or test dependency. The earlier diagnostic-tree closure
+and the clean-tree run are separate evidence; only the latter validates patch
+extraction.
+
+Maintenance verification passed nine deterministic Git/Python tests plus the
+actual two-snapshot matrix: old-only, both applied with repeated check/apply,
+both absent, drift, partial successor and later-conflict transactional refusal.
+The final 47-path union matches the clean correctness tree byte for byte. The
+older 44-path snapshot is unchanged. The new five-file snapshot SHA256 is
+`eb0c0263f3aea7b23e04c5cdba0d0afa4c30f47d335c7e52451936a18e629b96`.
+These are source reconstruction and macOS runtime results; platform builds and
+physical-device observations are recorded separately. The release preparation
+removes the temporary diagnostic hooks and tests; its complete source/test tree
+matches the clean validated tree byte for byte and passes the strict ordered
+checker. No diagnostic implementation is included in the replacement delivery.
+User-reported physical-device retest: Live and VOD playback work with the local
+correction, and a 16-second VOD audio delay is applied. The user reports a longer
+wait than Metal and accepts that behavior for now. This is reported device
+evidence, not an automated timing measurement or device validation of the full
++/-180 range, all codecs, or all sources. No performance-policy change accompanies
+this delivery.
+
+Retire this successor only when a named upstream commit provides the same
+bounded ownership and delivered-media behavior and these regressions pass without
+it. Retirement of this correction does not imply retirement of the earlier
+expanded audio-delay snapshot.

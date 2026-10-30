@@ -322,6 +322,8 @@ final class SoftwarePlaybackHost {
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
+    /// Forward-only ordinary Live source worker; never exposed as a cache, DVR or seek window.
+    private var directLiveReadAhead: DirectLiveAudioReadAhead?
     /// #687: this host's entries in the process-wide retention ledger, released on `stop()`.
     private var retentionClaims: [RetentionClaims.Claim] = []
     @Published private(set) var residentRanges: [ClosedRange<Double>] = []
@@ -1727,6 +1729,17 @@ final class SoftwarePlaybackHost {
             readAhead?.start()
         }
 
+        if isLive, dvrRing == nil, !alignmentTimeline.requiresAlignment, audioStreamIndex >= 0 {
+            let videoIndex = videoStreamIndex, audioIndex = audioStreamIndex
+            let source = try await BlockingWork.detached(priority: .utility) {
+                try DirectLiveAudioReadAhead(demuxer: dem, videoIndex: videoIndex,
+                    audioIndex: audioIndex, requestedBytes: sessionCacheByteBudget)
+            }.value
+            guard !stopRequested, !Task.isCancelled else { source.close(); throw CancellationError() }
+            directLiveReadAhead = source
+            source.packets.start()
+        }
+
         if alignmentTimeline.requiresAlignment, audioAlignmentReservation == nil {
             let requested = sessionCacheByteBudget
             let claim = await BlockingWork.detached(priority: .utility) {
@@ -2262,6 +2275,8 @@ final class SoftwarePlaybackHost {
         demuxDiag.update(lastAudioPts: pts, parked: 0, rebuffering: false, generation: seekGeneration)
     }
     var audioFedUntilForTesting: Double { demuxDiag.snapshot.lastAudioPts }
+    /// Exposes only bounded forward-worker state to regression tests; not public DVR/cache capability.
+    var directLiveReadAheadForTesting: DirectLiveAudioReadAhead? { directLiveReadAhead }
     var recoveryPendingForTesting: Bool { flushRecoveryPending }
     func setRepositionBackoffForTesting(_ seconds: Double) { repositionBackoffSeconds = seconds }
     var audioAutomaticFlushCountForTesting: Int? { audioOutput?.automaticFlushCount }
@@ -2797,6 +2812,8 @@ final class SoftwarePlaybackHost {
         residentRanges = []
         vodPacketReadAhead?.close()
         vodPacketReadAhead = nil
+        directLiveReadAhead?.close()
+        directLiveReadAhead = nil
         renderer.subtitleCompositor.reset()
 
         if let extractor = stillExtractorSlot.reset() {
@@ -2987,7 +3004,8 @@ final class SoftwarePlaybackHost {
         let discontinuityBudget = alignmentDiscontinuityBudget
         let diag = demuxDiag
         let keyframeLedger = keyframeLedger
-        let readAhead = vodPacketReadAhead
+        let liveReadAhead = directLiveReadAhead
+        let readAhead = vodPacketReadAhead ?? liveReadAhead?.packets
         let videoEnd: Double? = !liveSession && dem.duration > 0
             ? dem.resolvedSourceStartOrigin + dem.duration : nil
         func launchCombined(on queue: DispatchQueue,
@@ -3041,7 +3059,8 @@ final class SoftwarePlaybackHost {
                 discontinuityBudget: discontinuityBudget,
                 videoEndTime: videoEnd,
                 readOverride: readOverride,
-                sourceRetainedBytes: { ring?.diskBytes ?? 0 }
+                sourceRetainedBytes: { ring?.diskBytes ?? 0 },
+                directLiveReadAhead: liveReadAhead
             )
             }
         }
@@ -3923,7 +3942,8 @@ final class SoftwarePlaybackHost {
         discontinuityBudget: AudioDelayDiscontinuityBudget? = nil,
         videoEndTime: Double? = nil,
         readOverride: (@Sendable (UInt64) throws -> CompressedAudioDelayAlignment.Packet?)? = nil,
-        sourceRetainedBytes: @escaping @Sendable () -> Int = { 0 }
+        sourceRetainedBytes: @escaping @Sendable () -> Int = { 0 },
+        directLiveReadAhead: DirectLiveAudioReadAhead? = nil
     ) {
         // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
         func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
@@ -3984,8 +4004,11 @@ final class SoftwarePlaybackHost {
         var alignmentHasMatchedVideoOutput = false
         defer { try? alignment?.close() }
 
-        func rawRead(_ generation: UInt64) throws -> UnsafeMutablePointer<AVPacket>? {
-            if let readAhead { return try readAhead.read(isCurrent: { admitsRead(generation) })?.makeAVPacket() }
+        func rawRead(_ generation: UInt64, maximumWait: TimeInterval? = nil) throws -> UnsafeMutablePointer<AVPacket>? {
+            if let readAhead {
+                return try readAhead.read(isCurrent: { admitsRead(generation) },
+                    maximumWait: maximumWait)?.makeAVPacket()
+            }
             if replayGeneration != generation { replayReader?.reset(); replayGeneration = generation }
             if let replayReader {
                 return try replayReader.read(isCurrent: { admitsRead(generation) }) {
@@ -4087,10 +4110,11 @@ final class SoftwarePlaybackHost {
         // drops). Video packets now PARK in a bounded FIFO while audio keeps decoding up to
         // AudioLookaheadPolicy.targetLeadSeconds ahead of the clock, and a genuine underrun
         // pauses the clock for a rebuffer (AudioLookaheadPolicy.clockAction) instead of
-        // letting it free-run, mirroring the DVR feeder arm. Live sessions keep the historical
-        // lockstep pacing: their delivery is origin-paced realtime, and the ones that need a
-        // pump get it from the DVR feeder arm on its own thread.
+        // letting it free-run, mirroring the DVR feeder arm. Ordinary direct Live now uses a
+        // bounded forward source worker and this compressed park too, so a full video queue cannot
+        // starve audio. Its clock/rebuffer policy stays unchanged; DVR keeps its separate feeder.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
+        var parkedVideoBytes = 0
         let parkedVideoCap = 256
         var terminalGeneration = SoftwareTerminalGeneration()
         var lastEnqueuedAudioPtsSec = Double.nan
@@ -4100,7 +4124,8 @@ final class SoftwarePlaybackHost {
         // not eat a rebuffer pause at every session start.
         var everHadLead = false
         var parkedSeekGeneration = seekGeneration()
-        let decoupleAudio = (!isLive || alignmentEnabled) && audioDecoder != nil && audioOutput != nil
+        let decoupleAudio = (!isLive || alignmentEnabled || directLiveReadAhead != nil)
+            && audioDecoder != nil && audioOutput != nil
         // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
         // is the pacing input and only exists where audio is decoupled, so a live session's line read
         // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
@@ -4114,6 +4139,8 @@ final class SoftwarePlaybackHost {
                 av_packet_free_safe(p)
             }
             parkedVideo.removeAll()
+            parkedVideoBytes = 0
+            directLiveReadAhead?.noteParkedBytes(0)
             keyframeLedger?.discardPending()
         }
 
@@ -4156,6 +4183,10 @@ final class SoftwarePlaybackHost {
                 // once it has read the new generation.
                 if seekGeneration() != parkedSeekGeneration { return }
                 let p = parkedVideo.removeFirst()
+                if directLiveReadAhead != nil {
+                    parkedVideoBytes -= DirectLiveAudioReadAhead.packetBytes(p)
+                    directLiveReadAhead?.noteParkedBytes(parkedVideoBytes)
+                }
                 let verdict = recoveryGate(p)
                 if verdict != .drop {
                     setDecodeGeneration(parkedSeekGeneration)
@@ -4165,6 +4196,8 @@ final class SoftwarePlaybackHost {
                 }
                 av_packet_unref(p)
                 av_packet_free_safe(p)
+                // Give audio and timed source consumption a turn after each Live decode/filter run.
+                if directLiveReadAhead != nil { break }
             }
         }
 
@@ -4202,6 +4235,8 @@ final class SoftwarePlaybackHost {
             case readGate
             /// Feed the whole parked tail out (seam flush, end of media).
             case drainAll
+            /// Retain the already-read packet until enough video bytes/count have drained.
+            case capacity(Int)
         }
 
         // The one place the loop waits on the renderer. A rebuffer hold stops the synchronizer,
@@ -4218,6 +4253,9 @@ final class SoftwarePlaybackHost {
                         clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
                 case .drainAll:
                     return !parkedVideo.isEmpty
+                case .capacity(let bytes):
+                    return parkedVideo.count >= parkedVideoCap
+                        || parkedVideoBytes > (directLiveReadAhead?.parkedByteLimit ?? Int.max) - bytes
                 }
             }
             while stillWaiting(), !stopRequested(), !backgroundAudioOnly() {
@@ -4259,7 +4297,7 @@ final class SoftwarePlaybackHost {
         // everHadLead latch keeps that from firing on realtime-paced sources that never had
         // a lead to lose.
         func applyAudioClockAction() {
-            guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
+            guard directLiveReadAhead == nil, decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
             if lead >= AudioLookaheadPolicy.rebufferResumeLeadSeconds { everHadLead = true }
@@ -4500,7 +4538,9 @@ final class SoftwarePlaybackHost {
                     audioEpochBeforeRead = audioOutput?.epoch ?? 0
                     audioFeedEpochBeforeRead = audioDecoder?.feedEpoch ?? 0
                 } else {
-                    packet = try rawRead(genBeforeRead)
+                    let readyVideo = parkedVideo.first.map { mayDecodeVideoPacket($0) } ?? false
+                    packet = try rawRead(genBeforeRead,
+                        maximumWait: directLiveReadAhead == nil ? nil : readyVideo ? 0 : 0.02)
                 }
             } catch {
                 // Stop/seek cancellation is not a playback failure, including a normal .closed
@@ -4508,6 +4548,7 @@ final class SoftwarePlaybackHost {
                 // captured host generation, just like packets and EOF.
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
                 if case SoftwarePacketReadAhead.ReadError.interrupted = error { return true }
+                if case SoftwarePacketReadAhead.ReadError.idle = error { return true }
                 EngineLog.emit("[SWHost] demux read failed: \(error)", category: .swPlayback)
                 if terminalGeneration.record(genBeforeRead) {
                     onError("Playback error: \(error.localizedDescription)", genBeforeRead)
@@ -4727,6 +4768,30 @@ final class SoftwarePlaybackHost {
                 if decoupleAudio {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
+                    if let directLiveReadAhead {
+                        let bytes = DirectLiveAudioReadAhead.packetBytes(packet)
+                        if bytes > directLiveReadAhead.packetByteLimit {
+                            onError(DirectLiveAudioReadAhead.Failure.packetTooLarge(bytes,
+                                directLiveReadAhead.packetByteLimit).localizedDescription, genBeforeRead)
+                            av_packet_unref(packet); av_packet_free_safe(packet)
+                            return false
+                        }
+                        if parkedVideo.count >= parkedVideoCap || parkedVideoBytes > directLiveReadAhead.parkedByteLimit - bytes {
+                            waitForRenderer(.capacity(bytes))
+                            if stopRequested() || seekGeneration() != genBeforeRead {
+                                av_packet_unref(packet); av_packet_free_safe(packet)
+                                return !stopRequested()
+                            }
+                        }
+                        if backgroundAudioOnly() {
+                            noteVideoPacketDropped(packet)
+                            freeParkedVideo()
+                            av_packet_unref(packet); av_packet_free_safe(packet)
+                            return true
+                        }
+                        parkedVideoBytes += bytes
+                        directLiveReadAhead.noteParkedBytes(parkedVideoBytes)
+                    }
                     noteVideoPacketParked(packet)
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only

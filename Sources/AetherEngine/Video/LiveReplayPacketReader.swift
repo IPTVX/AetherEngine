@@ -5,10 +5,17 @@ import AetherLibavutil
 
 /// Demux-thread-only admission before software clock folding, recording, and DVR storage.
 /// Owns quarantined packets; the caller owns each returned packet.
-final class LiveReplayPacketReader {
+// One source worker owns every operation; Sendable permits transferring that ownership to it.
+final class LiveReplayPacketReader: @unchecked Sendable {
     enum Failure: LocalizedError {
         case interruptedReplay
-        var errorDescription: String? { "Live source ended or diverged during verified replay." }
+        case retentionExceeded
+        var errorDescription: String? {
+            switch self {
+            case .interruptedReplay: return "Live source ended or diverged during verified replay."
+            case .retentionExceeded: return "Live replay admission exceeds the session's compressed allowance. Increase the session cache allowance and retry."
+            }
+        }
     }
     private struct Pending {
         let packet: UnsafeMutablePointer<AVPacket>
@@ -30,8 +37,17 @@ final class LiveReplayPacketReader {
     private let videoTimeBase: Double
     private let audioTimeBase: Double
     private var videoProgress = VideoPacketProgress()
+    /// Optional session allowance; nil preserves the existing source-admission limits exactly.
+    private let residentLimit: Int?
+    /// Held packet residency including referenced buffers/side data when the allowance is enabled.
+    private var residentBytes = 0
+    /// Optional caller-owned accounting, independent of payload signatures and replay decisions.
+    private let retainedSize: ((UnsafePointer<AVPacket>) -> Int)?
 
-    init(videoIndex: Int32, audioIndex: Int32, videoTimeBase: Double, audioTimeBase: Double) {
+    init(videoIndex: Int32, audioIndex: Int32, videoTimeBase: Double, audioTimeBase: Double,
+         residentLimit: Int? = nil, retainedSize: ((UnsafePointer<AVPacket>) -> Int)? = nil) {
+        self.residentLimit = residentLimit
+        self.retainedSize = retainedSize
         self.videoIndex = videoIndex
         self.audioIndex = audioIndex
         self.videoTimeBase = videoTimeBase
@@ -42,6 +58,7 @@ final class LiveReplayPacketReader {
 
     private func free(_ packets: [Pending]) {
         for entry in packets {
+            residentBytes -= retainedSize?(UnsafePointer(entry.packet)) ?? 0
             var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
             av_packet_free(&packet)
         }
@@ -100,6 +117,7 @@ final class LiveReplayPacketReader {
             if readyIndex < ready.count {
                 let entry = ready[readyIndex]
                 readyIndex += 1
+                residentBytes -= retainedSize?(UnsafePointer(entry.packet)) ?? 0
                 if readyIndex == ready.count { ready.removeAll(keepingCapacity: true); readyIndex = 0 }
                 admit(entry)
                 return entry.packet
@@ -153,6 +171,13 @@ final class LiveReplayPacketReader {
                 if signature == nil, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 {
                     guardState.noteDamagedPacket()
                 }
+                let heldBytes = retainedSize?(UnsafePointer(packet)) ?? 0
+                if let residentLimit, heldBytes > residentLimit - residentBytes {
+                    var excess = Optional(packet)
+                    av_packet_free(&excess)
+                    throw Failure.retentionExceeded
+                }
+                residentBytes += heldBytes
                 pending.append(entry); pendingBytes += max(0, Int(packet.pointee.size))
                 switch decision?.event {
                 case .damagedBoundaryHeld:
