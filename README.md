@@ -390,7 +390,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.51.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.52.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -643,10 +643,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.51.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.52.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.51.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.52.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -663,6 +663,8 @@ The manifest requires Swift tools 6.1 for package traits. The Swift and Xcode ro
 supported toolchain CI builds and tests with (GitHub's `xcode-27` image). Older toolchains are
 not tested. This IPTVX fork retains iOS / tvOS 16 and macOS 14 through availability checks and
 compatibility paths for the renderer, clock, audio session and display criteria.
+Upstream also runs a weekly best-effort Xcode 26.3 (Swift 6.2) build
+(`xcode26-compat.yml`); that job does not change this fork's deployment targets.
 
 Supplemental AV1/VP9 registration also has a narrow compile-time guard around
 `VTRegisterSupplementalVideoDecoderIfAvailable`, first declared by the mobile SDKs in Xcode 26.2.
@@ -671,6 +673,8 @@ stock Xcode 26.0/26.1 while leaving hardware queries and software fallback intac
 establish that the rest of the package builds there or lower the supported toolchain above.
 A separately installed newer Swift toolchain paired with an older SDK is not covered by this
 proxy. The existing macOS registration path is unchanged.
+
+**Privacy manifest.** The engine ships `PrivacyInfo.xcprivacy` for its required-reason APIs: boot time (35F9.1), disk capacity (E174.1), and file timestamps (C617.1 and 3B52.1). FFmpeg frameworks carry their own manifests from 3.10.2. Neither tracks or collects user data.
 
 The upstream 7.x line requires iOS / tvOS 18 and macOS 15. IPTVX integrates the complete upstream release and pins its compatibility fork and binary packaging explicitly; the upstream deployment floor does not describe this fork.
 
@@ -692,7 +696,7 @@ These components may be subject to third-party patent licensing. Integrators who
 To enable them, list the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.51.0",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.52.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
 ```
 

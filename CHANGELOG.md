@@ -12,6 +12,8 @@ the public-API contract.
 
 ### IPTVX fork
 
+- Integrated the complete upstream 7.52.0 release: audio shaping with FFmpeg filters, engine/framework privacy manifests, packet-backed bitmap sidecars, and stopped-session callback release. Retained iOS/tvOS 16, macOS 14, all default optional components and the full -180...180-second audio-delay correction. Shaping keeps its upstream sample-aligned graph ahead of the existing delay application; large-delay shaping rebuilds use the same generation, selection, transport and source-close ownership. A late initial-load shaping change is reconciled after that load settles, while terminal or retired sessions cannot reopen. FFmpegBuild 3.11.0-iptvx supplies the complete filter set at the retained deployment floors.
+
 - Fixed runtime audio-delay changes on Live loopback playback without DVR: the engine now rejoins the Live edge with a fresh producer after the outgoing source closes. Positive, negative and reset offsets reach muxed audio while preserving the latest transport intent, selections and current headers. Engine-created HLS ingest uses a fresh reader; non-reopenable custom sources log an explicit refusal. Rapid changes coalesce, and stop/source replacement cancels stale work. DVR remains disabled unless explicitly requested; remote bypass remains unsupported.
 
 - Extended the audio-delay range to +/-180 seconds to match IPTVX/XPlayer. Corrections above two seconds use bounded compressed packet alignment, preserving the existing small-offset path. VOD preserves video position and handles finite audio gaps; native boundary padding retains the source audio format and playback route, with bounded same-encoder spatial fill. Large Live changes can warm up for the requested offset and rejoin even with DVR; they preserve transport intent, not a paused DVR position. Source discontinuities, cancellation, cache pressure and reset-to-zero retain explicit ownership and bounded failure behavior. The code/test patch and mandatory port/apply registry cover this range as well as the original Live correction.
@@ -27,6 +29,54 @@ the public-API contract.
 - Integrated the complete upstream 7.47.0 release while retaining iOS/tvOS 16 and macOS 14. FFmpegBuild 3.9.0 preserves the upstream binaries with matching deployment metadata; LibTrueHD 3.0.0 API 2 is rebuilt at the retained floors. LibDTSX is removed. Existing object-audio and Dolby Vision still capabilities remain enabled; dual-layer composition and reference rendering remain opt-in. Source teardown stays awaitable and drains the compositor preview readers. Cold software loads preserve the resolved source origin without doubling it, while resumes retain their applied origin and legacy renderer preroll excludes held reorder frames.
 
 _Nothing yet._
+
+## [7.52.0] - 2026-10-29
+
+### Added
+
+- **Audio shaping: a channel cap, a dialogue lift and night mode (#923).** A host can now ask the engine to shape the
+  audio before it reaches the output, through `LoadOptions.audioShaping` and, mid-session, `setAudioShaping(_:)`:
+  fold to at most N channels, raise the dialogue (the centre channel, or on a stereo source the dialogue that
+  libavfilter's `dialoguenhance` extracts) by up to 12 dB, and compress the dynamic range (`acompressor`,
+  `AudioShaping.Compressor.night`). A -1 dBFS lookahead limiter (`alimiter`) keeps all of it from clipping, and the
+  enhancer's 32 ms latency is taken back out so the audio stays on the source's timeline to the sample. Needs
+  FFmpegBuild 3.11.0. The common complaint it answers is a 5.1 film folded to TV speakers burying its dialogue under the score.
+  Until now a host could only get this by having its server re-encode the audio, which threw away passthrough for
+  every film and restarted the stream on every toggle. Shaping needs PCM, so while it is on a stream-copied track is
+  bridged (Atmos arrives as its bed), and `$audioShapingState` says whether the session carries it.
+- **Privacy manifests for the required-reason APIs (#920).** The engine calls three categories on Apple's
+  required-reason list and now declares them in a `PrivacyInfo.xcprivacy` in its resource bundle: system boot time
+  (35F9.1, `systemUptime` for elapsed time), disk space (E174.1, checked before packets spool to disk) and file
+  timestamp (C617.1 for its own temp and cache files, 3B52.1 for local media the host opens). No tracking, no
+  collected data. FFmpegBuild 3.10.2 adds the matching manifest to the three FFmpeg frameworks that `stat` files
+  (FFmpegBuild#10), so an app embedding the engine no longer declares any of these calls itself (ITMS-91053).
+
+### Changed
+
+- **FFmpegBuild 3.11.0.** libavfilter gains the audio shaping filters above (`abuffer`, `abuffersink`, `aformat`,
+  `aresample`, `pan`, `dialoguenhance`, `acompressor`, `alimiter`) and `idet`, `fieldmatch` and `decimate` for inverse
+  telecine (#853, not used by the engine yet), all LGPL. 3.10.2 before it added only the privacy manifests above.
+- **A weekly Xcode 26.3 build (#883).** A best-effort workflow builds the package for tvOS and iOS with Xcode 26.3
+  (Swift 6.2) every Monday and by hand before a release, so a host still on Xcode 26 hears about a break before the
+  release does. It is not a required check and the supported toolchain stays Xcode 27.
+
+### Fixed
+
+- **A bitmap sidecar no longer keeps every decoded picture (#921).** A PGS `.sup` was decoded whole when it was
+  selected and held each cue's RGBA image for the session (a film-length track: 14.1 MB of file, 170.5 MB of
+  pictures), and nothing showed until the last one was decoded. It is now read into packets and drained around the
+  playhead like an embedded bitmap track, under the same byte budget and with the same backscan after a backward seek.
+  The PiP / AirPlay OCR fill decodes those packets a batch at a time.
+- **A `.sup` sidecar reports `pgssub`, not `subrip` (#921).** `ExternalSubtitleTrack.codecName` fell back to
+  `subrip` for it, so a host took it for text, and a load-declared one joined the native WebVTT renditions (decoded
+  whole at load, while unselected) instead of the bitmap OCR path.
+- **A stopped HLS session and its request header store are released (#922).**
+  The playlist shift callback the engine installs on each native session captured the session strongly for
+  its VOD placement check, and the credential refusal callback captured the store it is installed on. Both
+  objects hold their callback, so every played session stayed in memory after `stop` with its ingest reader,
+  URL session and caches (about 14 KB per live session, found with `leaks` on a host), and so did each
+  session's header store. Both callbacks now hold their owner weakly; a refusal still reaches
+  `sourceAuthorizationRefused` for the current session only.
 
 ## [7.51.0] - 2026-10-28
 

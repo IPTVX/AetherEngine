@@ -42,6 +42,94 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.52.0 port baseline and shaping interaction
+
+The active snapshot is ported to complete upstream `7.52.0`
+(`db35d50e5c3d5b617551ca27ec7ef4a3d4e534e3`). Its uncorrected baseline is
+reproducible from published history: begin at
+`218c922adc1043154b16c161d41eee4fa786bf73` (the pre-correction ancestor of
+`7.51.0-iptvx`), then merge the complete `7.52.0` tag without committing.
+Resolve the four baseline conflicts as follows:
+
+- `Package.swift` / `Package.resolved`: retain the IPTVX dependency URLs and
+  exact OS16-compatible LibDovi/LibTrueHD pins; upgrade FFmpegBuild to the
+  complete `3.11.0-iptvx` release. Keep the upstream privacy resource and
+  filter dependency changes, plus the fork deployment floors, default traits
+  and library-only mobile product boundary.
+- `README.md`: retain the fork platform explanation, and include upstream's
+  new privacy-manifest and best-effort Xcode compatibility notes.
+- `FrameExtractorCancellationTests.swift`: retain `ProbeTestBox`'s OS16-safe
+  accessors while taking upstream's idle interval and early cancellation count.
+
+For an exact reproduction after publication, those four compatibility-only
+resolutions may be restored from `7.52.0-iptvx` before applying the snapshot.
+They contain no audio-delay production correction. The baseline needs no
+unpublished commit or orphan local ref. Apply the snapshot and repeat `--check`
+and `--apply`; compare every snapshot source/test path byte for byte with the
+published corrected tree. Never include this registry or the patch itself in
+its code/test snapshot.
+
+Upstream shaping does not replace the delay correction. Its compensated sample
+transformer remains ahead of the existing output offset; do not add its graph
+latency to compressed ordering or the renderer/muxer delay. Active shaping
+intentionally chooses the PCM bridge instead of stream copy or object rendering;
+shaping off retains the previous Dolby Vision/Atmos/APAC route. Finite padding
+uses the actual delivered bridge codec parameters and follows graph/encoder EOF
+drain, preserving channel caps and source position.
+
+A graph change while an owned large-delay warmup runs must interrupt that owned
+generation and await its source-close barrier. The coalescing loop compares both
+the delivered graph and delay. VOD retains video position; large-delay Live
+rejoins without changing public DVR configuration. During an unrelated initial
+load, a pending graph is generation-bound and reconciled only after the original
+load exits and its route is installed. Terminal states do not restart, and stop
+or source replacement invalidates pending work.
+
+Required additional regressions: upstream `AudioShapingTests`, shaped native
+finite gaps and actual +/-180 Live/VOD decoded video, shaped software delivered
+sample offsets, shaping during captured warmup, initial-load reconciliation,
+terminal refusal and queued-task stop/replacement. Run upstream privacy,
+packet-backed sidecar and callback-release tests as well as the existing complete
+expanded-range matrix. Native fixture skips remain a release failure.
+
+### 7.52.0 verification record
+
+The complete tag and FFmpegBuild `3.11.0-iptvx`
+(`84729c8d4e9c29b72cfa770272962dc443d7a229`) passed the focused macOS
+validation groups below. Counts are runner results/test methods, not a claim
+that parameterized argument cases are separate methods:
+
+- Upstream shaping/privacy/sidecar/callback and retained selection/options:
+  98 passed, one expected skip for the test requiring a disabled object-audio
+  trait (the fork enables it). No failures.
+- Native finite/Live/lifecycle: 10 Swift Testing methods, 31 argument cases,
+  no failures or skips. Both shaped and unchanged pipelines retain native
+  decoded progress at +/-180 and finite gap/seek boundaries. Late initial
+  graph changes, terminal refusal, stop and source replacement pass.
+- Live correction and graph warmup: eight methods, nine argument cases,
+  no failures or skips, including current headers/User-Agent and held teardown.
+- Software: seven methods, 17 argument cases, no failures or skips. Delivered
+  audio offsets, shaped/unshaped +/-180, real video handover and later progress,
+  finite gaps, matched Live EOF, immediate DVR landing/resume and reset pass.
+- Padding/storage/policy/GPU closure: 148 runner results (127 Swift Testing
+  methods across 21 suites plus 21 XCTest cases), no failures or skips.
+  Parameter cases include actual HE-AAC/HE-AACv2 implicit/explicit ASC final-GOP
+  EOF and leading seeks; APAC cookie/source grid, byte caps, cancellation,
+  source epochs, normal saturation, DVR envelopes and small offsets pass.
+
+The native fixture matrix had zero skips. The one software observation failure
+in an earlier run was a startup assertion before the first renderer handover:
+Live's initial clock re-anchor had already moved the published clock. The final
+full software suite waits for a genuine first handover, then additional decoded
+frames and clock progress; no production workaround was added.
+
+Both iOS and tvOS build-only validations passed with the retained 16.0 deployment
+targets, using identical final production sources. The final 44-file code/test
+snapshot reverse-checks on the corrected tree, detects a missing correction on
+the documented baseline, applies idempotently and reproduces byte-identical
+files. These are macOS runtime and platform-compilation results; they do not
+establish physical-device lip-sync or production-origin warmup latency.
+
 ### Contract to preserve
 
 A runtime audio-delay change during Live loopback playback without DVR must reach

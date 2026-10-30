@@ -199,8 +199,15 @@ struct LiveAudioDelayTests {
         try await verifyObsoleteLargeWarmup(latest: -180)
     }
 
-    /// Uses a source that cannot provide 180 s, so a successful reset cannot be stale catch-up.
-    private func verifyObsoleteLargeWarmup(latest: Double) async throws {
+    /// A graph captured before a 180-second warmup is preempted through the existing source barrier.
+    @Test
+    func shapingInterruptsCapturedLargeWarmup() async throws {
+        try await verifyObsoleteLargeWarmup(latest: 0,
+            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
+    }
+
+    /// Drives a real HLS producer after option capture, with its outgoing source close held.
+    private func verifyObsoleteLargeWarmup(latest: Double, shaping: AudioShaping? = nil) async throws {
         let origin = try #require(RangeFilesOrigin())
         defer { origin.stop() }
         origin.serve("/head.ts", try LongGOPTransportStreamFixture.data(), contentType: "video/mp2t")
@@ -240,7 +247,8 @@ struct LiveAudioDelayTests {
         defer { barrier.open() }
         engine.play()
         engine.pause()
-        engine.setAudioDelay(latest)
+        if let shaping { engine.setAudioShaping(shaping) }
+        else { engine.setAudioDelay(latest) }
         try #require(engine.liveAudioDelayRejoinID != owner)
         try #require(try await waitFor(upTo: .seconds(5)) { barrier.entered })
         let requestsAtBarrier = origin.requests.count
@@ -251,6 +259,7 @@ struct LiveAudioDelayTests {
         #expect(origin.requests.count == requestsAtBarrier,
             "Successor load's second teardown must retain the interrupted source-close barrier")
         #expect(engine.nativeVideoSession == nil)
+        if shaping != nil { engine.setAudioDelay(latest) }
         barrier.open()
         try #require(try await waitFor(upTo: .seconds(8)) {
             engine.nativeVideoSession != nil && engine.nativeVideoSession !== obsolete
@@ -268,6 +277,10 @@ struct LiveAudioDelayTests {
             engine.liveAudioDelayRejoinTask == nil && engine.state == .paused
         })
         #expect(engine.audioDelaySeconds == 0)
+        if let shaping {
+            #expect(engine.nativeVideoSession?.audioShaping == shaping)
+            #expect(engine.audioShapingState == .applied)
+        }
         #expect(!engine.sessionPreservingReloadInFlight)
         #expect(!engine.needsForegroundVideoRestore)
         #expect(engine.loadedSidecarURL == (latest == 0 ? sidecar : nil))

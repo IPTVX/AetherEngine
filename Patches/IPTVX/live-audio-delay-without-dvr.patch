@@ -1,5 +1,5 @@
 diff --git a/Sources/AetherEngine/AetherEngine+AudioDelay.swift b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
-index 6c6d993e..47e90765 100644
+index 6c6d993e..6c0d36f2 100644
 --- a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
 +++ b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
 @@ -30,7 +30,8 @@ extension AetherEngine {
@@ -88,7 +88,7 @@ index 6c6d993e..47e90765 100644
              reanchorForAudioDelay { _, delay in
                  // Round 2 (cmcpherson274): this was `try? await reloadAtCurrentPosition()`, under a
                  // line that had already announced the re-cut. Two claims, one of them unverified: a
-@@ -156,11 +181,117 @@ extension AetherEngine {
+@@ -156,11 +181,122 @@ extension AetherEngine {
          }
      }
  
@@ -111,7 +111,7 @@ index 6c6d993e..47e90765 100644
 +    /// Retires an obsolete owned warmup before reopening. Normal teardown invalidates callbacks and
 +    /// cancels the old task first; the successor load then awaits that exact source-close barrier.
 +    /// This deliberately does not retune an unrelated initial load.
-+    private func interruptAudioDelayWarmup() {
++    func interruptAudioDelayWarmup() {
 +        if isCustomSource, !customSourceIsSeekable, !(customReader is HLSLiveIngestReader) { return }
 +        var selection = snapshotReloadSelection(over: audioDelayRebuildSelection)
 +        if let priorIntent = audioDelayRebuildSubtitleIntentGeneration,
@@ -139,7 +139,7 @@ index 6c6d993e..47e90765 100644
 +    /// Coalesces corrections onto owned session-preserving reloads (fresh-edge rejoins for Live). Every pass reads the latest requested
 +    /// offset; a change after the producer captured it requires another pass. URL and reconstructible
 +    /// HLS-ingest sources reopen; a genuinely forward-only custom source is explicitly refused.
-+    private func rebuildForAudioDelay(after predecessor: Task<Void, Never>? = nil) {
++    func rebuildForAudioDelay(after predecessor: Task<Void, Never>? = nil) {
 +        if liveAudioDelayRejoinID != nil { return }
 +        if let refusal = sessionReloadRefusal, !(customReader is HLSLiveIngestReader) {
 +            EngineLog.emit(
@@ -174,6 +174,7 @@ index 6c6d993e..47e90765 100644
 +                  self.liveAudioDelayRejoinID == ownerID, !Task.isCancelled else { return }
 +            repeat {
 +                let delay = self.loadedOptions.audioDelaySeconds
++                let shaping = self.loadedOptions.audioShaping
 +                let context = LiveAudioDelayRejoinContext(ownerID: ownerID, generation: self.loadGeneration)
 +                do {
 +                    try await LiveAudioDelayRejoinContext.$current.withValue(context) {
@@ -193,7 +194,11 @@ index 6c6d993e..47e90765 100644
 +                    : (self.nativeVideoSession?.audioDelaySeconds ?? delay)
 +                EngineLog.emit("[AetherEngine] AE#464: rebuilt session with audio delay \(Self.ms(delivered))",
 +                               category: .engine)
-+                if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds) { return }
++                let deliveredShaping = self.videoRoute == .software
++                    ? (self.softwareHost?.audioShaping ?? shaping)
++                    : (self.nativeVideoSession?.audioShaping ?? shaping)
++                if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds),
++                   deliveredShaping == self.loadedOptions.audioShaping { return }
 +            } while self.videoRoute == .loopback || self.videoRoute == .software
 +        }
 +    }
@@ -208,6 +213,110 @@ index 6c6d993e..47e90765 100644
      ///
      /// Neither route asks for the producer restart directly. A restart raised while no seek of the
      /// engine's own is in flight is reported as a user scrub (`setNativeScrubSeek`), which opened a
+diff --git a/Sources/AetherEngine/AetherEngine+AudioShaping.swift b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+index 797cb8dd..1f424dc5 100644
+--- a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
++++ b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+@@ -27,7 +27,9 @@ extension AetherEngine {
+     /// Where AVPlayer owns the audio (`.remoteBypass`, the native audio-only host) the engine has no
+     /// PCM to shape: the value is kept for a later load, logged, and `audioShapingState` reads
+     /// `.unavailable`. A live session without a DVR window has no position to come back to, so the
+-    /// value arrives at the next rebuild the session makes on its own.
++    /// value arrives at the next rebuild the session makes on its own. In compressed audio-delay
++    /// alignment mode, a change instead rejoins Live through the owned audio-delay rebuild; VOD
++    /// retains its video position. Changes during that owned warmup interrupt its obsolete graph.
+     public func setAudioShaping(_ shaping: AudioShaping) {
+         let next = shaping.clamped
+         guard next != loadedOptions.audioShaping else { return }
+@@ -36,9 +38,31 @@ extension AetherEngine {
+         // Asked off the old pipeline until the rebuild replaces it, which is exactly what is playing.
+         recomputeAudioShapingState()
+ 
++        switch state {
++        case .idle, .ended, .error:
++            EngineLog.emit("[AetherEngine] AE#923: shaping kept for the next load; this session is terminal",
++                           category: .engine)
++            return
++        default: break
++        }
++
++        // An alignment producer captures both settings before its potentially long source warmup.
++        // Reuse that generation's cancellation/barrier rather than leaving a stale shaping graph
++        // mounted or opening a second origin through an independent shaping task.
++        if liveAudioDelayRejoinID != nil {
++            interruptAudioDelayWarmup()
++            return
++        }
++        if audioShapingRebuildIsPossible, AudioDelayPolicy.usesAlignment(loadedOptions.audioDelaySeconds),
++           videoRoute == .loopback || videoRoute == .software {
++            rebuildForAudioDelay()
++            return
++        }
++
+         guard state != .loading else {
++            pendingAudioShapingGeneration = loadGeneration
+             EngineLog.emit("[AetherEngine] AE#923: audio shaping = \(next.summary) set while the session is "
+-                           + "being rebuilt; the load in flight reads it from the options", category: .engine)
++                           + "being rebuilt; its settled pipeline reconciles the latest graph", category: .engine)
+             return
+         }
+         if videoRoute == .remoteBypass || audioAVPlayerHost != nil || playbackBackend == .none {
+@@ -50,6 +74,34 @@ extension AetherEngine {
+         reanchorForAudioShaping()
+     }
+ 
++    /// Terminal states never restart playback merely because a processing preference changed.
++    private var audioShapingRebuildIsPossible: Bool {
++        switch state {
++        case .idle, .loading, .ended, .error: return false
++        case .playing, .paused, .seeking: return true
++        }
++    }
++
++    /// A producer may have captured the old graph before an initial load suspends for warmup.
++    /// Reconcile after installation instead of opening another reader while that load still owns it.
++    /// A replaced/stopped generation cannot carry its pending preference into a different session.
++    func reconcileCapturedAudioShaping() {
++        guard pendingAudioShapingGeneration == loadGeneration, !currentLoadIsInFlight,
++              audioShapingRebuildIsPossible,
++              liveAudioDelayRejoinID == nil else { return }
++        let delivered: AudioShaping?
++        switch videoRoute {
++        case .loopback: delivered = nativeVideoSession?.audioShaping
++        case .software: delivered = softwareHost?.audioShaping
++        default: delivered = nil
++        }
++        guard let delivered else { return }
++        pendingAudioShapingGeneration = nil
++        if delivered == loadedOptions.audioShaping { return }
++        if AudioDelayPolicy.usesAlignment(loadedOptions.audioDelaySeconds) { rebuildForAudioDelay() }
++        else { reanchorForAudioShaping() }
++    }
++
+     /// The rebuild, with `reanchorForAudioDelay`'s folding: the value does not ride the call, so a
+     /// rebuild that has not read the options yet already carries the newest one, and one catch-up
+     /// pass covers a change that landed after it had.
+@@ -72,8 +124,10 @@ extension AetherEngine {
+             return
+         }
+         audioShapingReanchorInFlight = true
++        let initialGeneration = loadGeneration
+         Task { @MainActor in
+             defer { self.audioShapingReanchorInFlight = false }
++            guard self.loadGeneration == initialGeneration, self.liveAudioDelayRejoinID == nil else { return }
+             var delivered: AudioShaping
+             repeat {
+                 delivered = self.loadedOptions.audioShaping
+@@ -90,7 +144,8 @@ extension AetherEngine {
+                                    + "stands and arrives at the next load", category: .engine)
+                     return
+                 }
+-            } while delivered != self.loadedOptions.audioShaping
++            } while self.liveAudioDelayRejoinID == nil
++                && delivered != self.loadedOptions.audioShaping
+                 && Self.audioDelayRecutIsPossible(state: self.state, isLive: self.isLive, liveWindow: self.liveWindow)
+         }
+     }
 diff --git a/Sources/AetherEngine/AetherEngine+Live.swift b/Sources/AetherEngine/AetherEngine+Live.swift
 index ab9317d9..8c74d9b0 100644
 --- a/Sources/AetherEngine/AetherEngine+Live.swift
@@ -238,10 +347,10 @@ index ab9317d9..8c74d9b0 100644
          let ready = await BlockingWork.detached(priority: .userInitiated) {
              provider.waitForFirstLiveSegment(timeout: timeout)
 diff --git a/Sources/AetherEngine/AetherEngine+Loading.swift b/Sources/AetherEngine/AetherEngine+Loading.swift
-index dc240f55..799d0278 100644
+index 2e63b1ed..fe763ef8 100644
 --- a/Sources/AetherEngine/AetherEngine+Loading.swift
 +++ b/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -1939,7 +1939,8 @@ extension AetherEngine {
+@@ -1871,7 +1871,8 @@ extension AetherEngine {
          // could not fill in that time. The gate is the same one the request would have waited on, so
          // the request is then answered at once.
          if isLive, let provider = nativeVideoSession?.provider {
@@ -251,7 +360,7 @@ index dc240f55..799d0278 100644
              try checkLoadCurrent(generation)
          }
          // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
-@@ -2637,6 +2638,7 @@ extension AetherEngine {
+@@ -2571,6 +2572,7 @@ extension AetherEngine {
              && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
                  outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
                  outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
@@ -259,7 +368,7 @@ index dc240f55..799d0278 100644
          stopInternal(resetDisplayCriteria: false,
                       keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                       keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
-@@ -2649,6 +2651,13 @@ extension AetherEngine {
+@@ -2583,6 +2585,13 @@ extension AetherEngine {
          if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
          EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
          let gen = loadGeneration
@@ -274,10 +383,27 @@ index dc240f55..799d0278 100644
          beginLoadInFlight(gen)
          defer { endLoadInFlight(gen) }
 diff --git a/Sources/AetherEngine/AetherEngine.swift b/Sources/AetherEngine/AetherEngine.swift
-index ed5deade..be7cb3f9 100644
+index a0f59959..8a4353fe 100644
 --- a/Sources/AetherEngine/AetherEngine.swift
 +++ b/Sources/AetherEngine/AetherEngine.swift
-@@ -2040,6 +2040,16 @@ public final class AetherEngine: ObservableObject {
+@@ -61,6 +61,7 @@ public final class AetherEngine: ObservableObject {
+             if case .error = state {} else { errorInfo = nil }
+             recomputePlaybackPhase()
+             resolveLoadingStashedSeek(from: oldValue)
++            reconcileCapturedAudioShaping()
+             if Self.backgroundPolicyIsOwedOnResume(
+                 isBackgrounded: isBackgrounded, retainsPausedPipeline: retainsVideoPipelineWhenBackgrounded,
+                 from: oldValue, to: state
+@@ -1181,6 +1182,8 @@ public final class AetherEngine: ObservableObject {
+     /// load passes through `.paused` long before it returns (native readiness during the play gate),
+     /// so its state cannot say whether it settled; this can.
+     private var loadInFlightGeneration: UInt64?
++    /// True until the current load exits, including native readiness waypoints before its return.
++    var currentLoadIsInFlight: Bool { loadInFlightGeneration == loadGeneration }
+     /// Test seam for the owed background decision on a platform without an app lifecycle.
+     var owedBackgroundPolicyForTesting: (@MainActor (AetherEngine) async -> Void)?
+     #if os(iOS)
+@@ -2094,6 +2097,16 @@ public final class AetherEngine: ObservableObject {
      /// Detached source cleanup started by the most recent native-session stop.
      private var nativeSourceTeardownTask: Task<Void, Never>?
  
@@ -294,7 +420,7 @@ index ed5deade..be7cb3f9 100644
      /// Fold the cache's playlist-axis spans onto the published display axis, the same way
      /// `onSeekStateChanged` folds a scrub target (#38). The two axes differ by
      /// `playlistShiftSeconds - sourcePresentationOrigin`, which is not zero on the very path this
-@@ -2504,7 +2514,11 @@ public final class AetherEngine: ObservableObject {
+@@ -2561,7 +2574,12 @@ public final class AetherEngine: ObservableObject {
      /// custom-source branch reaches `reloadWithAudioOverride`, which reads these fields one by one.
      /// Callers go through `reloadAtCurrentPosition(applying:)`, which refuses the load-identity
      /// fields first; this setter does not re-check them.
@@ -302,16 +428,17 @@ index ed5deade..be7cb3f9 100644
 +    func applySessionOptionCorrection(_ options: LoadOptions) {
 +        var normalized = options
 +        normalized.audioDelaySeconds = AudioDelayPolicy.clamp(options.audioDelaySeconds)
++        normalized.audioShaping = options.audioShaping.clamped
 +        loadedOptions = normalized
 +    }
  
      #if DEBUG
      /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
-@@ -3868,6 +3882,17 @@ public final class AetherEngine: ObservableObject {
+@@ -3925,8 +3943,20 @@ public final class AetherEngine: ObservableObject {
      /// the rebuild already in flight delivers the newest one. See `reanchorForAudioDelay`.
      var audioDelayReanchorInFlight = false
  
-+    /// Owns a coalesced Live-without-DVR correction until its fresh producer has been installed.
++    /// Owns a coalesced delay/shaping rebuild through source teardown and fresh pipeline installation.
 +    var liveAudioDelayRejoinTask: Task<Void, Never>?
 +    /// Guards cleanup so a retired correction cannot clear a successor's ownership.
 +    var liveAudioDelayRejoinID: UUID?
@@ -321,11 +448,14 @@ index ed5deade..be7cb3f9 100644
 +    var audioDelayRebuildNeedsSelectionRestore = false
 +    /// Distinguishes a new explicit subtitle pick/off action from teardown's temporarily empty table.
 +    var audioDelayRebuildSubtitleIntentGeneration: UInt64?
-+
+     /// AE#923: the same latch for `setAudioShaping`'s rebuilds.
+     var audioShapingReanchorInFlight = false
++    /// A setter during initial loading is reconciled only after that same generation installs its pipeline.
++    var pendingAudioShapingGeneration: UInt64?
+ 
      /// The playhead a rebuild of this session has to come back to (#464 round 2).
      var positionForSessionRebuild: Double {
-         let pending = !isLive && nativeHost != nil
-@@ -3884,7 +3909,7 @@ public final class AetherEngine: ObservableObject {
+@@ -3944,7 +3974,7 @@ public final class AetherEngine: ObservableObject {
      /// rather than on `.loading`, because `play()` itself moves `.loading` to `.playing` and a pause
      /// after it would otherwise go unrecorded. Read back where each rebuild settles its transport.
      func recordTransportDuringRebuild(playing: Bool) {
@@ -334,15 +464,16 @@ index ed5deade..be7cb3f9 100644
          transportIntentUnderReconstruction = playing
      }
  
-@@ -4335,6 +4360,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4395,6 +4425,8 @@ public final class AetherEngine: ObservableObject {
          var startPosition = startPosition
          var options = options
          options = Self.applyingSharedOutputRole(options)
 +        options.audioDelaySeconds = AudioDelayPolicy.clamp(options.audioDelaySeconds)
++        options.audioShaping = options.audioShaping.clamped
          SharedOutputCoordinator.shared.join(ObjectIdentifier(self), role: options.sharedOutputRole, tag: logTag, owner: self)
          // #436: a speed the host set belongs to the item it was set on. The rebuilds a session makes
          // on its own (reload at position, audio-track switch, AirPlay LAN swap, background return)
-@@ -4385,6 +4411,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4445,6 +4477,7 @@ public final class AetherEngine: ObservableObject {
          // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
          // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
          claimSoftwarePathTakeover()   // AE#629
@@ -350,7 +481,15 @@ index ed5deade..be7cb3f9 100644
          stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
          sessionCacheStatusToken &+= 1
          diagnostics.sessionCacheStatus = .inactive
-@@ -4457,6 +4484,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4486,6 +4519,7 @@ public final class AetherEngine: ObservableObject {
+         }
+         loadedURL = url
+         loadedOptions = options
++        pendingAudioShapingGeneration = nil
+         // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
+         // this one through a reader that outlived it.
+         sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
+@@ -4509,6 +4543,7 @@ public final class AetherEngine: ObservableObject {
          // host-initiated reload would resurrect a stale session snapshot.
          loadedOptions.subtitleSessionCarryover = nil
          isLive = options.isLive
@@ -358,7 +497,7 @@ index ed5deade..be7cb3f9 100644
          isSequentialOrigin = !options.isLive && options.sequentialOrigin
          // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
          // an over-wide published bound only affects range width, not seek landing.
-@@ -4471,6 +4499,11 @@ public final class AetherEngine: ObservableObject {
+@@ -4523,6 +4558,11 @@ public final class AetherEngine: ObservableObject {
          // Round 3: and the transport it is rebuilding toward, for the same window and the same
          // reason. The host this load replaces is the one a stacked rebuild would ask.
          transportIntentUnderReconstruction = options.autoplay
@@ -370,7 +509,7 @@ index ed5deade..be7cb3f9 100644
          isBuffering = false
          residentPlaylistRanges = []
          residentRanges = []
-@@ -5968,6 +6001,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6020,6 +6060,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func play() {
@@ -378,7 +517,7 @@ index ed5deade..be7cb3f9 100644
          recordTransportDuringRebuild(playing: true)
          if deferPlayForInterruption() { return }
          // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
-@@ -5999,6 +6033,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6051,6 +6092,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func pause() {
@@ -386,7 +525,7 @@ index ed5deade..be7cb3f9 100644
          recordTransportDuringRebuild(playing: false)
          resumeAfterInterruption = false
          playDeferredByInterruption = false
-@@ -6058,6 +6093,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6110,6 +6152,7 @@ public final class AetherEngine: ObservableObject {
          // that path the live state every snapshot below reads is wiped long before this call. When
          // nothing was parked this is exactly the pre-#357 live read.
          let resumesTornDownSession = backgroundTeardownSelection != nil
@@ -394,7 +533,7 @@ index ed5deade..be7cb3f9 100644
          let selection = consumeReloadSelection()
          // AE#464 round 2: come back in the transport state the session is IN, not the one its first
          // mount was given. Written before the branch because only the URL branch below carries a
-@@ -6065,7 +6101,15 @@ public final class AetherEngine: ObservableObject {
+@@ -6117,7 +6160,15 @@ public final class AetherEngine: ObservableObject {
          // A torn-down session (#357 background teardown) has no transport left to read and its
          // resume is the host's call, so that path keeps replaying the mount flag exactly as before.
          if !resumesTornDownSession { setLoadedAutoplay(sessionRebuildResumesPlaying) }
@@ -411,7 +550,7 @@ index ed5deade..be7cb3f9 100644
              // Rebuild on retained reader (seekable only); no URL to reopen.
              //
              // AE#526: a refusal, said out loud. This used to return silently, and a host cannot tell
-@@ -6146,7 +6190,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6198,7 +6249,7 @@ public final class AetherEngine: ObservableObject {
          var options = loadedOptions
          options.isLiveRejoin = options.isLive
          options.subtitleSessionCarryover = carryover
@@ -420,7 +559,7 @@ index ed5deade..be7cb3f9 100644
                         audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
          // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
          // while it ran is the newer word.
-@@ -6971,6 +7015,7 @@ public final class AetherEngine: ObservableObject {
+@@ -7023,6 +7074,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
@@ -428,7 +567,7 @@ index ed5deade..be7cb3f9 100644
          cancelPendingAudioSelection()
          releaseHeldPicture(reason: "stop")
          nextLoadRequestsInPlaceItemHandover = false
-@@ -8063,10 +8108,13 @@ public final class AetherEngine: ObservableObject {
+@@ -8115,12 +8167,16 @@ public final class AetherEngine: ObservableObject {
      ///   black-screen latency per audio switch on the old fixed 5 s
      ///   poll; capped at ~2 s since #117, but still worth skipping).
      func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false,
@@ -442,8 +581,11 @@ index ed5deade..be7cb3f9 100644
 +        if !ownedAudioDelayReload { cancelLiveAudioDelayRejoin() }
          // Bump generation to invalidate in-flight load() checkpoints.
          loadGeneration &+= 1
++        pendingAudioShapingGeneration = nil
          scrubPreviewSourceGeneration = UUID()
-@@ -8154,7 +8202,11 @@ public final class AetherEngine: ObservableObject {
+         resumeAfterInterruption = false
+         playDeferredByInterruption = false
+@@ -8206,7 +8262,11 @@ public final class AetherEngine: ObservableObject {
          if diagnostics.sessionCacheStatus.route == .nativeRemoteHLS {
              diagnostics.sessionCacheStatus = .inactive
          }
@@ -456,6 +598,14 @@ index ed5deade..be7cb3f9 100644
          nativeVideoSession = nil
          nativeSubtitleRenditionsServed = false
          dolbyVisionConversion = nil
+@@ -8589,6 +8649,7 @@ public final class AetherEngine: ObservableObject {
+         guard loadInFlightGeneration == generation else { return }
+         loadInFlightGeneration = nil
+         settleOwedBackgroundAction()
++        reconcileCapturedAudioShaping()
+     }
+ 
+     /// didEnterBackground's bookkeeping. Audit CORE-2: a load or seek in flight has a pipeline
 diff --git a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
 new file mode 100644
 index 00000000..e6cbe6e6
@@ -1989,7 +2139,7 @@ index 5cff811d..e78f4250 100644
      private func applyCacheTimingLocked() {
          guard !closed, !sourceRepositioning, !resetPending, let cacheTiming else { return }
 diff --git a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
-index cc00a421..7e74e93b 100644
+index a4ce58e9..4d66ab15 100644
 --- a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
 +++ b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
 @@ -123,7 +123,7 @@ final class SoftwarePlaybackHost {
@@ -2014,7 +2164,7 @@ index cc00a421..7e74e93b 100644
                  parentDirectory: directory)
              claim = diskClaim
          }
-@@ -419,6 +420,17 @@ final class SoftwarePlaybackHost {
+@@ -426,6 +427,17 @@ final class SoftwarePlaybackHost {
      /// rebuild) starts out carrying it rather than at zero.
      private(set) var audioDelaySeconds: Double = 0
  
@@ -2032,7 +2182,7 @@ index cc00a421..7e74e93b 100644
      /// AE#462: how this host delivers audio, as a typed fact for the engine's published
      /// `audioDelivery`. Set once the audio decoder has been given its chance.
      private(set) var audioDelivery: AudioDelivery = .none
-@@ -480,7 +492,12 @@ final class SoftwarePlaybackHost {
+@@ -487,7 +499,12 @@ final class SoftwarePlaybackHost {
              let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
                  PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0)
              }
@@ -2046,7 +2196,7 @@ index cc00a421..7e74e93b 100644
              let ring = try PacketRingBuffer(windowSeconds: window, scratch: scratch,
                                              byteBudget: budget, retention: retention)
              claim.track { [weak ring] in ring?.diskBytes ?? 0 }
-@@ -498,6 +515,14 @@ final class SoftwarePlaybackHost {
+@@ -505,6 +522,14 @@ final class SoftwarePlaybackHost {
      @discardableResult
      func setLiveDVRLimits(_ limits: LiveDVRLimits, availableBytes: Int64?) -> Bool {
          guard let ring = dvrRing, !dvrRingHoldsCushionOnly else { return false }
@@ -2061,7 +2211,7 @@ index cc00a421..7e74e93b 100644
          return ring.setLimits(limits, availableBytes: availableBytes)
      }
      var liveDVRBytes: Int? { dvrRing?.retainedBytes }
-@@ -506,12 +531,19 @@ final class SoftwarePlaybackHost {
+@@ -513,12 +538,19 @@ final class SoftwarePlaybackHost {
      /// publishes no rewind window, so a seek stays refused as on any live-only session.
      nonisolated(unsafe) private var dvrRingHoldsCushionOnly = false
  
@@ -2083,7 +2233,7 @@ index cc00a421..7e74e93b 100644
      }
  
      /// AE#560: the live recording sink, read on the demux thread for every source packet.
-@@ -584,7 +616,7 @@ final class SoftwarePlaybackHost {
+@@ -591,7 +623,7 @@ final class SoftwarePlaybackHost {
          liveEdgeLock.lock()
          defer { liveEdgeLock.unlock() }
          guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return 0 }
@@ -2092,7 +2242,7 @@ index cc00a421..7e74e93b 100644
      }
  
      /// The DVR ring's rewind floor on the session axis once byte or time eviction has moved it past
-@@ -684,8 +716,28 @@ final class SoftwarePlaybackHost {
+@@ -691,8 +723,28 @@ final class SoftwarePlaybackHost {
                    self.seekGeneration == generation, self.readFeedCursor() == old,
                    old < ring.seqBounds.first,
                    PausedFirstFrame.loopsMayRun(isPlaying: self.isPlaying,
@@ -2123,7 +2273,7 @@ index cc00a421..7e74e93b 100644
              EngineLog.emit("[SWHost] DVR eviction recovery: cursor=\(old) targetSession=\(target)",
                             category: .swPlayback)
              // Reuse the live seek's decoder/renderer/audio flush, look-ahead reset and
-@@ -809,7 +861,7 @@ final class SoftwarePlaybackHost {
+@@ -816,7 +868,7 @@ final class SoftwarePlaybackHost {
          liveEdgeLock.lock()
          defer { liveEdgeLock.unlock() }
          guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return nil }
@@ -2132,7 +2282,7 @@ index cc00a421..7e74e93b 100644
      }
  
      private var timeTimer: AnyCancellable?
-@@ -1214,13 +1266,19 @@ final class SoftwarePlaybackHost {
+@@ -1221,13 +1273,19 @@ final class SoftwarePlaybackHost {
          armReadyForDisplayObserver()
  
          dvrRingHoldsCushionOnly = false
@@ -2154,7 +2304,7 @@ index cc00a421..7e74e93b 100644
          }
  
          // Resolve the audio stream up front so the session-start log and the decoder agree. #133:
-@@ -1583,7 +1641,8 @@ final class SoftwarePlaybackHost {
+@@ -1591,7 +1649,8 @@ final class SoftwarePlaybackHost {
              let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
              // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
              // remote source that has to scan for its landing would otherwise block the main thread here.
@@ -2164,7 +2314,7 @@ index cc00a421..7e74e93b 100644
                                             { [weak self] in self?.stopRequested ?? true })
              // Like the others (the audio route choice, the cache setup, the primer wait), this
              // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
-@@ -1622,11 +1681,12 @@ final class SoftwarePlaybackHost {
+@@ -1630,11 +1689,12 @@ final class SoftwarePlaybackHost {
              let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                  let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                  guard let (fifo, bytes, claim) = try Self.makePacketStore(
@@ -2179,7 +2329,7 @@ index cc00a421..7e74e93b 100644
                      initialSourceClock: initialSourceClock, fifo: fifo,
                      videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming
                  ) { isCurrent in
-@@ -1641,7 +1701,13 @@ final class SoftwarePlaybackHost {
+@@ -1649,7 +1709,13 @@ final class SoftwarePlaybackHost {
              switch cacheResult {
              case .success(let cache):
                  readAhead = cache?.0
@@ -2194,7 +2344,7 @@ index cc00a421..7e74e93b 100644
              case .failure:
                  // A cache-directory failure must not stop a source that the old direct loop can
                  // still play. Runtime spool corruption is explicit, never silently skipped.
-@@ -1653,6 +1719,22 @@ final class SoftwarePlaybackHost {
+@@ -1661,6 +1727,22 @@ final class SoftwarePlaybackHost {
              readAhead?.start()
          }
  
@@ -2217,7 +2367,7 @@ index cc00a421..7e74e93b 100644
          // The Atmos decoder registration started when the route was chosen and has run alongside the
          // resume seek and the cache setup; only what is left of its window is waited out here, and
          // only on the compressed-JOC route (`AtmosDecoderPrimer`). The first enqueue is after load().
-@@ -1676,6 +1758,7 @@ final class SoftwarePlaybackHost {
+@@ -1684,6 +1766,7 @@ final class SoftwarePlaybackHost {
  
      func play() {
          guard !stopRequested, failure == nil else { return }
@@ -2225,7 +2375,7 @@ index cc00a421..7e74e93b 100644
          renderer.recoverAfterSuspensionIfNeeded()
          audioOutput?.setPlaybackEnabled(true)
          // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
-@@ -1824,6 +1907,7 @@ final class SoftwarePlaybackHost {
+@@ -1832,6 +1915,7 @@ final class SoftwarePlaybackHost {
      }
  
      func pause() {
@@ -2233,7 +2383,7 @@ index cc00a421..7e74e93b 100644
          // Latch even before arming: stale decoder and rebuffer work cannot restart the clock
          // after this pause while the host publishes its transport state.
          audioOutput?.setPlaybackEnabled(false)
-@@ -1877,7 +1961,8 @@ final class SoftwarePlaybackHost {
+@@ -1885,7 +1969,8 @@ final class SoftwarePlaybackHost {
          guard clockArmed, let aOut = audioOutput else { return }
          let tail = SoftwareEndOfMediaClock.tailPlayoutSeconds(
              clockSeconds: aOut.currentTimeSeconds,
@@ -2243,7 +2393,7 @@ index cc00a421..7e74e93b 100644
          )
          guard tail > 0 else { return parkClockNow() }
          // The deferral aims at the end of the queued tail; a task that runs late must not park past it.
-@@ -2148,7 +2233,13 @@ final class SoftwarePlaybackHost {
+@@ -2156,7 +2241,13 @@ final class SoftwarePlaybackHost {
      /// decoded a frame.
      var videoQueueFlushOwedForTesting: Bool { videoQueueFlushOwed }
      var audioRendererForTesting: AVSampleBufferAudioRenderer? { audioOutput?.renderer }
@@ -2257,7 +2407,7 @@ index cc00a421..7e74e93b 100644
      var keyframeLedgerForTesting: SWKeyframeLedger { keyframeLedger }
      func setLiveForTesting(_ live: Bool) { isLive = live }
      func setVideoDecoderForTesting(_ decoder: any VideoDecodingPipeline) { videoDecoder = decoder }
-@@ -2311,7 +2402,8 @@ final class SoftwarePlaybackHost {
+@@ -2319,7 +2410,8 @@ final class SoftwarePlaybackHost {
              forSession: seconds,
              sessionZeroSeconds: clockSessionZero
          )
@@ -2267,7 +2417,7 @@ index cc00a421..7e74e93b 100644
          // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
          // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
          let wasPlaying = SeekResumeIntent.resolve(isPlaying: isPlaying,
-@@ -2363,7 +2455,7 @@ final class SoftwarePlaybackHost {
+@@ -2371,7 +2463,7 @@ final class SoftwarePlaybackHost {
          var cacheHit = false
          if let packetSource, let cacheGeneration {
              let preparation = await BlockingWork.detached(priority: .userInitiated) {
@@ -2276,7 +2426,7 @@ index cc00a421..7e74e93b 100644
              }.result
              guard seekGeneration == generation, !stopRequested else { return .superseded }
              switch preparation {
-@@ -2400,7 +2492,7 @@ final class SoftwarePlaybackHost {
+@@ -2408,7 +2500,7 @@ final class SoftwarePlaybackHost {
              // existing frontier; seeking it too would duplicate or skip already retained packets.
              outcome = .landed
          } else {
@@ -2285,7 +2435,7 @@ index cc00a421..7e74e93b 100644
                  { [weak self] in
                      self?.seekGeneration != generation || (self?.stopRequested ?? true)
                  })
-@@ -2609,7 +2701,8 @@ final class SoftwarePlaybackHost {
+@@ -2617,7 +2709,8 @@ final class SoftwarePlaybackHost {
          // Reposition cursor to the newest keyframe at or before target. If the target precedes every
          // retained keyframe, fall to the EARLIEST keyframe, not seqBounds.first, which can be a mid-GOP
          // leading entry before the ring's first eviction and would decode as garbage until the next keyframe.
@@ -2295,7 +2445,7 @@ index cc00a421..7e74e93b 100644
              ?? ring.firstKeyframeSeq()
              ?? ring.seqBounds.first
          setFeedCursor(seq)
-@@ -2680,6 +2773,8 @@ final class SoftwarePlaybackHost {
+@@ -2688,6 +2781,8 @@ final class SoftwarePlaybackHost {
      }
  
      func stop() {
@@ -2304,7 +2454,7 @@ index cc00a421..7e74e93b 100644
          stopRequested = true
          pausedBeforeFirstFrame = false
          isPlaying = false
-@@ -2705,6 +2800,10 @@ final class SoftwarePlaybackHost {
+@@ -2713,6 +2808,10 @@ final class SoftwarePlaybackHost {
          dvrRing = nil
          retentionClaims.forEach { $0.release() }
          retentionClaims.removeAll()
@@ -2315,7 +2465,7 @@ index cc00a421..7e74e93b 100644
          liveEdgeLock.lock()
          sessionStartPts = .nan
          liveJoinPolicy = SoftwareLiveJoinPolicy()
-@@ -2874,6 +2973,71 @@ final class SoftwarePlaybackHost {
+@@ -2882,6 +2981,71 @@ final class SoftwarePlaybackHost {
              self?.onClockSessionZero?(resolvedZero)
          }
  
@@ -2387,7 +2537,7 @@ index cc00a421..7e74e93b 100644
          if liveSession, let ring {
              let getFeederPlaying: @Sendable () -> Bool = { [weak self] in
                  guard let self else { return false }
-@@ -2941,9 +3105,42 @@ final class SoftwarePlaybackHost {
+@@ -2949,9 +3113,42 @@ final class SoftwarePlaybackHost {
                      splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
                      subtitleTapSink: getSubtitleTapSink,
                      recordingTap: recordingTap,
@@ -2431,7 +2581,7 @@ index cc00a421..7e74e93b 100644
              let lookahead = audioLookahead
              feedQueue.async {
                  Self.runLiveFeederLoop(
-@@ -2982,54 +3179,7 @@ final class SoftwarePlaybackHost {
+@@ -2990,54 +3187,7 @@ final class SoftwarePlaybackHost {
              return
          }
  
@@ -2487,7 +2637,7 @@ index cc00a421..7e74e93b 100644
      }
  
      // MARK: - Live reader loop (DVR sessions)
-@@ -3053,13 +3203,15 @@ final class SoftwarePlaybackHost {
+@@ -3061,13 +3211,15 @@ final class SoftwarePlaybackHost {
          splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
          subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
          recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
@@ -2504,7 +2654,7 @@ index cc00a421..7e74e93b 100644
          var lastSeenExtradata: Data? = nil
          let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
              videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
-@@ -3154,6 +3306,7 @@ final class SoftwarePlaybackHost {
+@@ -3162,6 +3314,7 @@ final class SoftwarePlaybackHost {
                          let expectedContinuation = prevRawVideoPtsSec
                              + (frameIntervalSec > 0 ? frameIntervalSec : 0)
                          discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
@@ -2512,7 +2662,7 @@ index cc00a421..7e74e93b 100644
                          if !loggedSWDiscontinuity {
                              loggedSWDiscontinuity = true
                              EngineLog.emit(
-@@ -3197,8 +3350,22 @@ final class SoftwarePlaybackHost {
+@@ -3205,8 +3358,22 @@ final class SoftwarePlaybackHost {
                          let isKey = isVideo && (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                          // Best-effort: a write failure just shrinks the
                          // rewind window, it must not stall the reader.
@@ -2537,7 +2687,7 @@ index cc00a421..7e74e93b 100644
                          condition.lock()
                          condition.broadcast()
                          condition.unlock()
-@@ -3719,14 +3886,14 @@ final class SoftwarePlaybackHost {
+@@ -3727,14 +3894,14 @@ final class SoftwarePlaybackHost {
          audioTimeBaseSeconds: Double,
          isLive: Bool,
          foldTimeline: Bool,
@@ -2554,7 +2704,7 @@ index cc00a421..7e74e93b 100644
          seekWindowOpen: @Sendable () -> Bool,
          setDecodeGeneration: @Sendable (UInt64) -> Void,
          noteDecodeGeneration: @Sendable () -> Void,
-@@ -3741,7 +3908,14 @@ final class SoftwarePlaybackHost {
+@@ -3749,7 +3916,14 @@ final class SoftwarePlaybackHost {
          recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
          playedMedia: PlayedMediaLedger? = nil,
          keyframeLedger: SWKeyframeLedger? = nil,
@@ -2570,7 +2720,7 @@ index cc00a421..7e74e93b 100644
      ) {
          // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
          func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
-@@ -3788,6 +3962,93 @@ final class SoftwarePlaybackHost {
+@@ -3796,6 +3970,93 @@ final class SoftwarePlaybackHost {
              audioTimeBase: audioTimeBaseSeconds) : nil
          var replayGeneration = seekGeneration()
  
@@ -2664,7 +2814,7 @@ index cc00a421..7e74e93b 100644
          // Clock-arming fallback bookkeeping: a declared audio track whose
          // decoder never produces buffers (corrupt stream) must not leave
          // the session unarmed forever. See the video-branch arming below.
-@@ -3831,7 +4092,7 @@ final class SoftwarePlaybackHost {
+@@ -3839,7 +4100,7 @@ final class SoftwarePlaybackHost {
          // not eat a rebuffer pause at every session start.
          var everHadLead = false
          var parkedSeekGeneration = seekGeneration()
@@ -2673,7 +2823,7 @@ index cc00a421..7e74e93b 100644
          // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
          // is the pacing input and only exists where audio is decoupled, so a live session's line read
          // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
-@@ -4002,7 +4263,7 @@ final class SoftwarePlaybackHost {
+@@ -4010,7 +4271,7 @@ final class SoftwarePlaybackHost {
                  atRingEnd: true,
                  // End of media releases the hold explicitly in the read path below; there is no
                  // ring here whose end this could be read from.
@@ -2682,7 +2832,7 @@ index cc00a421..7e74e93b 100644
              ) {
              case .pauseForRebuffer:
                  rebuffering = true
-@@ -4062,7 +4323,10 @@ final class SoftwarePlaybackHost {
+@@ -4070,7 +4331,10 @@ final class SoftwarePlaybackHost {
              audioOutput: AudioOutput,
              expectedAudioEpoch: UInt64
          ) -> UInt64 {
@@ -2693,7 +2843,7 @@ index cc00a421..7e74e93b 100644
                  !didEvaluateInitialAVSkew,
                  firstAudioSampleSeconds.isFinite,
                  firstVideoSampleSeconds.isFinite
-@@ -4085,7 +4349,7 @@ final class SoftwarePlaybackHost {
+@@ -4093,7 +4357,7 @@ final class SoftwarePlaybackHost {
              guard let correctedEpoch = audioOutput.flush(ifEpoch: expectedAudioEpoch) else {
                  return expectedAudioEpoch
              }
@@ -2702,7 +2852,7 @@ index cc00a421..7e74e93b 100644
              armClock(
                  audioOutput,
                  resolution: correction.clockResolution,
-@@ -4191,23 +4455,44 @@ final class SoftwarePlaybackHost {
+@@ -4199,23 +4463,44 @@ final class SoftwarePlaybackHost {
              var audioEpochBeforeRead = audioOutput?.epoch ?? 0
              // And the producer's own: a seek's flush that lands between the generation check below and
              // the feed would let a pre-seek packet re-anchor the APAC bridge for the whole post-seek run.
@@ -2760,7 +2910,7 @@ index cc00a421..7e74e93b 100644
                  }
              } catch {
                  // Stop/seek cancellation is not a playback failure, including a normal .closed
-@@ -4235,7 +4520,9 @@ final class SoftwarePlaybackHost {
+@@ -4243,7 +4528,9 @@ final class SoftwarePlaybackHost {
                  // What the audio producer still holds (the APAC encoder's last packets) goes in
                  // first, so the drain below plays it too.
                  if let aDec = audioDecoder, let aOut = audioOutput {
@@ -2771,7 +2921,7 @@ index cc00a421..7e74e93b 100644
                          guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpochBeforeRead) else { break }
                      }
                  }
-@@ -4253,12 +4540,13 @@ final class SoftwarePlaybackHost {
+@@ -4261,12 +4548,13 @@ final class SoftwarePlaybackHost {
                  return !isLive
              }
  
@@ -2786,7 +2936,7 @@ index cc00a421..7e74e93b 100644
  
              // Discontinuity runs before any timestamp read; offset applied to both streams.
              if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
-@@ -4356,6 +4644,20 @@ final class SoftwarePlaybackHost {
+@@ -4364,6 +4652,20 @@ final class SoftwarePlaybackHost {
                  }
              }
  
@@ -2807,7 +2957,7 @@ index cc00a421..7e74e93b 100644
              if liveJoinAwaitsKeyframe {
                  if clockArmed() || backgroundAudioOnly() {
                      liveJoinAwaitsKeyframe = false
-@@ -4423,7 +4725,7 @@ final class SoftwarePlaybackHost {
+@@ -4431,7 +4733,7 @@ final class SoftwarePlaybackHost {
                      // requires a DECLARED audio track, not a producing one). The stream that
                      // produces NO packets at all is #337's case and exits at the read gate.
                      if !clockArmed(), let aOut = audioOutput,
@@ -2816,7 +2966,7 @@ index cc00a421..7e74e93b 100644
                          armFromVideoPacket(packet, aOut)
                      }
                      drainParkedVideoNonblocking()
-@@ -4507,7 +4809,7 @@ final class SoftwarePlaybackHost {
+@@ -4515,7 +4817,7 @@ final class SoftwarePlaybackHost {
                  reassertGateIfRefused(verdict, epoch: epochBeforeRead)
                  // Video-only / undecodable audio fallback: arm clock off first video packet (no buffer within the producer's first-buffer budget = decoder not recovering).
                  if !clockArmed(), let aOut = audioOutput,
@@ -2825,7 +2975,7 @@ index cc00a421..7e74e93b 100644
                      armFromVideoPacket(packet, aOut)
                  }
              } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
-@@ -4546,11 +4848,11 @@ final class SoftwarePlaybackHost {
+@@ -4554,11 +4856,11 @@ final class SoftwarePlaybackHost {
                      return true
                  }
                  audioPacketsSeen += 1
@@ -2839,7 +2989,7 @@ index cc00a421..7e74e93b 100644
                  }
                  audioEpochBeforeRead = applyInitialAVSkewCorrectionIfNeeded(
                      audioOutput: aOut,
-@@ -4559,7 +4861,11 @@ final class SoftwarePlaybackHost {
+@@ -4567,7 +4869,11 @@ final class SoftwarePlaybackHost {
                  // Renderer admission can clear its gate before a compressed producer decodes
                  // the tap's PCM. Both outputs must use the same packet's startup cutoff.
                  let tapStartupSnapshot = (cutoff: discardAudioBeforeSeconds, generation: startupSeekGeneration)
@@ -2852,7 +3002,7 @@ index cc00a421..7e74e93b 100644
                  let tapSink = audioTapSink()
                  // The flush can also land inside `decode`, so the buffers are checked out again.
                  if seekGeneration() != genBeforeRead {
-@@ -4574,6 +4880,12 @@ final class SoftwarePlaybackHost {
+@@ -4582,6 +4888,12 @@ final class SoftwarePlaybackHost {
                          return true
                      }
                  }
@@ -2865,7 +3015,7 @@ index cc00a421..7e74e93b 100644
                  // #95: mirrored behind the accept, so a refused buffer is not transcribed. The tap
                  // transcribes PCM, so a producer that hands the renderer compressed audio decodes it here.
                  if let tapSink {
-@@ -4588,7 +4900,7 @@ final class SoftwarePlaybackHost {
+@@ -4596,7 +4908,7 @@ final class SoftwarePlaybackHost {
                  if let last = playableBuffers.last {
                      let pts = CMSampleBufferGetPresentationTimeStamp(last)
                      if pts.isValid {
@@ -2874,7 +3024,7 @@ index cc00a421..7e74e93b 100644
                          diagAudioPtsSec = pts.seconds
                          diagAudioPtsGeneration = genBeforeRead
                      }
-@@ -4600,7 +4912,7 @@ final class SoftwarePlaybackHost {
+@@ -4608,7 +4920,7 @@ final class SoftwarePlaybackHost {
                      let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
                      let resolution = SWClockAnchorPolicy.resolve(
                          initialSeconds: initialClockTime.seconds,
@@ -2884,18 +3034,18 @@ index cc00a421..7e74e93b 100644
                      armClock(
                          aOut,
 diff --git a/Sources/AetherEngine/PlayerState.swift b/Sources/AetherEngine/PlayerState.swift
-index b134897b..69a0690d 100644
+index d26cfb1c..4a26f0ab 100644
 --- a/Sources/AetherEngine/PlayerState.swift
 +++ b/Sources/AetherEngine/PlayerState.swift
-@@ -1160,7 +1160,7 @@ public struct LoadOptions: Sendable, Equatable {
+@@ -1168,7 +1168,7 @@ public struct LoadOptions: Sendable, Equatable {
          self.progressiveSegmentDelivery = progressiveSegmentDelivery
          self.autoplay = autoplay
          self.teletextPage = teletextPage
 -        self.audioDelaySeconds = audioDelaySeconds
 +        self.audioDelaySeconds = AudioDelayPolicy.clamp(audioDelaySeconds)
+         self.audioShaping = audioShaping.clamped
          self.deinterlaceMode = deinterlaceMode
          self.deinterlaceFieldRate = deinterlaceFieldRate
-         self.preferredDecodePath = preferredDecodePath
 diff --git a/Sources/AetherEngine/Video/HLSSegmentProducer.swift b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
 index ac4e82da..123ca0d4 100644
 --- a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
@@ -3547,10 +3697,10 @@ index 2fb6580b..07e5c9e2 100644
              return
          case .sourceReplay:
 diff --git a/Sources/AetherEngine/Video/HLSVideoEngine.swift b/Sources/AetherEngine/Video/HLSVideoEngine.swift
-index 1a6ce062..ce277368 100644
+index c2cc862a..37446392 100644
 --- a/Sources/AetherEngine/Video/HLSVideoEngine.swift
 +++ b/Sources/AetherEngine/Video/HLSVideoEngine.swift
-@@ -1246,6 +1246,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -1255,6 +1255,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
      public var onSessionCacheStatusChanged: (@Sendable (SessionCacheStatus) -> Void)?
      /// #687: this session's entry in the process-wide ledger, released on `stop()`.
      private var retentionClaim: RetentionClaims.Claim?
@@ -3559,7 +3709,7 @@ index 1a6ce062..ce277368 100644
  
      /// Clamp for `forwardWindowSegments`: below 4 the window would undercut AVPlayer's own ~5-7-segment
      /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`). The 2700 ceiling (~3 h at 4 s
-@@ -1796,11 +1798,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -1805,11 +1807,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
          let retentionBudget = claim.bytes
          let segmentCache = SegmentCache(
              forwardWindow: forwardWindowSegments,
@@ -3574,7 +3724,7 @@ index 1a6ce062..ce277368 100644
          restartLock.lock()
          self.retentionBudgetBytes = retentionBudget
          self.sessionCacheVolumeSafetyLimitBytes = budget.volumeSafetyLimitBytes
-@@ -2273,6 +2276,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -2282,6 +2285,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
  
          // 6b. Run the stream-copy / FLAC-bridge / video-only cascade.
          let prod: HLSSegmentProducer
@@ -3603,7 +3753,7 @@ index 1a6ce062..ce277368 100644
          prod = try buildProducerWithAudioCascade(
              preferBridge: bridgePreferred,
              streamCopyAudio: streamCopyAudio,
-@@ -2283,8 +2308,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -2292,8 +2317,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
              audioHLSCodecs: &audioHLSCodecs,
              audioLanguage: audioLanguage
          )
@@ -3614,7 +3764,7 @@ index 1a6ce062..ce277368 100644
          // AE#458: only when the audio actually reached the variant. A cascade that fell through to
          // video-only must not advertise an audio rendition that is not in the segments, and must not
          // force the master for one either.
-@@ -3714,6 +3740,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -3723,6 +3749,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
          }
  
          let producerEpoch = nextProducerEpoch()
@@ -3623,7 +3773,7 @@ index 1a6ce062..ce277368 100644
          let prod = try HLSSegmentProducer(
              demuxer: dem,
              videoStreamIndex: videoStreamIndex,
-@@ -3744,7 +3772,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -3753,7 +3781,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
              packedSideAudioStartPts: packedSideAudioStartPts,
              packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
              bufferAheadSegments: forwardWindowSegments,
@@ -3632,7 +3782,7 @@ index 1a6ce062..ce277368 100644
              // AE#222: nil until a pump proved this source cuts its first segment before any audio packet
              // arrives; from then on every producer of the session muxes moov from this frame.
              audioMoovPrimeFrame: sessionAudioMoovPrimeFrame,
-@@ -3757,6 +3785,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -3766,6 +3794,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
              servesSegmentsProgressively: servesSegmentsProgressively,
              epoch: producerEpoch
          )
@@ -3645,7 +3795,7 @@ index 1a6ce062..ce277368 100644
          // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
          // below. The side readers read one gate for the whole session, so a restart must not leave
          // a gap where nobody claims the link.
-@@ -5206,8 +5240,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -5215,8 +5249,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
          // seek fails fast instead of racing teardown.
          let seekStart = DispatchTime.now()
          // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
@@ -3659,7 +3809,7 @@ index 1a6ce062..ce277368 100644
              activeDem.seek(to: absoluteTargetSeconds)
          }
          // AE#782: after the seek, so a container whose seek reads (a TS bisection) spends none of it.
-@@ -5285,9 +5322,13 @@ extension HLSVideoEngine {
+@@ -5294,9 +5331,13 @@ extension HLSVideoEngine {
      func seekToInitialProducerStart(_ dem: Demuxer) {
          let plan = segmentPlan
          guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return }
@@ -4761,10 +4911,10 @@ index cdb432bb..9815ea92 100644
      @Test("every route says where its offset lands, and the two AVPlayer-owned ones say they cannot")
 diff --git a/Tests/AetherEngineTests/LiveAudioDelayTests.swift b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
 new file mode 100644
-index 00000000..323a7f15
+index 00000000..d609537d
 --- /dev/null
 +++ b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,344 @@
 +import Foundation
 +import Testing
 +import AetherLibavcodec
@@ -4966,8 +5116,15 @@ index 00000000..323a7f15
 +        try await verifyObsoleteLargeWarmup(latest: -180)
 +    }
 +
-+    /// Uses a source that cannot provide 180 s, so a successful reset cannot be stale catch-up.
-+    private func verifyObsoleteLargeWarmup(latest: Double) async throws {
++    /// A graph captured before a 180-second warmup is preempted through the existing source barrier.
++    @Test
++    func shapingInterruptsCapturedLargeWarmup() async throws {
++        try await verifyObsoleteLargeWarmup(latest: 0,
++            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
++    }
++
++    /// Drives a real HLS producer after option capture, with its outgoing source close held.
++    private func verifyObsoleteLargeWarmup(latest: Double, shaping: AudioShaping? = nil) async throws {
 +        let origin = try #require(RangeFilesOrigin())
 +        defer { origin.stop() }
 +        origin.serve("/head.ts", try LongGOPTransportStreamFixture.data(), contentType: "video/mp2t")
@@ -5007,7 +5164,8 @@ index 00000000..323a7f15
 +        defer { barrier.open() }
 +        engine.play()
 +        engine.pause()
-+        engine.setAudioDelay(latest)
++        if let shaping { engine.setAudioShaping(shaping) }
++        else { engine.setAudioDelay(latest) }
 +        try #require(engine.liveAudioDelayRejoinID != owner)
 +        try #require(try await waitFor(upTo: .seconds(5)) { barrier.entered })
 +        let requestsAtBarrier = origin.requests.count
@@ -5018,6 +5176,7 @@ index 00000000..323a7f15
 +        #expect(origin.requests.count == requestsAtBarrier,
 +            "Successor load's second teardown must retain the interrupted source-close barrier")
 +        #expect(engine.nativeVideoSession == nil)
++        if shaping != nil { engine.setAudioDelay(latest) }
 +        barrier.open()
 +        try #require(try await waitFor(upTo: .seconds(8)) {
 +            engine.nativeVideoSession != nil && engine.nativeVideoSession !== obsolete
@@ -5035,6 +5194,10 @@ index 00000000..323a7f15
 +            engine.liveAudioDelayRejoinTask == nil && engine.state == .paused
 +        })
 +        #expect(engine.audioDelaySeconds == 0)
++        if let shaping {
++            #expect(engine.nativeVideoSession?.audioShaping == shaping)
++            #expect(engine.audioShapingState == .applied)
++        }
 +        #expect(!engine.sessionPreservingReloadInFlight)
 +        #expect(!engine.needsForegroundVideoRestore)
 +        #expect(engine.loadedSidecarURL == (latest == 0 ? sidecar : nil))
@@ -5098,10 +5261,10 @@ index 00000000..323a7f15
 +}
 diff --git a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
 new file mode 100644
-index 00000000..4cee4bd8
+index 00000000..044367d9
 --- /dev/null
 +++ b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,349 @@
 +import Foundation
 +import AVFoundation
 +import Testing
@@ -5159,17 +5322,33 @@ index 00000000..4cee4bd8
 +                   "Requires the documented public native hardware-size fixture"),
 +          arguments: [180.0, -180.0, 2.5, -2.5, 3.0, -3.0, 30.0, -30.0])
 +    func actualNativePlaybackAndSeek(delay: Double) async throws {
++        try await verifyNativePlaybackAndSeek(delay: delay, shaping: AudioShaping())
++    }
++
++    /// Active shaping replaces stream copy with the PCM bridge without weakening finite-gap seeks.
++    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
++                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
++                   "Requires the documented public native hardware-size fixture"),
++          arguments: [2.5, -3.0, 30.0, -30.0])
++    func shapedNativePlaybackAndSeek(delay: Double) async throws {
++        try await verifyNativePlaybackAndSeek(delay: delay,
++            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
++    }
++
++    /// Shared actual-playback assertions keep the shaped and original stream-copy axes comparable.
++    private func verifyNativePlaybackAndSeek(delay: Double, shaping: AudioShaping) async throws {
 +        let url = FileManager.default.temporaryDirectory.appendingPathComponent("native-delay-\(UUID()).mp4")
 +        let titleDuration = try IndexedAudioDelayFixture.write(to: url, repetitions: 2,
 +            inputURL: try #require(Self.physicalFixtureURL))
 +        let engine = try AetherEngine()
 +        defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
-+        try await engine.load(url: url, options: LoadOptions(sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay))
++        try await engine.load(url: url, options: LoadOptions(sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay, audioShaping: shaping))
 +        try #require(engine.videoRoute == .loopback)
 +        let item = try #require(engine.currentAVPlayer?.currentItem)
 +        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
 +        item.add(output)
 +        try await progress(engine, beyond: 0.3)
++        if shaping.isActive { #expect(engine.audioShapingState == .applied) }
 +        #expect(engine.currentTime < 1.5, "A positive delay must not skip the opening video")
 +        #expect(output.copyPixelBuffer(forItemTime: engine.currentAVPlayer!.currentTime(), itemTimeForDisplay: nil) != nil)
 +        print("NATIVE_LARGE delay=\(delay) initial=\(engine.currentTime) item=\(engine.currentAVPlayer!.currentTime().seconds) route=\(engine.videoRoute)")
@@ -5193,18 +5372,34 @@ index 00000000..4cee4bd8
 +                   "Requires the documented public native hardware-size fixture"),
 +          arguments: [180.0, -180.0], [false, true])
 +    func fullDurationPlayback(delay: Double, live: Bool) async throws {
++        try await verifyFullDurationPlayback(delay: delay, live: live, shaping: AudioShaping())
++    }
++
++    /// Both extremes retain native video and the compensated shaping graph on a real overlap.
++    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
++                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
++                   "Requires the documented public native hardware-size fixture"),
++          arguments: [180.0, -180.0], [false, true])
++    func shapedFullDurationPlayback(delay: Double, live: Bool) async throws {
++        try await verifyFullDurationPlayback(delay: delay, live: live,
++            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
++    }
++
++    /// Uses identical clock/frame/cache assertions for the shaped bridge and unchanged audio route.
++    private func verifyFullDurationPlayback(delay: Double, live: Bool, shaping: AudioShaping) async throws {
 +        let url = FileManager.default.temporaryDirectory.appendingPathComponent("native-long-delay-\(UUID()).mp4")
 +        let titleDuration = try IndexedAudioDelayFixture.write(to: url, repetitions: 8,
 +            inputURL: live ? nil : try #require(Self.physicalFixtureURL))
 +        let engine = try AetherEngine()
 +        defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
 +        try await engine.load(url: url, options: LoadOptions(isLive: live,
-+            sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay))
++            sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay, audioShaping: shaping))
 +        try #require(engine.videoRoute == .loopback)
 +        let item = try #require(engine.currentAVPlayer?.currentItem)
 +        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
 +        item.add(output)
 +        try #require(try await waitFor(upTo: .seconds(10)) { engine.currentAVPlayer!.currentTime().seconds > 0.3 })
++        if shaping.isActive { #expect(engine.audioShapingState == .applied) }
 +        let observed = engine.currentTime
 +        try await progress(engine, beyond: observed + 0.2)
 +        try await decodedProgress(engine, output: output)
@@ -5311,6 +5506,102 @@ index 00000000..4cee4bd8
 +        #expect(!engine.sessionPreservingReloadInFlight)
 +        engine.play()
 +        try await progress(engine, beyond: 0.2)
++    }
++
++    /// An initial producer has captured its graph by its first worker read. A late preference is
++    /// replayed only after that load unwinds; stop or a replacement invalidates the pending owner.
++    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
++                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
++                   "Requires the documented public native hardware-size fixture"),
++          arguments: ["finish", "stop", "replace"])
++    func initialCapturedShapingReconcilesOnlyCurrentSource(action: String) async throws {
++        let url = try #require(Self.physicalFixtureURL)
++        let gate = ProbeTestGate()
++        let reader = ProbeRecordingReader(data: try Data(contentsOf: url), afterRead: {
++            if Thread.current.name == "AetherEngine.HLSSegmentProducer.pump" { gate.wait() }
++        }, afterCancel: { gate.open() })
++        let engine = try AetherEngine()
++        defer { gate.open(); engine.stop() }
++        let loading = Task { @MainActor in
++            try await engine.load(source: .custom(reader, formatHint: "mp4"),
++                                  options: LoadOptions(autoplay: false, audioDelaySeconds: 3))
++        }
++        try #require(try await waitFor(upTo: .seconds(8)) { gate.entered })
++        #expect(engine.state == .loading)
++        let shaping = AudioShaping(dialogueGainDB: 6, compressor: .night)
++        engine.setAudioShaping(shaping)
++        #expect(engine.pendingAudioShapingGeneration == engine.loadGeneration)
++        #expect(engine.liveAudioDelayRejoinID == nil)
++        switch action {
++        case "stop": engine.stop()
++        case "replace":
++            try await engine.load(url: url, options: LoadOptions(autoplay: false))
++        default: gate.open()
++        }
++        _ = try? await loading.value
++        if action == "finish" {
++            try #require(try await waitFor(upTo: .seconds(10)) {
++                engine.nativeVideoSession?.audioShaping == shaping
++                    && engine.liveAudioDelayRejoinTask == nil && engine.state == .paused
++            })
++            #expect(engine.audioShapingState == .applied)
++            #expect(engine.audioDelaySeconds == 3)
++            #expect(engine.nativeHost?.transportIntentIsPlaying == false)
++            engine.play()
++            try await progress(engine, beyond: 0.2)
++        } else {
++            #expect(engine.liveAudioDelayRejoinID == nil)
++            if action == "stop" { #expect(engine.state == .idle) }
++            else {
++                #expect(engine.audioShaping == AudioShaping())
++                #expect(engine.nativeVideoSession?.audioShaping == AudioShaping())
++            }
++        }
++    }
++
++    /// A queued ordinary shaping task cannot win a later stop or replacement generation.
++    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
++                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
++                   "Requires the documented public native hardware-size fixture"), arguments: [false, true])
++    func pendingShapingCannotReopenRetiredSource(replace: Bool) async throws {
++        let url = try #require(Self.physicalFixtureURL)
++        let engine = try AetherEngine()
++        defer { engine.stop() }
++        try await engine.load(url: url, options: LoadOptions(autoplay: false))
++        try #require(try await waitFor(upTo: .seconds(5)) { engine.state == .paused })
++        engine.setAudioShaping(AudioShaping(compressor: .night))
++        if replace { try await engine.load(url: url, options: LoadOptions(autoplay: false)) }
++        else { engine.stop() }
++        let generation = engine.loadGeneration
++        let session = engine.nativeVideoSession
++        try #require(try await waitFor(upTo: .seconds(5)) { !engine.audioShapingReanchorInFlight })
++        #expect(engine.loadGeneration == generation)
++        #expect(engine.nativeVideoSession === session)
++        #expect(engine.liveAudioDelayRejoinID == nil)
++        if replace { #expect(engine.audioShaping == AudioShaping()) }
++        else { #expect(engine.state == .idle) }
++    }
++
++    /// Terminal states with a retained route store a preference without silently replaying media.
++    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
++                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
++                   "Requires the documented public native hardware-size fixture"),
++          arguments: [PlaybackState.ended, .error("Test source failure")])
++    func shapingDoesNotReviveTerminalAlignment(state: PlaybackState) async throws {
++        let engine = try AetherEngine()
++        defer { engine.stop() }
++        try await engine.load(url: try #require(Self.physicalFixtureURL),
++                              options: LoadOptions(autoplay: false, audioDelaySeconds: 3))
++        try #require(try await waitFor(upTo: .seconds(5)) { engine.state == .paused })
++        let session = try #require(engine.nativeVideoSession)
++        let generation = engine.loadGeneration
++        engine.state = state
++        engine.setAudioShaping(AudioShaping(compressor: .night))
++        await Task.yield()
++        #expect(engine.state == state)
++        #expect(engine.nativeVideoSession === session)
++        #expect(engine.loadGeneration == generation)
++        #expect(engine.liveAudioDelayRejoinID == nil)
 +    }
 +
 +    /// Initial and runtime option boundaries accept the same full range and reject non-finite input.
@@ -5544,10 +5835,10 @@ index 00000000..86c70bfa
 +}
 diff --git a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
 new file mode 100644
-index 00000000..79af0b48
+index 00000000..baec5611
 --- /dev/null
 +++ b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,222 @@
 +import Foundation
 +import Testing
 +@testable import AetherEngine
@@ -5563,6 +5854,7 @@ index 00000000..79af0b48
 +
 +    /// Uses unique sources so concurrent suites cannot overwrite or tear down each other's files.
 +    private func withEngine(delay: Double, live: Bool, dvrWindow: Double? = nil,
++                            shaping: AudioShaping = AudioShaping(),
 +                            body: (AetherEngine, ProbeTestBox<[(Double, Double)]>) async throws -> Void) async throws {
 +        let url = FileManager.default.temporaryDirectory.appendingPathComponent("software-aligned-\(UUID()).ts")
 +        try await BlockingWork.detached(priority: .userInitiated) {
@@ -5572,7 +5864,7 @@ index 00000000..79af0b48
 +        defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
 +        try await engine.load(url: url, options: LoadOptions(
 +            isLive: live, dvrWindowSeconds: dvrWindow, autoplay: false,
-+            audioDelaySeconds: delay, preferredDecodePath: .software))
++            audioDelaySeconds: delay, audioShaping: shaping, preferredDecodePath: .software))
 +        try #require(engine.videoRoute == .software)
 +        let delivery = ProbeTestBox<[(Double, Double)]>([])
 +        engine.softwareHost?.observeDeliveredAudioForTesting { source, delivered in
@@ -5581,20 +5873,53 @@ index 00000000..79af0b48
 +        try await body(engine, delivery)
 +    }
 +
++    /// Live's initial clock re-anchor can precede the renderer's first handover. Establish the
++    /// baseline only after a genuine frame reaches the layer, then require additional frames.
++    private func awaitVideoProgress(_ engine: AetherEngine) async throws {
++        try await waitFor {
++            (engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0) > 0
++                || engine.errorInfo != nil
++        }
++        try #require(engine.errorInfo == nil)
++        let initial = engine.currentTime
++        let frames = engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0
++        try await waitFor {
++            (engine.currentTime > initial + 0.25
++                && (engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0) > frames)
++                || engine.errorInfo != nil
++        }
++        #expect(engine.errorInfo == nil)
++    }
++
 +    /// Both signs reach actual audio buffers while the displayed video clock continues advancing.
 +    @Test(arguments: [-180.0, 180.0], [false, true])
 +    func deliveredTimingAndVideoProgress(delay: Double, live: Bool) async throws {
 +        try await withEngine(delay: delay, live: live) { engine, delivery in
 +            if !live && delay > 0 { await engine.seek(to: 190) }
-+            let initial = engine.currentTime
 +            engine.play()
 +            try await waitFor { !delivery.value.isEmpty || engine.errorInfo != nil }
 +            try #require(engine.errorInfo == nil)
 +            let observed = try #require(delivery.value.first)
 +            #expect(abs(observed.1 - observed.0 - delay) < 0.001)
-+            try await waitFor { engine.currentTime > initial + 0.25 || engine.errorInfo != nil }
-+            #expect(engine.errorInfo == nil)
-+            #expect(engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0 > 0)
++            try await awaitVideoProgress(engine)
++            if live { #expect(engine.liveWindow?.windowSeconds == nil) }
++        }
++    }
++
++    /// Shaping's filter latency is compensated before the renderer applies the large offset once.
++    @Test(arguments: [-180.0, 180.0], [false, true])
++    func shapingPreservesDeliveredAlignment(delay: Double, live: Bool) async throws {
++        let shaping = AudioShaping(dialogueGainDB: 6, compressor: .night)
++        try await withEngine(delay: delay, live: live, shaping: shaping) { engine, delivery in
++            if !live && delay > 0 { await engine.seek(to: 190) }
++            engine.play()
++            try await waitFor { !delivery.value.isEmpty || engine.errorInfo != nil }
++            try #require(engine.errorInfo == nil)
++            let observed = try #require(delivery.value.first)
++            #expect(abs(observed.1 - observed.0 - delay) < 0.001)
++            #expect(engine.audioShapingState == .applied)
++            #expect(engine.softwareHost?.audioShaping == shaping)
++            try await awaitVideoProgress(engine)
 +            if live { #expect(engine.liveWindow?.windowSeconds == nil) }
 +        }
 +    }

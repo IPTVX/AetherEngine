@@ -200,7 +200,7 @@ extension AetherEngine {
     /// Retires an obsolete owned warmup before reopening. Normal teardown invalidates callbacks and
     /// cancels the old task first; the successor load then awaits that exact source-close barrier.
     /// This deliberately does not retune an unrelated initial load.
-    private func interruptAudioDelayWarmup() {
+    func interruptAudioDelayWarmup() {
         if isCustomSource, !customSourceIsSeekable, !(customReader is HLSLiveIngestReader) { return }
         var selection = snapshotReloadSelection(over: audioDelayRebuildSelection)
         if let priorIntent = audioDelayRebuildSubtitleIntentGeneration,
@@ -228,7 +228,7 @@ extension AetherEngine {
     /// Coalesces corrections onto owned session-preserving reloads (fresh-edge rejoins for Live). Every pass reads the latest requested
     /// offset; a change after the producer captured it requires another pass. URL and reconstructible
     /// HLS-ingest sources reopen; a genuinely forward-only custom source is explicitly refused.
-    private func rebuildForAudioDelay(after predecessor: Task<Void, Never>? = nil) {
+    func rebuildForAudioDelay(after predecessor: Task<Void, Never>? = nil) {
         if liveAudioDelayRejoinID != nil { return }
         if let refusal = sessionReloadRefusal, !(customReader is HLSLiveIngestReader) {
             EngineLog.emit(
@@ -263,6 +263,7 @@ extension AetherEngine {
                   self.liveAudioDelayRejoinID == ownerID, !Task.isCancelled else { return }
             repeat {
                 let delay = self.loadedOptions.audioDelaySeconds
+                let shaping = self.loadedOptions.audioShaping
                 let context = LiveAudioDelayRejoinContext(ownerID: ownerID, generation: self.loadGeneration)
                 do {
                     try await LiveAudioDelayRejoinContext.$current.withValue(context) {
@@ -282,7 +283,11 @@ extension AetherEngine {
                     : (self.nativeVideoSession?.audioDelaySeconds ?? delay)
                 EngineLog.emit("[AetherEngine] AE#464: rebuilt session with audio delay \(Self.ms(delivered))",
                                category: .engine)
-                if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds) { return }
+                let deliveredShaping = self.videoRoute == .software
+                    ? (self.softwareHost?.audioShaping ?? shaping)
+                    : (self.nativeVideoSession?.audioShaping ?? shaping)
+                if !AudioDelayPolicy.isChange(from: delivered, to: self.loadedOptions.audioDelaySeconds),
+                   deliveredShaping == self.loadedOptions.audioShaping { return }
             } while self.videoRoute == .loopback || self.videoRoute == .software
         }
     }

@@ -13,6 +13,7 @@ struct SoftwareLargeAudioDelayTests {
 
     /// Uses unique sources so concurrent suites cannot overwrite or tear down each other's files.
     private func withEngine(delay: Double, live: Bool, dvrWindow: Double? = nil,
+                            shaping: AudioShaping = AudioShaping(),
                             body: (AetherEngine, ProbeTestBox<[(Double, Double)]>) async throws -> Void) async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("software-aligned-\(UUID()).ts")
         try await BlockingWork.detached(priority: .userInitiated) {
@@ -22,7 +23,7 @@ struct SoftwareLargeAudioDelayTests {
         defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
         try await engine.load(url: url, options: LoadOptions(
             isLive: live, dvrWindowSeconds: dvrWindow, autoplay: false,
-            audioDelaySeconds: delay, preferredDecodePath: .software))
+            audioDelaySeconds: delay, audioShaping: shaping, preferredDecodePath: .software))
         try #require(engine.videoRoute == .software)
         let delivery = ProbeTestBox<[(Double, Double)]>([])
         engine.softwareHost?.observeDeliveredAudioForTesting { source, delivered in
@@ -31,20 +32,53 @@ struct SoftwareLargeAudioDelayTests {
         try await body(engine, delivery)
     }
 
+    /// Live's initial clock re-anchor can precede the renderer's first handover. Establish the
+    /// baseline only after a genuine frame reaches the layer, then require additional frames.
+    private func awaitVideoProgress(_ engine: AetherEngine) async throws {
+        try await waitFor {
+            (engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0) > 0
+                || engine.errorInfo != nil
+        }
+        try #require(engine.errorInfo == nil)
+        let initial = engine.currentTime
+        let frames = engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0
+        try await waitFor {
+            (engine.currentTime > initial + 0.25
+                && (engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0) > frames)
+                || engine.errorInfo != nil
+        }
+        #expect(engine.errorInfo == nil)
+    }
+
     /// Both signs reach actual audio buffers while the displayed video clock continues advancing.
     @Test(arguments: [-180.0, 180.0], [false, true])
     func deliveredTimingAndVideoProgress(delay: Double, live: Bool) async throws {
         try await withEngine(delay: delay, live: live) { engine, delivery in
             if !live && delay > 0 { await engine.seek(to: 190) }
-            let initial = engine.currentTime
             engine.play()
             try await waitFor { !delivery.value.isEmpty || engine.errorInfo != nil }
             try #require(engine.errorInfo == nil)
             let observed = try #require(delivery.value.first)
             #expect(abs(observed.1 - observed.0 - delay) < 0.001)
-            try await waitFor { engine.currentTime > initial + 0.25 || engine.errorInfo != nil }
-            #expect(engine.errorInfo == nil)
-            #expect(engine.softwareHost?.videoRendererForTesting.takeCadence().handedOver ?? 0 > 0)
+            try await awaitVideoProgress(engine)
+            if live { #expect(engine.liveWindow?.windowSeconds == nil) }
+        }
+    }
+
+    /// Shaping's filter latency is compensated before the renderer applies the large offset once.
+    @Test(arguments: [-180.0, 180.0], [false, true])
+    func shapingPreservesDeliveredAlignment(delay: Double, live: Bool) async throws {
+        let shaping = AudioShaping(dialogueGainDB: 6, compressor: .night)
+        try await withEngine(delay: delay, live: live, shaping: shaping) { engine, delivery in
+            if !live && delay > 0 { await engine.seek(to: 190) }
+            engine.play()
+            try await waitFor { !delivery.value.isEmpty || engine.errorInfo != nil }
+            try #require(engine.errorInfo == nil)
+            let observed = try #require(delivery.value.first)
+            #expect(abs(observed.1 - observed.0 - delay) < 0.001)
+            #expect(engine.audioShapingState == .applied)
+            #expect(engine.softwareHost?.audioShaping == shaping)
+            try await awaitVideoProgress(engine)
             if live { #expect(engine.liveWindow?.windowSeconds == nil) }
         }
     }

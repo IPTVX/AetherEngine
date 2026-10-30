@@ -55,17 +55,33 @@ struct NativeLargeAudioDelayTests {
                    "Requires the documented public native hardware-size fixture"),
           arguments: [180.0, -180.0, 2.5, -2.5, 3.0, -3.0, 30.0, -30.0])
     func actualNativePlaybackAndSeek(delay: Double) async throws {
+        try await verifyNativePlaybackAndSeek(delay: delay, shaping: AudioShaping())
+    }
+
+    /// Active shaping replaces stream copy with the PCM bridge without weakening finite-gap seeks.
+    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
+                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
+                   "Requires the documented public native hardware-size fixture"),
+          arguments: [2.5, -3.0, 30.0, -30.0])
+    func shapedNativePlaybackAndSeek(delay: Double) async throws {
+        try await verifyNativePlaybackAndSeek(delay: delay,
+            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
+    }
+
+    /// Shared actual-playback assertions keep the shaped and original stream-copy axes comparable.
+    private func verifyNativePlaybackAndSeek(delay: Double, shaping: AudioShaping) async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("native-delay-\(UUID()).mp4")
         let titleDuration = try IndexedAudioDelayFixture.write(to: url, repetitions: 2,
             inputURL: try #require(Self.physicalFixtureURL))
         let engine = try AetherEngine()
         defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
-        try await engine.load(url: url, options: LoadOptions(sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay))
+        try await engine.load(url: url, options: LoadOptions(sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay, audioShaping: shaping))
         try #require(engine.videoRoute == .loopback)
         let item = try #require(engine.currentAVPlayer?.currentItem)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output)
         try await progress(engine, beyond: 0.3)
+        if shaping.isActive { #expect(engine.audioShapingState == .applied) }
         #expect(engine.currentTime < 1.5, "A positive delay must not skip the opening video")
         #expect(output.copyPixelBuffer(forItemTime: engine.currentAVPlayer!.currentTime(), itemTimeForDisplay: nil) != nil)
         print("NATIVE_LARGE delay=\(delay) initial=\(engine.currentTime) item=\(engine.currentAVPlayer!.currentTime().seconds) route=\(engine.videoRoute)")
@@ -89,18 +105,34 @@ struct NativeLargeAudioDelayTests {
                    "Requires the documented public native hardware-size fixture"),
           arguments: [180.0, -180.0], [false, true])
     func fullDurationPlayback(delay: Double, live: Bool) async throws {
+        try await verifyFullDurationPlayback(delay: delay, live: live, shaping: AudioShaping())
+    }
+
+    /// Both extremes retain native video and the compensated shaping graph on a real overlap.
+    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
+                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
+                   "Requires the documented public native hardware-size fixture"),
+          arguments: [180.0, -180.0], [false, true])
+    func shapedFullDurationPlayback(delay: Double, live: Bool) async throws {
+        try await verifyFullDurationPlayback(delay: delay, live: live,
+            shaping: AudioShaping(dialogueGainDB: 6, compressor: .night))
+    }
+
+    /// Uses identical clock/frame/cache assertions for the shaped bridge and unchanged audio route.
+    private func verifyFullDurationPlayback(delay: Double, live: Bool, shaping: AudioShaping) async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("native-long-delay-\(UUID()).mp4")
         let titleDuration = try IndexedAudioDelayFixture.write(to: url, repetitions: 8,
             inputURL: live ? nil : try #require(Self.physicalFixtureURL))
         let engine = try AetherEngine()
         defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
         try await engine.load(url: url, options: LoadOptions(isLive: live,
-            sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay))
+            sessionCacheByteBudget: 256 << 20, autoplay: true, audioDelaySeconds: delay, audioShaping: shaping))
         try #require(engine.videoRoute == .loopback)
         let item = try #require(engine.currentAVPlayer?.currentItem)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         item.add(output)
         try #require(try await waitFor(upTo: .seconds(10)) { engine.currentAVPlayer!.currentTime().seconds > 0.3 })
+        if shaping.isActive { #expect(engine.audioShapingState == .applied) }
         let observed = engine.currentTime
         try await progress(engine, beyond: observed + 0.2)
         try await decodedProgress(engine, output: output)
@@ -207,6 +239,102 @@ struct NativeLargeAudioDelayTests {
         #expect(!engine.sessionPreservingReloadInFlight)
         engine.play()
         try await progress(engine, beyond: 0.2)
+    }
+
+    /// An initial producer has captured its graph by its first worker read. A late preference is
+    /// replayed only after that load unwinds; stop or a replacement invalidates the pending owner.
+    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
+                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
+                   "Requires the documented public native hardware-size fixture"),
+          arguments: ["finish", "stop", "replace"])
+    func initialCapturedShapingReconcilesOnlyCurrentSource(action: String) async throws {
+        let url = try #require(Self.physicalFixtureURL)
+        let gate = ProbeTestGate()
+        let reader = ProbeRecordingReader(data: try Data(contentsOf: url), afterRead: {
+            if Thread.current.name == "AetherEngine.HLSSegmentProducer.pump" { gate.wait() }
+        }, afterCancel: { gate.open() })
+        let engine = try AetherEngine()
+        defer { gate.open(); engine.stop() }
+        let loading = Task { @MainActor in
+            try await engine.load(source: .custom(reader, formatHint: "mp4"),
+                                  options: LoadOptions(autoplay: false, audioDelaySeconds: 3))
+        }
+        try #require(try await waitFor(upTo: .seconds(8)) { gate.entered })
+        #expect(engine.state == .loading)
+        let shaping = AudioShaping(dialogueGainDB: 6, compressor: .night)
+        engine.setAudioShaping(shaping)
+        #expect(engine.pendingAudioShapingGeneration == engine.loadGeneration)
+        #expect(engine.liveAudioDelayRejoinID == nil)
+        switch action {
+        case "stop": engine.stop()
+        case "replace":
+            try await engine.load(url: url, options: LoadOptions(autoplay: false))
+        default: gate.open()
+        }
+        _ = try? await loading.value
+        if action == "finish" {
+            try #require(try await waitFor(upTo: .seconds(10)) {
+                engine.nativeVideoSession?.audioShaping == shaping
+                    && engine.liveAudioDelayRejoinTask == nil && engine.state == .paused
+            })
+            #expect(engine.audioShapingState == .applied)
+            #expect(engine.audioDelaySeconds == 3)
+            #expect(engine.nativeHost?.transportIntentIsPlaying == false)
+            engine.play()
+            try await progress(engine, beyond: 0.2)
+        } else {
+            #expect(engine.liveAudioDelayRejoinID == nil)
+            if action == "stop" { #expect(engine.state == .idle) }
+            else {
+                #expect(engine.audioShaping == AudioShaping())
+                #expect(engine.nativeVideoSession?.audioShaping == AudioShaping())
+            }
+        }
+    }
+
+    /// A queued ordinary shaping task cannot win a later stop or replacement generation.
+    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
+                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
+                   "Requires the documented public native hardware-size fixture"), arguments: [false, true])
+    func pendingShapingCannotReopenRetiredSource(replace: Bool) async throws {
+        let url = try #require(Self.physicalFixtureURL)
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        try await engine.load(url: url, options: LoadOptions(autoplay: false))
+        try #require(try await waitFor(upTo: .seconds(5)) { engine.state == .paused })
+        engine.setAudioShaping(AudioShaping(compressor: .night))
+        if replace { try await engine.load(url: url, options: LoadOptions(autoplay: false)) }
+        else { engine.stop() }
+        let generation = engine.loadGeneration
+        let session = engine.nativeVideoSession
+        try #require(try await waitFor(upTo: .seconds(5)) { !engine.audioShapingReanchorInFlight })
+        #expect(engine.loadGeneration == generation)
+        #expect(engine.nativeVideoSession === session)
+        #expect(engine.liveAudioDelayRejoinID == nil)
+        if replace { #expect(engine.audioShaping == AudioShaping()) }
+        else { #expect(engine.state == .idle) }
+    }
+
+    /// Terminal states with a retained route store a preference without silently replaying media.
+    @Test(.enabled(if: (ProcessInfo.processInfo.environment["AETHER_NATIVE_DELAY_FIXTURE"]
+                    ?? ProcessInfo.processInfo.environment["TEST_RUNNER_AETHER_NATIVE_DELAY_FIXTURE"]) != nil,
+                   "Requires the documented public native hardware-size fixture"),
+          arguments: [PlaybackState.ended, .error("Test source failure")])
+    func shapingDoesNotReviveTerminalAlignment(state: PlaybackState) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        try await engine.load(url: try #require(Self.physicalFixtureURL),
+                              options: LoadOptions(autoplay: false, audioDelaySeconds: 3))
+        try #require(try await waitFor(upTo: .seconds(5)) { engine.state == .paused })
+        let session = try #require(engine.nativeVideoSession)
+        let generation = engine.loadGeneration
+        engine.state = state
+        engine.setAudioShaping(AudioShaping(compressor: .night))
+        await Task.yield()
+        #expect(engine.state == state)
+        #expect(engine.nativeVideoSession === session)
+        #expect(engine.loadGeneration == generation)
+        #expect(engine.liveAudioDelayRejoinID == nil)
     }
 
     /// Initial and runtime option boundaries accept the same full range and reject non-finite input.

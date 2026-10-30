@@ -979,6 +979,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// `AetherEngine.setAudioDelay(_:)`, which is the same value seen from the other end.
     public var audioDelaySeconds: Double = 0
 
+    /// AE#923: shape the session's audio before it reaches the output (a channel cap, a dialogue
+    /// lift, night-mode compression). The default shapes nothing and leaves every route as it was.
+    /// Active shaping needs PCM, so a stream-copied track is bridged while it is on and the session
+    /// trades Atmos and bitstream passthrough for it; `AetherEngine.audioShapingState` says whether
+    /// it is carried. Change it mid-session with `AetherEngine.setAudioShaping(_:)`.
+    public var audioShaping: AudioShaping = AudioShaping()
+
     /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
     /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page
     /// libzvbi does not flag as a subtitle page. Only affects teletext streams (#107).
@@ -1100,6 +1107,7 @@ public struct LoadOptions: Sendable, Equatable {
         autoplay: Bool = true,
         teletextPage: Int? = nil,
         audioDelaySeconds: Double = 0,
+        audioShaping: AudioShaping = AudioShaping(),
         deinterlaceMode: DeinterlaceMode = .auto,
         deinterlaceFieldRate: DeinterlaceFieldRate = .field,
         preferredDecodePath: DecodePath = .automatic,
@@ -1161,6 +1169,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.autoplay = autoplay
         self.teletextPage = teletextPage
         self.audioDelaySeconds = AudioDelayPolicy.clamp(audioDelaySeconds)
+        self.audioShaping = audioShaping.clamped
         self.deinterlaceMode = deinterlaceMode
         self.deinterlaceFieldRate = deinterlaceFieldRate
         self.preferredDecodePath = preferredDecodePath
