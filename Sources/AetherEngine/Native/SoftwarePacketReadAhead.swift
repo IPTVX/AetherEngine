@@ -43,7 +43,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         let cacheSeekHits: UInt64
         let cacheSeekMisses: UInt64
     }
-    enum ReadError: Error { case interrupted, closed, corruptFIFO, idle }
+    enum ReadError: Error { case interrupted, closed, corruptFIFO }
 
     private let condition = NSCondition()
     /// Never acquired by a main-thread API. Serializes reset with append/pop, including the
@@ -58,8 +58,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// Aligned playback shares a fixed disk partition and waits rather than overrunning it.
     private let maximumResidentBytes: Int?
     private let forwardSeconds: Double
-    /// A forward-only Live spool keeps no cached-seek/coverage history or public DVR metadata.
-    private let forwardOnly: Bool
     /// Producer thread only. See `start()` for why this is a class the producer moves itself.
     private var producerQoS: qos_class_t = QOS_CLASS_USER_INITIATED
     /// Mirror of `producerQoS` for the consumer's diagnostics, under `condition`.
@@ -126,7 +124,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
-         maximumResidentBytes: Int? = nil, forwardOnly: Bool = false,
+         maximumResidentBytes: Int? = nil,
          initialSourceClock: Double, fifo: any SoftwarePacketStore,
          videoReorderDepth: Int? = nil,
          cacheTiming: (any SoftwarePacketCacheTimingSource)? = nil,
@@ -138,7 +136,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         self.audio = audio
         self.byteBudget = max(1, byteBudget)
         self.maximumResidentBytes = maximumResidentBytes
-        self.forwardOnly = forwardOnly
         self.forwardSeconds = max(1, forwardSeconds)
         self.sourceClock = initialSourceClock
         self.fifo = fifo
@@ -419,12 +416,11 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     }
 
     /// Consumer thread only. nil means true EOF; a seek wake is explicitly different from EOF.
-    func read(isCurrent: @Sendable () -> Bool = { true }, maximumWait: TimeInterval? = nil) throws -> SoftwareStoredPacket? {
+    func read(isCurrent: @Sendable () -> Bool = { true }) throws -> SoftwareStoredPacket? {
         condition.lock()
         let token = generation
         var waitStart: DispatchTime?
         var starvationLine: String?
-        let deadline = maximumWait.map { Date(timeIntervalSinceNow: max(0, $0)) }
         while count == 0, !ended, failure == nil, !closed, !seeking,
               token == generation, isCurrent() {
             if waitStart == nil {
@@ -433,19 +429,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                 // Wake a parked producer so it can see the waiter at its next retune point.
                 condition.broadcast()
             }
-            if let deadline {
-                let signalled = condition.wait(until: deadline)
-                if !signalled, count == 0, !closed, !seeking, token == generation, isCurrent() {
-                    if let waitStart {
-                        waitingConsumers -= 1
-                        consumerWaitEvents &+= 1
-                        consumerBlockedSeconds += Double(DispatchTime.now().uptimeNanoseconds - waitStart.uptimeNanoseconds) / 1_000_000_000
-                    }
-                    condition.unlock()
-                    // No FIFO operation/pop occurred. Idle is scheduling opportunity, never EOF.
-                    throw ReadError.idle
-                }
-            } else { condition.wait() }
+            condition.wait()
         }
         if let waitStart {
             waitingConsumers -= 1
@@ -656,11 +640,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     condition.lock()
                     if token == sourceEpoch, !closed, !sourceRepositioning {
                         copyDiskStateLocked(state)
-                        if forwardOnly {
-                            if packet.streamIndex == video.index, let seconds = videoSeconds(pts: packet.pts) {
-                                storedVideoSeconds = seconds
-                            }
-                        } else {
                         if (packet.streamIndex == video.index && cacheTiming == nil) || packet.streamIndex == audio?.index {
                             let stream = packet.streamIndex == video.index ? video : audio!
                             residency.insert(chunkID: cursor.chunkID, pts: packet.pts,
@@ -693,7 +672,6 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                             audioCoverage.insert(pts: packet.pts, duration: packet.duration, byteCount: packet.bytes.count)
                         }
                     }
-                        }
                     applyCacheTimingLocked()
                     condition.broadcast()
                     condition.unlock()

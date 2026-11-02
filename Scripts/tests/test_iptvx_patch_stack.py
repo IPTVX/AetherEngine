@@ -58,6 +58,19 @@ class PatchStackTests(unittest.TestCase):
         return {str(p.relative_to(self.root)): (p.read_bytes(), stat.S_IMODE(p.stat().st_mode))
                 for p in self.root.rglob("*") if p.is_file() and ".git" not in p.parts}
 
+    def test_single_active_patch_applies_without_withdrawn_successor(self):
+        self.patches = self.patches[:1]
+        (self.root / "new.patch").unlink()
+        with self.assertRaisesRegex(stack.PatchFailure, "Missing correction: OLD"):
+            self.run_stack()
+        self.run_stack(apply=True)
+        self.assertEqual(self.source.read_text(), "delay\n")
+        self.assertFalse((self.root / "regression.txt").exists())
+        corrected = self.snapshot()
+        self.run_stack()
+        self.run_stack(apply=True)
+        self.assert_unchanged(corrected)
+
     def test_both_missing_check_is_read_only_then_apply_is_ordered_and_idempotent(self):
         before = self.snapshot()
         with self.assertRaisesRegex(stack.PatchFailure, "Missing correction: OLD, NEW"):
