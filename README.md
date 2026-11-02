@@ -669,7 +669,7 @@ stays iOS / tvOS 16 and macOS 14, with newer calls behind `#available`. A weekly
 Xcode 26.3 (Swift 6.2), so a break there is known before a release ships, but it does not block one.
 
 This IPTVX fork retains its OS16-compatible binary dependency pins and availability paths.
-The upstream-main integration currently has a documented FFmpeg 3.12.1 binary gap; see
+The upstream-main integration pins published OS16 FFmpeg 3.12.1 binaries; see
 [the fork registry](docs/iptvx-fork-maintenance.md) before treating it as release-ready.
 
 Supplemental AV1/VP9 registration also has a narrow compile-time guard around

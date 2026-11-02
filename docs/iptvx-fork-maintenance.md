@@ -71,20 +71,44 @@ correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 The active 45-path snapshot is ported to complete upstream main
 `e1cd3d46830a04d72dbc5d61e930736bf3a1183d`, merged into published private
 `287618e1828de47fd2291f7355511b5f6a73a681`. This is a source integration branch;
-no release tag or application remote pin is changed. The earlier direct-Live
+no Aether release tag or application remote pin is changed. The earlier direct-Live
 withdrawal below remains historical: upstream PR963 now supplies the reviewed
 Live implementation as part of the complete merge, rather than restoring the
 withdrawn private patch.
 
-**Known binary gap: this integration is not release-ready and is not equivalent
-to the complete upstream runtime.** Upstream requires FFmpegBuild 3.12.1; the
-fork deliberately retains the published OS16-compatible `3.11.0-iptvx`
-(`84729c8d4e9c29b72cfa770272962dc443d7a229`) and existing private LibDovi and
-LibTrueHD pins. It therefore lacks the FFmpeg 3.11.1 AV1 forward-keyframe
-recognition fix, 3.12.0 Matroska `skip_attachments`, and 3.12.1 Matroska post-EOF
-byte/generic-seek reset. Upstream source and regression assertions remain intact;
-build success cannot establish those missing binary behaviors. An OS16-compatible
-3.12.1 binary integration is required before release equivalence can be claimed.
+The FFmpeg dependency now pins published `3.12.1-iptvx` at
+`e27734fb855d64411003896a44e58af4ed0db730` (annotated tag object
+`e5a4604fc6839fa3e6851c47be921436c87ff667`). This is the complete upstream
+3.12.1 source and patch set rebuilt with the private OS16 deployment floors.
+Private LibDovi/LibTrueHD pins and the audio-delay snapshot remain unchanged.
+
+The earlier FFmpeg 3.11 binary gap is closed for its three reproduced behaviors:
+AV1 hidden full-refresh keyframes, Matroska attachment skipping, and Matroska
+post-error byte/generic-seek recovery. All eight unchanged regression tests pass
+against both the local prepublication artifacts and the freshly resolved published
+tag, with no failures or skips. The remote checkout SHA is verified; all nine
+macOS framework binaries and `BUILD-INFO.txt` match the prepublication build byte
+for byte. This establishes those specific behaviors, not complete upstream
+runtime equivalence, missing-fixture coverage, or physical OS16 playback.
+
+A further 60 focused shaping, reload-ownership and keyframe tests pass against
+the published binaries, with zero failures or skips. The three published-binary
+runs therefore pass 145 tests in total. The ten maintenance-script tests and
+strict patch check/idempotent apply also pass; no test assertions changed.
+
+The published-binary retained matrix also passes all 77 tests in nine suites,
+with zero failures or skips, including the real native +/-180 fixture, software
++/-180, captured shaping during native warmup, generation ownership, ordinary
+Live/background audio, exclusive direct-reader routing, and native-end recovery.
+The five historical generated-fixture skips described below remain unavailable;
+this update does not claim that missing coverage.
+
+App validation against the published tag passed iOS and tvOS device-target builds
+with minimum deployment 16.0. All nine embedded FFmpeg framework UUIDs on both
+platforms match their new release slices; MetalFX remains `LC_LOAD_WEAK_DYLIB`.
+The adapter passed 189 XCTest and four Swift Testing tests with zero failures.
+No application was installed or launched. The app/harness files were restored
+byte for byte to their pre-update state; app remote pins remain unchanged.
 
 Reproduce the uncorrected baseline from published objects:
 
@@ -122,14 +146,17 @@ request exact seeks so upstream AV1 keyframe snapping cannot move their video
 position. Shaping reconciliation and upstream upscale-return settlement both
 retain their generation checks; new source loads invalidate older reload work.
 
-The first focused retained matrix passed 77 tests in nine suites, including
+At source-integration commit `b79dd5eadfa9ac0dc5f7429b00542fc09072a062`,
+the first focused retained matrix passed 77 tests in nine suites, including
 native +/-180 with its real media fixture, software +/-180, alignment epochs,
 ordinary Live/background audio, exclusive reader routing and native-end recovery.
-The unchanged binary-gap matrix executed eight tests: five passed and three
+With the then-pinned FFmpeg `3.11.0-iptvx`, the unchanged binary-gap matrix
+executed eight tests: five passed and three
 failed, with seven assertion issues. The failed methods cover AV1 delayed RAP
 recognition, Matroska read-after-error byte reposition, and attachment skipping
-(the latter tested both file and custom-reader variants). These are explicit
-release blockers, not waived assertions. The complete-main boundary matrix selected 198 tests: 193 passed, zero failed,
+(the latter tested both file and custom-reader variants). Those failures were
+release blockers and were not waived; the published 3.12.1 run above now passes
+them unchanged. The complete-main boundary matrix selected 198 tests: 193 passed, zero failed,
 and five skipped (25 XCTest plus 173 Swift Testing, including the skips). All
 retained Live delay interruption cases passed. Missing generated fixtures account
 for the skips: one AE962 final-video-tail witness and four in-band parameter-set
@@ -148,12 +175,13 @@ paths. After the documented compatibility-only resolutions, the reconstructed
 baseline plus snapshot reproduces all 1,302 tracked source/test paths byte for
 byte. Snapshot SHA256: `789872473be6c9795af703bdc41a5bc24b1e9ff0170f1bd52b5597c5d116f0cf`.
 No checker assertions were weakened. App compilation found that ordinary
-MetalFX imports produced a strong framework dependency on tvOS, where the
-framework is absent on tvOS16. Both upscale imports now use `@_weakLinked`,
+MetalFX imports produced a strong framework dependency on tvOS. Availability is
+not guaranteed across supported older tvOS versions; this audit did not inspect
+a tvOS16 runtime image. Both upscale imports now use `@_weakLinked`,
 retaining all runtime availability guards and avoiding SwiftPM unsafe linker
 flags. The device-target tvOS rebuild verified `LC_LOAD_WEAK_DYLIB` for MetalFX
 in the embedded playback framework; this is binary linkage evidence, not an
-OS16 physical playback test. Parent validation also passed final iOS and tvOS
+OS16 physical playback test. The original source-integration validation also passed iOS and tvOS
 device-target builds with minimum deployment 16.0; no app was installed or
 launched. The adapter matrix passed 189 XCTest and four Swift Testing tests before
 the import-only weak-link change. App/harness overrides were restored byte for

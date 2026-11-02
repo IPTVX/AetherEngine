@@ -4,7 +4,7 @@
 
 - Merge complete upstream e1cd3d4 while retaining full +/-180-second audio delay, OS16 floors, private traits and binary pins.
 - Port the maintained delay snapshot to upstream direct Live, background playback and exact AV1 re-anchors.
-- Known release blocker: pinned OS16 FFmpegBuild 3.11.0 lacks upstream 3.12.1 fixes; see the fork maintenance registry. No release tag is changed.
+- Close the initial FFmpeg 3.11.0 binary blocker with published OS16 `3.12.1-iptvx`; the three previously failing upstream behaviors now pass unchanged regressions. See the fork maintenance registry for provenance and remaining coverage limits. No Aether release tag or app remote pin is changed.
 
 Quick index of AetherEngine releases. Detailed per-release notes (breaking
 changes, full fix list, acknowledgements) live on

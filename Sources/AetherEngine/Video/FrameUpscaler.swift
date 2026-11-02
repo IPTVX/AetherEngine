@@ -5,7 +5,7 @@ import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Metal
-// tvOS 16 has no MetalFX framework; availability-gated callers must not require it at launch.
+// MetalFX availability is not guaranteed on older tvOS; guarded callers must not require it at launch.
 @_weakLinked import MetalFX
 import VideoToolbox
 
