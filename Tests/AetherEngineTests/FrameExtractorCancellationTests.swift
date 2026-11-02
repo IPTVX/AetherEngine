@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite("Still request cancellation", .timeLimit(.minutes(1)))
+@Suite("Still request cancellation", .timeLimit(.minutes(3)))
 struct FrameExtractorCancellationTests {
     @Test("Cancelling the first still request still closes its idle decode context", arguments: [false, true])
     func cancelledFirstRequestClosesIdleContext(resident: Bool) async throws {

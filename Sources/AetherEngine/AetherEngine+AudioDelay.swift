@@ -115,7 +115,8 @@ extension AetherEngine {
                 "[AetherEngine] AE#464: audio delay = \(Self.ms(clamped)) on the software path",
                 category: .engine
             )
-            reanchorForAudioDelay { position, _ in await self.seek(to: position, origin: .host) }
+            // Delay changes preserve the video position, including AV1 routes whose user seeks snap.
+            reanchorForAudioDelay { position, _ in await self.seek(to: position, origin: .host, exact: true) }
 
         case .segmentTimestamps:
             // A seek is NOT enough here, and measuring it is what settled the shape: seeking to the

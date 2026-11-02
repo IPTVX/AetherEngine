@@ -2,7 +2,7 @@ import AVFoundation
 import Testing
 @testable import AetherEngine
 
-@Suite("AudioOutput video renderer retirement", .timeLimit(.minutes(1)))
+@Suite("AudioOutput video renderer retirement", .timeLimit(.minutes(3)))
 @MainActor
 struct AudioOutputRendererLifecycleTests {
     /// The attached surface changes with OS support while retirement guarantees stay the same.

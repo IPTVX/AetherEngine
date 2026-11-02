@@ -53,6 +53,10 @@ let package = Package(
         .default(enabledTraits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DolbyVisionStillReshaping"]),
     ],
     dependencies: [
+        // Integration limitation: upstream e1cd3d4 requires FFmpegBuild 3.12.1.
+        // IPTVX retains the published OS16 3.11.0 binary below; AV1 forward-keyframe,
+        // Matroska attachment skipping and post-EOF seek fixes are not supplied by it.
+        // This source integration is not release-ready until an OS16 3.12.1 build exists.
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
         // No network stack, we use custom AVIO + URLSession for HTTP streams.
         // Resolved over Git rather than a local path so consumers (and

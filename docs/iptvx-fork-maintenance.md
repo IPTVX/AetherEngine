@@ -66,9 +66,102 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
-### 7.52.0 port baseline and shaping interaction
+### Complete upstream main integration — November 2, 2026
 
-The active snapshot is ported to complete upstream `7.52.0`
+The active 45-path snapshot is ported to complete upstream main
+`e1cd3d46830a04d72dbc5d61e930736bf3a1183d`, merged into published private
+`287618e1828de47fd2291f7355511b5f6a73a681`. This is a source integration branch;
+no release tag or application remote pin is changed. The earlier direct-Live
+withdrawal below remains historical: upstream PR963 now supplies the reviewed
+Live implementation as part of the complete merge, rather than restoring the
+withdrawn private patch.
+
+**Known binary gap: this integration is not release-ready and is not equivalent
+to the complete upstream runtime.** Upstream requires FFmpegBuild 3.12.1; the
+fork deliberately retains the published OS16-compatible `3.11.0-iptvx`
+(`84729c8d4e9c29b72cfa770272962dc443d7a229`) and existing private LibDovi and
+LibTrueHD pins. It therefore lacks the FFmpeg 3.11.1 AV1 forward-keyframe
+recognition fix, 3.12.0 Matroska `skip_attachments`, and 3.12.1 Matroska post-EOF
+byte/generic-seek reset. Upstream source and regression assertions remain intact;
+build success cannot establish those missing binary behaviors. An OS16-compatible
+3.12.1 binary integration is required before release equivalence can be claimed.
+
+Reproduce the uncorrected baseline from published objects:
+
+1. Check out private `287618e1828de47fd2291f7355511b5f6a73a681` in a disposable
+   repository. Save its original audio-delay snapshot with `git show`, reverse
+   that original snapshot, and commit only this scratch baseline.
+2. Merge complete upstream `e1cd3d46830a04d72dbc5d61e930736bf3a1183d` without
+   committing. Resolve compatibility-only conflicts: retain private manifest
+   floors, traits and dependency pins; combine private history with upstream
+   changelog/README; retain both `skipsContainerAttachments` and
+   `preferAudioDescriptions` in the reload option list; place upstream display
+   cadence cleanup before the existing tvOS17 availability guard.
+3. Those compatibility-only files may be restored from this integration branch:
+   `Package.swift`, `Package.resolved`, `README.md`, `CHANGELOG.md`, and
+   `DisplayCriteriaController.swift`. In `AetherEngine+ReloadWithOptions.swift`,
+   combine only the two option-list entries. Retain the OS16-safe `ProbeTestBox`
+   substitutions in `UpscalingFrameHandlerTests.swift`; its assertions are unchanged.
+   MetalFX imports in the two upstream upscale files also require weak linkage
+   for tvOS16; keep this compatibility-only resolution outside the delay snapshot.
+   No delay correction belongs in
+   this baseline.
+4. Copy the current snapshot and unchanged maintenance scripts into the scratch
+   tree. `--check` must report the missing correction. `--apply`, `--check`, and
+   a repeated `--apply` must succeed and reproduce every snapshot path exactly.
+
+The 44 retained source/test paths remain in the active correction; the 45th is
+`DirectLiveAudioDelayRoutingTests.swift`, which crosses both +/-180-second
+alignment boundaries and verifies exclusive direct-reader ownership. Ordinary
+Live uses upstream's independent fixed RAM budget (one oversized packet may be
+admitted alone after draining); large offsets retain the compressed alignment
+reader. Neither path exposes DVR. Background audio-only playback must not pause
+its clock for rebuffering, including VOD; a gap is preferable to a parked-video
+deadlock. Foreground large-delay policy is retained. Private delay re-anchors
+request exact seeks so upstream AV1 keyframe snapping cannot move their video
+position. Shaping reconciliation and upstream upscale-return settlement both
+retain their generation checks; new source loads invalidate older reload work.
+
+The first focused retained matrix passed 77 tests in nine suites, including
+native +/-180 with its real media fixture, software +/-180, alignment epochs,
+ordinary Live/background audio, exclusive reader routing and native-end recovery.
+The unchanged binary-gap matrix executed eight tests: five passed and three
+failed, with seven assertion issues. The failed methods cover AV1 delayed RAP
+recognition, Matroska read-after-error byte reposition, and attachment skipping
+(the latter tested both file and custom-reader variants). These are explicit
+release blockers, not waived assertions. The complete-main boundary matrix selected 198 tests: 193 passed, zero failed,
+and five skipped (25 XCTest plus 173 Swift Testing, including the skips). All
+retained Live delay interruption cases passed. Missing generated fixtures account
+for the skips: one AE962 final-video-tail witness and four in-band parameter-set
+rebuild cases (xPS/H.264). Their upstream fixture-enabled tests remain intact.
+The host lacks the libx264 tool needed by the exact fixture-generation recipe.
+
+After the weak-import correction, a focused recompilation and runtime run passed
+40 tests in four suites: upscale route/load/frame handling plus two actual TCP
+watchdog cases (slow-source replacement and healthy-stream preservation), with
+zero failures or skips. Earlier runtime matrices preceded only these import
+changes; no playback implementation changed afterward.
+
+The maintenance gate passes all ten script tests and proves missing-patch
+detection, application, idempotence and byte-identical reproduction of all 45
+paths. After the documented compatibility-only resolutions, the reconstructed
+baseline plus snapshot reproduces all 1,302 tracked source/test paths byte for
+byte. Snapshot SHA256: `789872473be6c9795af703bdc41a5bc24b1e9ff0170f1bd52b5597c5d116f0cf`.
+No checker assertions were weakened. App compilation found that ordinary
+MetalFX imports produced a strong framework dependency on tvOS, where the
+framework is absent on tvOS16. Both upscale imports now use `@_weakLinked`,
+retaining all runtime availability guards and avoiding SwiftPM unsafe linker
+flags. The device-target tvOS rebuild verified `LC_LOAD_WEAK_DYLIB` for MetalFX
+in the embedded playback framework; this is binary linkage evidence, not an
+OS16 physical playback test. Parent validation also passed final iOS and tvOS
+device-target builds with minimum deployment 16.0; no app was installed or
+launched. The adapter matrix passed 189 XCTest and four Swift Testing tests before
+the import-only weak-link change. App/harness overrides were restored byte for
+byte to the pre-integration local package configuration; no app remote pin changed.
+
+### Historical 7.52.0 port baseline and shaping interaction
+
+The previous snapshot was ported to complete upstream `7.52.0`
 (`db35d50e5c3d5b617551ca27ec7ef4a3d4e534e3`). Its uncorrected baseline is
 reproducible from published history: begin at
 `218c922adc1043154b16c161d41eee4fa786bf73` (the pre-correction ancestor of
