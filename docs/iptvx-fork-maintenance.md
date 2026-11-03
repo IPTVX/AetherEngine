@@ -66,9 +66,69 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
-### Complete upstream main integration — November 2, 2026
+### 7.55.0 integration — November 3, 2026
 
-The active 45-path snapshot is ported to complete upstream main
+Integrate the complete upstream `7.55.0` tag at
+`0947e295149535a918d212acc9e58fe38cdad0ba` into the already validated private
+`657c2c1c0c4bb8849f74c111e28495438c717c57`. Publish this release separately as
+`7.55.0-iptvx`; the existing `7.52.0-iptvx` annotation
+`4744a26cf8f17549de839d1954ba104e7ba87b91` and its target `657c2c1c` remain unchanged.
+The fork `main` mirrors upstream independently. Neither the later mirrored ML
+padding nor DTS:X Atmos-activator changes on upstream main belong to this release.
+
+The actual upstream delta from the already integrated `e1cd3d4` is six files:
+`AudioOutput`, its preroll regressions, engine version and release documentation.
+Buffered AirPlay routes now start the clock without a scheduled host-time lead;
+repeated rates preserve a start already issued, while pause then play can issue a
+new start. The fork retains its renderer availability paths, epoch-checked flush,
+actual delivered-timing observer and full +/-180-second correction. PR963 and
+its Live/native-end fixes were already included and are not applied twice.
+`sourceFabricatesRanges` and exact chapter-seek behavior were also already present.
+
+`Package.swift` and `Package.resolved` are byte-identical to `657c2c1c`: retain
+OS16 floors, private default traits, weak MetalFX imports, FFmpegBuild
+`3.12.1-iptvx` at `e27734fb855d64411003896a44e58af4ed0db730`, and private LibDovi
+and LibTrueHD pins. No binary rebuild is required. Ordinary Live remains separate
+from DVR and large-delay compressed alignment; background audio-only VOD must
+not hold its clock for rebuffering.
+
+The active 45-path snapshot remains byte-identical, SHA256
+`789872473be6c9795af703bdc41a5bc24b1e9ff0170f1bd52b5597c5d116f0cf`.
+It needs no rewritten context or weakened checker. Reproduce the new baseline:
+
+1. In a disposable validation tree, start from published `657c2c1c`, save and
+   reverse its active delay snapshot, and record that uncorrected scratch state.
+2. Merge the complete upstream `7.55.0` tag. Keep both private changelog history
+   and the new upstream release heading when resolving its documentation conflict;
+   source/test changes merge without conflict. Equivalently for code reproduction,
+   apply the upstream `e1cd3d4..7.55.0` source/test delta to the reversed private tree.
+3. `--check` must detect the missing correction. Apply the unchanged snapshot,
+   repeat `--check` and `--apply`, and compare every tracked source/test path.
+
+This independent reconstruction reproduces all 1,302 source/test files byte for
+byte and passes missing-patch detection, application and idempotence. The ten
+maintenance regressions pass. FlowDeck My Mac validation passes all 188 selected
+core tests: 73 clock/source/chapter tests, 77 retained delivery tests, and 38
+Live/DVR-rejoin/transport/chapter-wiring tests (174 Swift Testing plus 14 XCTest),
+with zero failures or skips. The four new upstream AirPlay/repeated-rate cases
+execute unchanged; AirPlay route latency is injected, not measured on a physical
+receiver. The native +/-180 fixture executes and observes actual delivered
+timing. All eight LiveAudioDelay tests pass, including zero/opposite-sign/shaping
+interruption and HLS source-close/header reuse. The five historical generated-
+fixture cases below remain unavailable; no missing-fixture or physical
+OS16/AirPlay playback coverage is claimed.
+
+Known 7.55 API limit: despite the resident-seek wording around
+`isSequentialOrigin`, public `seek` rejects a non-seekable sequential source before
+consulting resident data. Removing that guard is unsafe: the software cache path
+can change epochs and reposition the demuxer on a miss, while native recutting
+is blocked for sequential input. This release does not add an atomic cache-only
+seek API. Hosts must treat the public seek as unavailable and use their supported
+temporal reopen path rather than claiming resident seeks are accepted.
+
+### Historical upstream main integration — November 2, 2026
+
+The prior 45-path snapshot was ported to complete upstream main
 `e1cd3d46830a04d72dbc5d61e930736bf3a1183d`, merged into published private
 `287618e1828de47fd2291f7355511b5f6a73a681`. This is a source integration branch;
 no Aether release tag or application remote pin is changed. The earlier direct-Live
