@@ -75,7 +75,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
 | Background audio | Audio keeps playing when the app backgrounds on iOS: native AVPlayer stays alive, the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`); a paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs. tvOS tears down immediately (wedge-safe) unless a PiP window is active, which keeps the pipeline and loopback server alive; with PiP the software path keeps decoding video too (the window needs frames). Hosts gate corrective actions on the published `isSessionReady` |
-| Picture in Picture | Native path: hosts build `AVPictureInPictureController` around `currentAVPlayer`, or around the session's own `nativePlayerLayer` when they render through `bind(view:)` rather than AVKit; while `pictureInPictureActive` a native->native load hands the AVPlayerItem over in place so the window survives next-episode transitions. Software path: published `softwarePiPSource` carries the `AVSampleBufferDisplayLayer` plus transport answers on the enqueued frames' PTS axis for sample-buffer PiP. While PiP is active the software path also composites active subtitle cues (text and PGS/DVB bitmaps) into the decoded frames, so the window shows subtitles the host overlay cannot reach. On the native path, a selected bitmap track's compositions are OCR-recognized into its WebVTT rendition, so PGS subtitles render in the PiP window there as well. iOS renders sample-buffer PiP; tvOS AVKit does not evaluate sample-buffer content sources (Apple FB9751461, verified through tvOS 26) |
+| Picture in Picture | Native path: hosts build `AVPictureInPictureController` around `currentAVPlayer`, or around the session's own `nativePlayerLayer` when they render through `bind(view:)` rather than AVKit; while `pictureInPictureActive` a native->native load hands the AVPlayerItem over in place so the window survives next-episode transitions. Software path: published `softwarePiPSource` carries the `AVSampleBufferDisplayLayer` plus transport answers on the enqueued frames' PTS axis for sample-buffer PiP; `makePictureInPictureController()` builds the controller with a `SoftwarePiPPlaybackDelegate` over the engine's play, pause, skip and time range. While PiP is active the software path also composites active subtitle cues (text and PGS/DVB bitmaps) into the decoded frames, so the window shows subtitles the host overlay cannot reach. While PiP is active a bound `AetherPlayerView` shapes the software layer like the picture (aspect-fit, or aspect-fill clipped by the view) so the window mirrors it without offset or crop; a host mounting `softwarePiPSource.layer` itself sizes it the same way. On macOS the layer is laid out at the size of the system PiP window (found through public AppKit, followed on resize; the picture-shaped layout is kept when no window is found), and the system draws an opaque bar over the top of that window that no public API removes (Apple FB22411168). Ending the session closes the helper controller's window, and a load on the software path ends PiP (no hand-over as on the native path). On the native path, a selected bitmap track's compositions are OCR-recognized into its WebVTT rendition, so PGS subtitles render in the PiP window there as well. iOS renders sample-buffer PiP; tvOS AVKit does not evaluate sample-buffer content sources (Apple FB9751461, verified through tvOS 26) |
 | Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD, plus local VobSub `.idx` + `.sub` sidecars) as `CGImage`, in-band CEA-608 closed captions (field-1, from an `eia_608`/`c608` demuxable track or extracted from A53 `cc_data` embedded in the video bitstream: H.264/HEVC SEI on the native path, decoded-frame side data such as MPEG-2 on the software path, with the caption track surfacing lazily on first real caption data), DVB teletext decoded to text cues with broadcaster colour preserved and a selectable caption page (libzvbi, `LoadOptions.teletextPage` at load, `setTeletextPage(_:)` while the channel plays), external files as first-class tracks (registered, listed, selected like embedded streams), a live channel's own HLS `SUBTITLES` renditions surfaced as tracks and fetched only once one is selected, opt-in raw ASS markup + fonts; embedded-text cues harvested from the producer's own read (instant enable, no side-channel bandwidth); opt-in native WebVTT renditions (one per text track incl. load-declared external files, language-tagged) so subtitles survive PiP / AirPlay / external display (`LoadOptions.prepareNativeSubtitles`); bitmap tracks (PGS / DVB / DVD, embedded and external .sup) join as OCR-fed renditions: on-device Vision text recognition runs while the track is selected and fills a language-tagged text rendition, so bitmap subtitles survive PiP / AirPlay / external display on the native path too (lossy by design; fullscreen keeps the pixel-accurate overlay) |
 | Frames | Off-playback `FrameExtractor`: `thumbnail` (scrub preview) + `snapshot` (frame-accurate) |
 | Audio tap | Opt-in `installAudioTap()`: decoded playback audio as mono Float32 48 kHz PCM with source-PTS timestamps, off the render path (live transcription, ShazamKit); delivers on the loopback, remote-HLS (VOD + live), and software paths. The stream is bound to its session, so a session-preserving reload (audio / subtitle / disc-title switch, `reloadAtCurrentPosition`) finishes it and the host re-installs on stream end |
@@ -391,7 +391,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.55.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.56.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -456,9 +456,9 @@ Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SM
 try await player.load(url: streamURL, options: LoadOptions(isLive: true))
 try await player.load(url: streamURL, options: LoadOptions(isLive: true, dvrWindowSeconds: 1800))
 
-// IPTV channel zapping: join in ~3-6s instead of 10-18s on strict-realtime origins by letting
-// TARGETDURATION (and the live-edge holdback derived from it) track the source keyframe cadence:
-try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .fastZap))
+// Lean-back live that may wait for the full 3 x TARGETDURATION holdback before the first picture
+// (the default .fastZap join tracks the source keyframe cadence and bounds that wait):
+try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .standard))
 
 // Drive a scrubber from the live-edge fields (they tick, so they live on player.clock):
 player.clock.$seekableLiveRange   // ClosedRange<Double>?, session-relative; nil when DVR off
@@ -484,7 +484,7 @@ player.$recordingState            // .idle / .recording / .ended / .failed
 
 `startRecording(to:)` (AetherEngine#560) writes the live source to an MPEG-TS file fed from the connection the session already holds. That is the point of it rather than a detail: an IPTV plan commonly caps an account at 1 to 3 simultaneous connections, so a host that opens its own connection to record either fails outright or knocks the viewer off the channel. It is a stream copy of the source packets taken before any audio bridging, so a TrueHD or DTS channel records its original audio while playback listens to the bridged rendition, and a file cut short by a crash is still playable up to the cut. Recording follows the source rather than the playhead, so pausing or scrubbing back inside the DVR window does not interrupt it, and a `liveSourceReset` ends it cleanly rather than writing past a seam the codecs may not survive. The one route that cannot record is `nativeRemoteHLS` (`.remoteBypass`), where AVFoundation holds the source connection and the engine never sees a byte; `startRecording` throws `.unsupportedRoute` there instead of producing an empty file. Full contract in [docs/api.md](docs/api.md#recording-a-live-stream).
 
-`liveJoinProfile: .fastZap` (AetherEngine#195/#208) cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to 1.5 x the source GOP length (1 s GOPs serve 2, and so do segments up to 1.666 s; the headroom covers a broadcast's irregular GOPs, AetherEngine#670) and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; opt in for zapping UX, keep `.standard` for lean-back viewing.
+`liveJoinProfile` defaults to `.fastZap` (AetherEngine#195/#208), which cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to 1.5 x the source GOP length (1 s GOPs serve 2, and so do segments up to 1.666 s; the headroom covers a broadcast's irregular GOPs, AetherEngine#670) and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; choose `.standard` for lean-back viewing that can afford the full wait.
 
 `liveSourceReset` is live's counterpart to a terminal `state = .error`, and a host that plays live has to subscribe to it. It fires where the session cannot be revived from inside the engine and only a new URL can: a source that restarted from byte 0 (a Jellyfin transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), or an in-engine reopen transport whose budget is spent (#199). Each of those halts production first, so a dead provider stops advertising blocking reloads behind the host's back. Answer it by negotiating a fresh URL and calling `load` again, and guard that answer (one retune in flight, a minimum spacing, a bounded count per session) or a permanently dead upstream turns into a retune loop. Spend that bound out loud: a retune ladder that ends on a silent `return` leaves the same dead channel behind a counter, so surface the exhaustion the way a terminal `.error` would be surfaced.
 
@@ -525,8 +525,10 @@ no byte-offset reconnects and no tail read, the demuxer's pb is non-seekable, an
 connection surfaces as a read error rather than end-of-media so the host can re-request. Such a
 source keeps the native path instead of being forced to software, and the session serves an
 append-only `EVENT` playlist carrying the durations actually muxed, completed with `ENDLIST` at
-true source EOF. Every producer reposition is refused by construction, so **seeking is
-unavailable**: re-request the archive with a shifted start timestamp instead. `aetherctl play`
+true source EOF. Every producer reposition is refused by construction, so a seek lands only
+inside what the session already holds (the resident span that reaches the producer's frontier,
+on the native path); for any other target, and for an audio track switch, re-request the archive
+with a shifted start timestamp, passing `audioSourceStreamIndex` for the chosen track (AE#958). `aetherctl play`
 gains `--sequential-origin` / `--declared-duration` for reproducing one from macOS.
 
 ## Host setup on tvOS
@@ -644,10 +646,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.55.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.56.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.55.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.56.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -702,7 +704,7 @@ These components may be subject to third-party patent licensing. Integrators who
 To enable them, list the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.55.0",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.56.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
 ```
 

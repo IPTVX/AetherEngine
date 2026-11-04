@@ -593,10 +593,11 @@ index 1fc7c2b4bcccf4b0cf6fcac8c4513a85d12404b5..8cf1b36cd0b2ba017ccb2801fca62842
          scrubPreviewSourceGeneration = UUID()
          resumeAfterInterruption = false
          playDeferredByInterruption = false
-@@ -8400,7 +8456,11 @@ public final class AetherEngine: ObservableObject {
+@@ -8400,8 +8456,12 @@ public final class AetherEngine: ObservableObject {
          if diagnostics.sessionCacheStatus.route == .nativeRemoteHLS {
              diagnostics.sessionCacheStatus = .inactive
          }
+         stopDualLayerOutputRoute()
 -        nativeSourceTeardownTask = nativeVideoSession?.stop(reason: cacheCleanupReason)
 +        if let session = nativeVideoSession {
 +            nativeSourceTeardownTask = session.stop(reason: cacheCleanupReason)

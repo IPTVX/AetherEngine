@@ -1,5 +1,11 @@
 # Changelog
 
+## IPTVX 7.56.0 integration (2026-11-04)
+
+- Integrate complete upstream 7.56.0 (`76ad51a7`), including sequential resident-frontier seeks, fresh-load audio selection, dual-layer Dolby Vision and PiP updates.
+- Preserve iOS/tvOS 16, all private fallback and teardown paths, +/-180-second audio delay, weak MetalFX, existing traits and private FFmpegBuild 3.12.1/LibDovi/LibTrueHD binaries.
+- Port the maintained delay snapshot around the new dual-layer route teardown. Publish only the new `7.56.0-iptvx` tag; keep mirror-main commits newer than the upstream tag outside this release.
+
 ## IPTVX 7.55.0 integration (2026-11-03)
 
 - Integrate complete upstream 7.55.0 (`0947e295`), including buffered AirPlay starts and repeated-rate ownership, while preserving full +/-180-second delay and OS16 compatibility.
@@ -41,6 +47,164 @@ the public-API contract.
 - Integrated the complete upstream 7.47.0 release while retaining iOS/tvOS 16 and macOS 14. FFmpegBuild 3.9.0 preserves the upstream binaries with matching deployment metadata; LibTrueHD 3.0.0 API 2 is rebuilt at the retained floors. LibDTSX is removed. Existing object-audio and Dolby Vision still capabilities remain enabled; dual-layer composition and reference rendering remain opt-in. Source teardown stays awaitable and drains the compositor preview readers. Cold software loads preserve the resolved source origin without doubling it, while resumes retain their applied origin and legacy renderer preroll excludes held reorder frames.
 
 _Nothing yet._
+
+## [7.56.0] - 2026-11-03
+
+### Added
+
+- **The software host's PiP source now builds its own controller.**
+  `SoftwarePiPSource.makePictureInPictureController()` returns an `AVPictureInPictureController`
+  around the display layer (nil when PiP is unsupported), with a `SoftwarePiPPlaybackDelegate`
+  serving play, pause, skip and the time range from the engine's transport, as the AVPlayer path
+  gets from AVKit. Skip is clamped to the VOD duration, and the window's playback state is
+  invalidated when the engine's state or duration changes. A host no longer re-implements the
+  delegate; it still owns the controller, rebuilds it when `softwarePiPSource` changes, and sets
+  `pictureInPictureActive`.
+- **Ending a software session closes its PiP window.** The engine stops the PiP of the controller it
+  made, before the host stops, and resets `pictureInPictureActive` to false. A host with its own
+  controller closes PiP when `softwarePiPSource` becomes nil. The software path builds a new display
+  layer per load, so any load ends PiP there (no hand-over as on the native path).
+- **A bound `AetherPlayerView` shapes the software layer like the picture while PiP is active.** A PiP
+  window mirrors the layer's own geometry, so the layer takes the picture's aspect-fit rectangle
+  (`resizeAspect`, `resize`) or its aspect-fill rectangle clipped by the view (`resizeAspectFill`), and
+  returns to the full view afterwards. A `videoGravity` change during PiP re-applies it at once. A host
+  that mounts `softwarePiPSource.layer` in its own view sizes the layer itself.
+- **macOS: the software layer fits the system PiP window.** While PiP is active the layer is laid out at the
+  window's size (found through public AppKit and followed on resize; the picture-shaped layout stays when no window is
+  found), so the layer's `videoGravity` fits the picture. The system draws an opaque bar over the top of that
+  window for sample-buffer sources, which no public API removes (Apple FB22411168). A picture of another
+  aspect during PiP (16:9 to 4:3 and back) keeps the same window: AVKit resizes it to the new picture, and the
+  layer follows the window instead of falling back to the view's fit.
+- **`SoftwarePiPSource.isSupported`** says whether the system offers PiP at all; the controller helper returns
+  nil when it is false.
+- **The PiP source keeps its off-main snapshot fresh without the controller helper**, so a host using
+  `playbackDelegate` with its own content source gets current state and duration.
+- **`AetherEngine.probeDolbyVisionEnhancementLayer(url:options:)` and `prewarmDualLayerDolbyVision()`.**
+  The probe reports whether a Profile 7 source carries a FEL or MEL enhancement layer, read off the first RPU
+  without decoding. The prewarm compiles the composer shaders ahead of the first dual-layer frame, off the
+  cooperative pool. `aetherctl` gains `eltype`, `elsurvey`, `elframe` and `dmpass` for the probe, the
+  residual survey, a single-frame dump and the display-metadata passthrough check.
+- **A Profile 7 FEL source with the enhancement layer on its own PID or track now takes the dual-layer route.**
+  A UHD Blu-ray clip (base layer on PID `0x1011`, enhancement layer on `0x1015`) used to play as the base layer
+  with the RPUs folded in (Profile 8.1), and a Matroska / MP4 file with the enhancement layer as a second video
+  track played the base layer alone, because the enhancement layer never reached the decoder. With `preferDualLayerDolbyVision`
+  and the `DualLayerDolbyVision` trait the demuxer now joins the two layers into the one-unit-per-picture
+  form a single-track remux has, pairing the layers in decode order from a shared IRAP and re-anchoring after
+  every seek, and the composer runs on it unchanged. With the trait or the preference off, or when the layers
+  cannot be joined, the enhancement layer's RPUs are folded into the base layer (Profile 8.1): that is the path
+  as before for Blu-ray PIDs, and new for two-track Matroska / MP4 files, which used to play the base layer
+  alone (HDR10 when the RPUs sit in the enhancement track). The fold pairs the layers on times converted to
+  microseconds, so tracks with different timescales pair too. A base picture now waits up to 128 pictures or
+  2 s of presentation time for its RPU (was 8 pictures) before it goes out without one, Blu-ray PIDs included,
+  so a whole chunk of a chunk-interleaved MP4 pairs: a source whose enhancement layer is missing or broken
+  hands out its video up to 2 s behind the other streams.
+- **A Profile 7 FEL source can be composed on AVPlayer's own frames instead of on the software host.**
+  `LoadOptions.dualLayerRoute` (default `.softwareHost`, the route as before) takes `.avPlayerOutput` (macOS, tvOS and iOS
+  compile it; only macOS has been run) with the `DualLayerDolbyVision` trait and `preferDualLayerDolbyVision` on. AVPlayer then plays the base layer
+  and the audio from the engine's loopback stream and owns the clock, so `currentTime`, `seek(to:)`, `play()`
+  and `pause()` are its own. The engine takes the decoded frames from an `AVPlayerItemVideoOutput`, pairs each
+  with its enhancement layer (read once, in process, from the segment producer; no second connection), composes
+  them with the composer the software host uses and presents the result in a display layer on the item's
+  timebase. The dither parity of the compose kernels now follows the frame's position in the stream on this
+  route, so a run composes the same bits however its frames arrived. The default route is unchanged. It composes in place into the
+  video output's buffers (`AETHER_FEL_OUTPUT_INPLACE=0` turns that off), which takes about 113 MB off the
+  process on the Mac; the route still needs about 1.8 times the software host's memory there, most of it
+  AVPlayer's own conversion of each frame for the video output.
+
+### Changed
+
+- **A sequential origin seeks inside what the session already holds (AE#958).** `seek(to:)` on a
+  `sequentialOrigin` loopback session lands when the target lies in the resident span that reaches the
+  producer's frontier, served from the segment cache without a second request; anything outside it is
+  still rejected as `.sourceNotSeekable`, and the host requests the archive again at the target. Before,
+  every seek was rejected, although `$isSequentialOrigin` documented the in-cache case. `residentRanges`
+  on such a session now reads the muxed durations the append playlist advertises instead of the static
+  plan, which the cutter drifts from by up to a GOP.
+- **`selectAudioTrack` is ignored on a sequential origin (AE#958), with one log line.** The rebuild could
+  only reopen the source at byte 0: the native route restarted the programme from the beginning and the
+  software route ended the session on its failed reposition. Switch by loading the source again at the
+  position with `audioSourceStreamIndex` set to the chosen `TrackInfo.id`.
+- **Loopback live joins default to `.fastZap`.** `LoadOptions.liveJoinProfile` used to default to
+  `.standard`, whose first manifest waits for the full `3 x TARGETDURATION` holdback: at least 18 s, and
+  30 s on a 10 s GOP, which a strict-realtime origin can only fill in wall-clock time. A host that never
+  chose a profile now gets the bounded join. Measured with `aetherctl live --realtime`, H.264 + AAC,
+  first picture, two runs each (standard / fastZap): 1 s GOP with no backlog 18.9 / 1.8 s; 4 s GOP with
+  no backlog 18.9 / 7.2 s; 10 s GOP with no backlog 28.8 / 19.1 s; 10 s GOP after a 22 s connect burst
+  6.9 / 1.2 s. With a burst that already covers the holdback both start in about 0.4 s. `.standard`
+  stays available for lean-back viewing that can afford the wait, and `aetherctl`'s `--standard-join`
+  loads it (`--fast-zap` is still accepted).
+
+- **Dual-layer Dolby Vision enhancement chroma is upsampled with the standard's default filter.** The
+  composer read the enhancement layer's chroma with a co-sited bilinear read, which matched an
+  integer model of ETSI GS CCM 001 within one 12-bit code on only 83 to 99% of chroma samples (the worst
+  clip, with a large residual, 83% Cb and 90% Cr). It now applies the Annex B.3 default filter
+  (vertical centred, horizontal co-sited 8-tap) in integers. The same model now agrees within one 12-bit code on all chroma samples of the test clips except
+  3 Cb samples of one clip (largest error 2).
+  Luma is unchanged. An enhancement layer at the base layer's size is read exactly as before.
+- **Dolby Vision FEL frames are composed on a queue of their own, and a GPU that stops completing is reported.**
+  The video callback only records, pairs and enqueues; a paired frame waits for its GPU slot on a compose queue,
+  with two compositions in flight and the output pool reserve independent of that limit. If the queue head waits
+  four slices in a row, queued frames go out as the base layer with the RPU that keeps their mapping, and a stall
+  that lasts 600 frames, or comes back four times without 240 healthy compositions between, is reported once as
+  `VideoDecoderError.composerStalled`. The inverse-NLQ table and the MMR coefficients are read from per-frame
+  tables, and the enhancement layer is upsampled with exact weights and rounded half up (the picture differs by at
+  most one code on 0.1 to 1% of samples, the exact ties). Only with the `DualLayerDolbyVision` trait.
+- **The dual-layer route composes into the decoded base layer without the output-metadata copy.** The copy only
+  cost memory there (about 315 MB of IOSurface in the app on the Mac); single-layer paths, the enhancement
+  decoders and the software host keep it.
+- **In-place Dolby Vision FEL compose binds each plane once, as `read_write`.** The in-place path wrote the
+  composed frame into the decoded base-layer buffer by binding the same texture twice in one kernel, once to read
+  it and once to write it, which Metal does not promise to be coherent. Luma is now one 16-bit `read_write`
+  texture and chroma one 32-bit `read_write` texture (a Cb and Cr pair per texel), sharing the pool kernels'
+  bodies, so the picture is unchanged (0 of 120 frames differ on two real FEL clips, in place against the pool).
+  `read_write` on a 16-bit plane needs read/write texture tier 2, so a device that reports a lower tier composes through the output pool, at the roughly 150 MB of extra memory the
+  in-place path saves; its in-place kernels are not even compiled. One default-level log line now gives the
+  reported tier and whether in-place compose is on. Only with the `DualLayerDolbyVision` trait.
+
+### Fixed
+
+- **A sequential-origin session no longer stalls about 6 s in (AE#958).** The first append playlist was
+  released on a single segment, and AVPlayer reloads an EVENT playlist only one `TARGETDURATION` later, so
+  a first segment shorter than that ran dry first (`restarting 5.68s from end of live playlist; target
+  duration 6s`, then a 0.1 s `playbackStalled`). The gate now holds for more media than that reload
+  interval, at most 2 s past the first segment, so a stalling origin (AE#370) still starts.
+- **A live edge cushion no longer switches `.fastZap`'s bounded start off.** `liveEdgeCushionSeconds` is
+  documented to floor the bounded start at the cushion, but any cushion at all barred it, so the join
+  waited for the full holdback. On a 10 s GOP that is 45 s under `.fastZap`, and a 2.5 s "network
+  buffer" made an ITV channel wait for real-time segments until the host's watchdog restarted it, every
+  time. A shallow first window now qualifies once it holds the cushion, so the join still lands at
+  least the cushion behind the edge. Same fixture, 10 s GOP, 22 s burst, 2.5 s cushion: first picture
+  26.9 s before, 1.2 to 1.4 s after.
+
+- **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD
+  Atmos, so a DTS:X programme rendered into a bed (`objectAudioRendering`) never brought a receiver like a Sonos with
+  Continuous Audio off to Dolby MAT, and the bed played as stereo PCM. tvOS carries a bed with heights over HDMI only
+  as Dolby MAT, so an intact DTS:X bed shows as Dolby Atmos on the receiver either way. The activator now runs for
+  every rendered bed, TrueHD Atmos and DTS:X, on the AVPlayer path and the software host alike; still only on a route
+  whose every output is HDMI (#834).
+
+- **Streaked band around the picture with `upscalesLowResolutionVideo` (AE#846).** The edge fix for VideoToolbox
+  super resolution's ringing repeated one row and column of the ML output over the outer 12 samples, which reads
+  as streaks on real footage (about 27 px top and bottom on an SD DVD at 4K, on all four sides of an anamorphic
+  one). The source now gets 16 mirrored samples on each side before the ML pass and the scaled margin is cropped
+  off again, so the ringing falls in the discarded part and the edge keeps its detail. Where VT's size limit
+  leaves no room for the margin (1280 wide at 1.5x), the outer 8 output samples on that axis are a bilinear
+  scale of the source. Measured against reference frames, the edge band now matches the interior instead of
+  losing 4 to 10 dB PSNR. The timing line's `clamp` step is now `edge`.
+
+- **Data race on the muxer's lifetime fragment counters (AE#966).** `MP4SegmentMuxer` bumped its fragment byte
+  and cut totals on the pump thread while the diagnostics heartbeat read them through
+  `muxerLifetimeFragmentBytes` / `muxerFragmentCuts` with no common lock. Both totals now sit behind their own
+  lock. Diagnostics only, no change to the fragments written.
+
+- **DVB subtitles authored on a 720x576 display land where they were placed on HD video (AE#971).** The
+  decoder seeded every bitmap codec's canvas from the video, and dvbsubdec only takes its canvas from a display
+  definition segment, or the EN 300 743 default of 720x576, while the context has no size, so SD cues were
+  normalized against 1920x1080 and drawn left of centre, above the middle and too small. DVB is no longer seeded;
+  PGS is unchanged. `SubtitleImage.position` is normalized against the decoder's canvas, and `canvasSize` reports
+  the video frame for DVB, because a DVB display covers the whole picture and a 720x576 plane on HD video has
+  non-square pixels: a host that maps the canvas aspect-preserving now stretches it onto the picture instead of
+  pushing SD cues off the bottom.
 
 ## [7.55.0] - 2026-11-02
 

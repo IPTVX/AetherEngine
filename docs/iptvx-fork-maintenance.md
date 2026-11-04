@@ -66,6 +66,75 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.56.0 integration — November 4, 2026
+
+Integrate the complete upstream `7.56.0` tag at
+`76ad51a7a0a13d4844c48a90db98d6ca6abcb458` into published private
+`b7514ebbd5150e351b4659cd9c5785a834edcd05`. Publish a new immutable
+`7.56.0-iptvx`; preserve all prior release tags. Fork `main` mirrors upstream
+independently; commits after this upstream release do not enter the release.
+
+The three merge conflicts retain the private binary lock, preserve finite-Live
+resource proof beside upstream separate-layer detection, and call the new
+`stopDualLayerOutputRoute()` before the existing native source-teardown ownership
+logic. No audio-delay correction is retired. The 45-path snapshot changes only
+its teardown context to include that new route-stop call; correction behavior
+and test assertions are unchanged. Snapshot SHA256:
+`f55b60eb97adc474c1e5cf394e68b8792baf569d1a05cb400c865e266f9a24be`.
+
+`Package.swift` and `Package.resolved` remain byte-identical to `7.55.0-iptvx`:
+iOS/tvOS 16, private default traits, FFmpegBuild `3.12.1-iptvx`, LibDovi
+`2.1.0-iptvx`, LibTrueHD `3.1.0-iptvx`, and no LibDTSX or Rust dca package.
+MetalFX imports stay weak-linked. The complete upstream feature code remains,
+including opt-in dual-layer composition; the existing default trait policy is
+unchanged.
+
+Reconstruct the uncorrected baseline from published objects:
+
+1. Start from `7.55.0-iptvx`, reverse its original delay snapshot, and commit
+   only that disposable baseline.
+2. Merge complete upstream `7.56.0`. Retain the private `Package.resolved`;
+   combine the finite-Live proof with upstream separate-layer properties in
+   `Demuxer.swift`; call `stopDualLayerOutputRoute()` before the baseline's
+   `nativeSourceTeardownTask = nativeVideoSession?.stop(...)` assignment.
+3. Copy the ported snapshot and run check (must report missing), apply, check,
+   and repeated apply. Compare every tracked source/test path with the release.
+
+This reconstruction reproduces all 1,335 source/test paths byte for byte.
+Missing-patch detection, application, idempotence and all ten maintenance-script
+regressions pass without weakened checks.
+
+The 7.55 sequential-seek limitation below is superseded: public `seek` now admits
+only a native loopback sequential target inside the resident span reaching the
+highest cached frontier, using actual muxed segment durations. Detached older
+spans remain refused. `seek(to:exact:)` is asynchronous but does not throw;
+`seekEvents` distinguishes `.rejected(.sourceNotSeekable)`, `.stalled`,
+`.superseded`, and `.landed(renderedTime:)`. Awaiting the call alone does not
+prove landing. Host temporal reconstruction remains the fallback outside the
+frontier or when positioning fails. Sequential audio changes require fresh load
+with `audioSourceStreamIndex` (container stream index, not a display-list offset);
+`selectAudioTrack` explicitly refuses sequential rebuilds.
+
+FlowDeck My Mac validation passes 212 selected runtime tests with zero failures
+or skips: 84 retained delivery/shaping/sequential tests, followed by 128 new
+release-boundary tests (126 Swift Testing plus two XCTest). The retained matrix
+uses the documented real native media fixture, with matching SHA256, and
+executes both signed 180-second native/software cases and interruption/reset
+ownership. New coverage includes actual muxed sequential ranges, fresh-load
+audio policy, PiP transport/area tracking, layer joining/detection, video packet
+history/taps, DVB subtitle canvas, bounded startup cushion and Atmos route policy.
+The default-disabled `DualLayerDolbyVision` trait's specialized compositor tests
+are not included, and no physical Dolby Vision/PiP/AirPlay or OS16 playback is
+claimed. The five historical generated-fixture cases remain outside this focused
+matrix; their missing coverage is not promoted to a pass.
+
+The complete core test targets also compile through FlowDeck for iOS and tvOS
+with deployment targets explicitly retained at 16.0. Both device-platform
+binaries report `LC_BUILD_VERSION` minimum 16.0 and `LC_LOAD_WEAK_DYLIB` for
+MetalFX. These are build-only gates: no app was installed or launched on either
+device. Fresh FlowDeck resolution verifies FFmpegBuild at `e27734fb`, LibDovi
+at `631c9d2c`, LibTrueHD at `a7d28d71`, and SMBClient at `e636c2b2`.
+
 ### 7.55.0 integration — November 3, 2026
 
 Integrate the complete upstream `7.55.0` tag at
