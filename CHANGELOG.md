@@ -48,6 +48,114 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.58.0] - 2026-11-05
+
+### Added
+
+- **Hosts can read whether the source is progressive or interlaced (AE#983).** `sourceVideoScan`
+  publishes a `VideoScan` (`.progressive`, `.interlaced(VideoFieldOrder)`, `.unknown`) at load from
+  the evidence the routing reads: the field order, the H.264 SPS fallback (#150) and the
+  decoded-frame sample (#232), so a panel no longer guesses "1080p" from the height of a 1080i
+  source. On the software path `decodedVideoFormat.deinterlace` names the deinterlacer in the frame
+  path (filter, hardware or not, field or frame rate), enough for "1080i, deinterlaced to 50 fps".
+
+### Fixed
+
+- **The app froze for about 4 s when an upscaled video started (`upscalesLowResolutionVideo`, AE#846).** The
+  software host built the upscale stage on the main thread during `load()`, and starting VideoToolbox super
+  resolution loads its model on the Neural Engine through a synchronous XPC, about 4 s cold on Apple TV, long
+  enough for the watchdog to kill the app now and then. The stage is now built on its own queue and frames go
+  out as decoded until it is ready (`[Upscale] stage built in ... ms`). A stage that cannot be built now
+  switches itself off like a failing one, so `$activeUpscale` reports it, the plan is remembered for the
+  process and a URL VOD session that only the stage put on the software path returns to the native path.
+
+## [7.57.0] - 2026-11-05
+
+### Added
+
+- **Hosts can observe the selected secondary subtitle identity.**
+  `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external
+  track IDs across selection, clearing and rebuild restoration. One-shot URL selections have no
+  ID. A registered external ID publishes when its decoded replacement commits, so it always
+  names the cues on screen. The same track may still be selected in both channels.
+
+- **Hosts can opt out of background scrub-still generation.**
+  `LoadOptions.generatesBackgroundScrubPreviews` controls the idle sparse
+  scrub-still ladder and its side reader. It defaults to true, is correctable by reload,
+  and leaves I-frame playlists, on-demand snapshots and item-swap held pictures unchanged.
+
+- **Hosts can read Dolby Vision base-layer source capabilities.** `sourceDVBLCompatID` and
+  `sourceDolbyVisionBaseLayerPresentable` expose the engine's existing probe results read-only,
+  so a host can offer a source-appropriate choice without inferring it from the profile alone.
+  They describe the source, not the display's output; routing and reload refusal are unchanged.
+
+### Changed
+
+- **TrueHD Atmos is built from the stream's own lossless 7.1, steered by its objects (AE#731).**
+  With the `TrueHDObjectAudio` trait, `objectAudioRendering` no longer decodes the object presentation
+  exactly and mixes its objects. `BedRegression` builds every output as a per-band linear combination
+  of the stream's channel presentation (Dolby's lossless 7.1 or 5.1), `W = R · A`, with `A` the
+  regression of the object presentation on the bed and `R` the elements' layout gains; the elements
+  are decoded without matrix interpolation and used only as statistics, every element is a point source
+  (size, snap, zones, screen anchoring and the elevation switch are no longer read) and metadata updates
+  apply without a ramp. A per-band energy bound (0.9 to 1.6 times the bed) keeps an element the decode
+  got wrong from adding energy. Against the exact render on ten films and Dolby's Unfold the heights
+  stayed within 0.15 dB at a correlation of 0.997 and above on all but two extreme windows, and an A/B
+  on an Apple TV into a Sonos Arc heard no difference. Needs LibTrueHD 3.2.0, whose binary leaves
+  the interpolating decode out. The latency is 2048 frames, kept off the timeline.
+
+- **DTS:X is built from its own bed, steered by its heights.** With the `DTSXObjectAudio` trait the
+  heights are no longer subtracted from the 7.1 bed and played as channels of their own. The decoder
+  hands over the bed as coded, the heights still folded into it, and `BedRegression` builds every
+  output from that bed in a new fold mode, `W = D + (R − D · F) · A`: the bed on its own speakers, and
+  each height moving the part of the bed the regression attributes to it from the speaker it is folded
+  into to its own. The heights are statistics only. Against the exact separation on 21 windows of
+  seven DTS:X films the heights stayed within 0.14 dB at a correlation of 0.994 and above wherever
+  they carry 0.3 % of the energy or more, 29 to 49 dB overall. Folded beds use an energy bound of 0.5
+  to 2.5 times the bed. Needs FFmpegBuild 3.13.0, whose `x_heights` no longer subtracts the fold.
+
+- **Object audio can no longer mix an element signal into an output.** The object renderer is now
+  `ObjectAudioPlacement`: it keeps each element's gains towards the layout from its metadata and
+  mixes no audio, and metadata ramps are gone with it (updates already applied as jumps). A block
+  that arrives without its bed plays as silence, for every decoder; the path that panned element
+  signals onto the speakers, which neither the TrueHD nor the DTS:X decoder reached any more, is
+  removed from the build.
+
+### Fixed
+
+- **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
+  streams use the existing successor-PTS model with depth one, avoiding millisecond holes
+  from rounded Matroska durations. Disk and memory stores share the qualification; missing/late
+  PTS and genuine discontinuities remain conservative, and the last frame has no invented end.
+  WMV3 and other codec qualifications are unchanged.
+
+- **Failed external secondary-subtitle replacement preserves the active track.**
+  Previously the old track was torn down before the candidate could decode. Preparation now
+  completes before replacing it; decode or bitmap-decoder creation failure leaves the old cues,
+  ASS header, identity and bitmap packet source intact. Rebuilds preserve a pending pick.
+  Only a current successful candidate commits. Clearing/stopping still releases immediately;
+  one-shot URL selection is unchanged.
+
+- **A fabricated Range verdict is visible before its failed read returns.** Record the origin
+  before waking the reader, so immediate error classification and the VOD no-revive decision
+  cannot race transfer cleanup. Cancellation and origin-ticket release remain outside the
+  reader's window lock; Range detection and retry policy are unchanged.
+
+- **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
+  `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed
+  true under a viewer's pause. Every path gated on it then restarted the paused title: the
+  item-death reload, the media-playlist fallback, the interruption-ended resume and the session
+  rebuild. The host now mirrors `AVPlayer.rateDidChangeNotification` when the reason is
+  `setRateCalled` and the current item is ready to play, reading the live rate; any other or
+  missing reason, and any rate write while an item is still loading, leaves the intent alone.
+
+- **A paused software session shows its picture after a rebuild or a paused mount (#973).** The
+  software host started decoding only on `play()`, so a `load` with `autoplay = false` and every
+  rebuild of a paused session (`setAudioShaping`, `setAudioDelay`, `reloadAtCurrentPosition`, which
+  all mount paused) stopped at `startup 7/8 ready` with `hasFirstFrameReadyForDisplay` false until
+  the viewer pressed play. The mount now pauses the host, and a pause of a loaded host that never
+  played decodes the frame at the playhead under the stopped clock (the Sodalite#104 hold).
+
 ## [7.56.0] - 2026-11-03
 
 ### Added

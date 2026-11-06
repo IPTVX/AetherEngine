@@ -66,6 +66,64 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.58.0 integration — November 6, 2026
+
+Merge the complete upstream `7.58.0` tag (`7ea27bff`) into published private
+`36ea85318627a9229f16317d5f2391686a99052f`. This includes all of 7.57, not later
+upstream main changes. Publish a new immutable `7.58.0-iptvx`; prior tags remain
+unchanged. Preserve OS16, weak MetalFX, the OS26 gates, private default traits,
+LibDovi 2.1.0-iptvx and the absence of LibDTSX/Rust dca. Upgrade rebuilt private
+FFmpegBuild to 3.13.0-iptvx and LibTrueHD to 3.2.0-iptvx.
+
+BedRegression changes object rendering substantially: output is derived from the
+coded channel bed, while object/heights signals guide statistics. Its 2048-frame
+backlog is not an additional user audio delay. The maintained finite-tail path
+must drain the splitter before settling the encoder and computing its padding
+anchor. Otherwise genuine pending samples can be assigned to the padding span.
+The new PCM regression proves contiguous source timestamps and the exact requested
+endpoint; it failed before adding the drain. All previous finite leading/tail,
+compressed alignment, source ownership and -180...180 corrections remain active.
+No correction is retired. The merge retains both private spatial regressions and
+the new upstream bed-regression coverage.
+
+The ported 45-path delay snapshot SHA256 is
+`237dab2d16d771738be942220fc209ccd6aa1e2c3b05fa2c92726d47009fdc81`.
+To reproduce: reverse the 7.56 snapshot on 7.56.0-iptvx, commit that scratch
+baseline, merge the full 7.58 tag (retain private dependency policy), and copy
+this snapshot. Check detects missing; apply, check and repeated apply succeed.
+All 1,351 tracked source/test files in the merged release reproduce byte-for-byte.
+The additional consent regression is a host-contract test, not a core correction.
+
+The optional `generatesBackgroundScrubPreviews` controls the sparse ladder only.
+Its constructor, tick and actual source read preserve sequential/held/serial-origin
+admission. `serveIFramePlaylist` remains independent by upstream design; a host
+that requires opt-in must also keep that optional rendition disabled without
+consent. Resident cache stills and explicitly requested compositor/snapshot reads
+remain independent. No new core thumbnail patch is necessary. The host must apply
+consent at the next natural load rather than using a visible mid-playback reload.
+
+Final FlowDeck My Mac validation passes 296 selected runtime results with zero
+failures or skips: 129 retained delivery/spatial/consent tests and 167 release
+boundary tests. Native signed 180-second delivery uses the documented public
+hardware-size fixture; shaping, interruption/reset, bounded sequential seeks,
+finite padding and actual future keyframe-to-image extraction execute. Coverage
+also includes source scan/deinterlace, async upscaler construction, paused first
+frame, secondary subtitle identity/replacement, fabricated-range publication,
+WMV1/2 packet coverage and delay capacity/discontinuity/HE-AAC invariants. Real
+TrueHD/DTS:X trailer-based tests requiring external fixtures are not claimed.
+The new finite-tail regression failed on the unported code and passes after the
+splitter drain; the initial synthetic runs used the prior FFmpeg binaries, while
+both final batches use the exact new published binary contents.
+
+Both complete iOS and tvOS test targets compile unsigned with minimum OS 16.
+The resulting Mach-O bundles report minos 16.0 and weak-link MetalFX. Fresh
+remote resolution verifies FFmpegBuild 69928174, LibTrueHD a3fe1d77, LibDovi 631c9d2c
+and SMBClient e636c2b2. No app is installed or launched on a physical device.
+
+Do not include unreleased AE984/986 or the later AE711 image-retention follow-up
+under this release. Automated bed/latency evidence does not establish physical
+HDMI/AirPlay output quality or OS16-device playback.
+
 ### 7.56.0 integration — November 4, 2026
 
 Integrate the complete upstream `7.56.0` tag at

@@ -665,9 +665,11 @@ public final class AetherEngine: ObservableObject {
     /// AE#461: base-layer signal compatibility ID from the same dvcC/dvvC record as `sourceDVProfile`
     /// (0 = IPT-only, no compatible base layer). Kept because a decode-path correction has to decide
     /// whether the software path can represent this source BEFORE it tears the session down, and by
-    /// then the probe stream that carried the record is long gone. Internal: `sourceDVProfile` is the
-    /// label hosts read, this is the term only `softwarePathCannotRepresent` needs.
-    var sourceDVBLCompatID: Int? = nil
+    /// then the probe stream that carried the record is long gone. Read alongside
+    /// `sourceDolbyVisionBaseLayerPresentable` when offering source-specific playback choices.
+    /// nil means unavailable; reset on load and stop. This is source metadata, not display output.
+    /// Assigned before `sourceVideoFormat` / `sourceDVProfile`, so their publisher callbacks read it current.
+    public internal(set) var sourceDVBLCompatID: Int? = nil
 
     /// AE#532: the profile the loaded source's own RPU reports, when the record was contradicted enough
     /// to be worth checking (`DolbyVisionRecordAudit`). nil for every other source, including one whose
@@ -718,14 +720,22 @@ public final class AetherEngine: ObservableObject {
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
     /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
     /// base layer on and moves to software in one step is judged before the teardown, when the VUI it
-    /// rests on is gone.
-    var sourceDolbyVisionBaseLayerPresentable: Bool = false
+    /// rests on is gone. Reset to false on load and stop. This describes the engine's base-layer
+    /// route eligibility, not the panel's output or a guarantee that a reload will be accepted.
+    public internal(set) var sourceDolbyVisionBaseLayerPresentable: Bool = false
 
     /// Nominal source frame rate (fps) from the container's `avg_frame_rate` (falling back to `r_frame_rate`),
     /// or nil when the source has no video or libavformat couldn't derive one. Companion to `sourceVideoFormat`
     /// for Stats-for-Nerds. `LiveTelemetry.observedFps` measures the live rate but is nil on the native AVPlayer
     /// path (no usable counter); this nominal value fills that gap for the on-screen readout.
     @Published public internal(set) var sourceVideoFrameRate: Double? = nil
+
+    /// AE#983: progressive or interlaced, and the field order, resolved at load from the evidence the
+    /// routing reads: the probe's field order, the H.264 SPS when that is open (#150), and the #232
+    /// frame sample, which turns a declared-interlaced source with progressive pictures into
+    /// `.progressive`. `.unknown` before load, on the probe-free remote-HLS bypass and when nothing
+    /// settles it. Whether a deinterlacer actually runs is `decodedVideoFormat?.deinterlace`.
+    @Published public internal(set) var sourceVideoScan: VideoScan = .unknown
 
     /// Declared source video bitrate in bits/second (0 when the container declares none). From the video
     /// stream's `codecpar.bit_rate`, or the Matroska `BPS` statistics tag when that is 0 (mkvmerge). Static
@@ -1572,6 +1582,9 @@ public final class AetherEngine: ObservableObject {
     /// lands on a newer serial and is dropped instead of clearing a later tick's in-flight slot.
     var subtitleDrainTickSerial: UInt64 = 0
     #if DEBUG
+    /// AE#973: runs on a software host that has loaded and not yet started its loops. A paused mount
+    /// starts them for the first frame, so a hook installed after `load` returns can miss it.
+    var softwareHostLoadedForTesting: (@MainActor (SoftwarePlaybackHost) -> Void)?
     /// AE#628: lets a test drive the drain tick with a real decoder but no playback session.
     var subtitleDrainDecoderFactoryForTesting: ((Int32) -> EmbeddedSubtitleDecoder?)?
     #endif
@@ -1704,6 +1717,36 @@ public final class AetherEngine: ObservableObject {
     @Published public internal(set) var secondarySubtitleCues: [SubtitleCue] = []
     @Published public internal(set) var isLoadingSecondarySubtitles: Bool = false
     @Published public internal(set) var isSecondarySubtitleActive: Bool = false
+
+    /// Selected secondary TrackInfo.id, embedded or registered external. nil when off or using
+    /// the one-shot URL API; nil alone does not imply inactivity. A registered external publishes
+    /// when its prepared replacement commits; the previous identity stays while it decodes or fails.
+    @Published public private(set) var activeSecondarySubtitleTrackIndex: Int?
+    private var publishingSecondarySubtitleIdentity = false
+
+    /// One update path for the internal selection and its public projection. A synchronous
+    /// @Published subscriber may select/clear again during willSet; drain that newer identity
+    /// after the outer setter returns rather than leaving the projection on the old selection.
+    func setSecondarySubtitleIdentity(embedded: Int32 = -1, external: Int? = nil) {
+        activeSecondaryEmbeddedSubtitleStreamIndex = external == nil ? embedded : -1
+        activeSecondaryExternalSubtitleTrackID = external
+        guard !publishingSecondarySubtitleIdentity else { return }
+        publishingSecondarySubtitleIdentity = true
+        defer { publishingSecondarySubtitleIdentity = false }
+        while true {
+            let selected = secondarySubtitleSelectionIdentity
+            guard activeSecondarySubtitleTrackIndex != selected else { return }
+            activeSecondarySubtitleTrackIndex = selected
+        }
+    }
+
+    /// The internal selection as a TrackInfo.id. Inside a reentrant willSet this is already the
+    /// newer value while the published projection still holds the old one.
+    var secondarySubtitleSelectionIdentity: Int? {
+        activeSecondaryExternalSubtitleTrackID
+            ?? (activeSecondaryEmbeddedSubtitleStreamIndex >= 0
+                ? Int(activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
+    }
 
     /// True once the NativeSubtitleCueStore has at least one cue for the native mov_text track (#55).
     /// Use to gate the AVMediaSelection picker (PiP/AirPlay). Cleared by clearSubtitle and stopInternal.
@@ -2726,7 +2769,11 @@ public final class AetherEngine: ObservableObject {
 
     /// Secondary subtitle reader state mirrors (#47). Driven only through SubtitleChannel.secondary.
     var secondarySidecarTask: Task<Void, Never>?
-    var activeSecondaryEmbeddedSubtitleStreamIndex: Int32 = -1
+    #if DEBUG
+    /// Per-engine failure injection; never changes another session's decoder factory.
+    var secondarySidecarDecoderFactoryForTesting: (@Sendable (SidecarBitmapSource) -> EmbeddedSubtitleDecoder?)?
+    #endif
+    private(set) var activeSecondaryEmbeddedSubtitleStreamIndex: Int32 = -1
 
     /// Source video dimensions from the probe. Used as a bitmap-subtitle canvas fallback before the first PCS
     /// is parsed. 0 before load or when source has no video (AetherEngine#28). Also available in SourceProbe.
@@ -4035,7 +4082,9 @@ public final class AetherEngine: ObservableObject {
     var hostExplicitSubtitleAction = false
     /// Synthetic id of the external track active on the secondary channel, nil when the secondary
     /// is off or embedded (#88).
-    var activeSecondaryExternalSubtitleTrackID: Int? = nil
+    private(set) var activeSecondaryExternalSubtitleTrackID: Int? = nil
+    /// Selection intent is separate from the still-visible active track while preparation runs.
+    var pendingSecondaryExternalSubtitleTrackID: Int? = nil
     /// Base for synthetic external-subtitle TrackInfo ids; far above any real AVStream index.
     public static let externalSubtitleTrackIDBase = 100_000
     /// #170: true while `reloadAtCurrentPosition` runs a session-preserving reload. Host
@@ -4739,7 +4788,7 @@ public final class AetherEngine: ObservableObject {
         externalSubtitleRegistry = [:]
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
-        activeSecondaryExternalSubtitleTrackID = nil
+        setSecondarySubtitleIdentity()
         // #357: any load that is not the reload claiming it (which consumed it before calling here)
         // is a different session; a parked selection must not follow it.
         backgroundTeardownSelection = nil
@@ -4790,6 +4839,8 @@ public final class AetherEngine: ObservableObject {
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -4800,12 +4851,11 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil
+        sourceVideoScan = .unknown
         sourceVideoBitrate = 0
         sourceVideoStreamFormat = nil
         decodedVideoFormat = nil
@@ -5226,10 +5276,11 @@ public final class AetherEngine: ObservableObject {
 
         // sourceVideoFormat = what's in the file; videoFormat = what the panel shows (published after
         // the criteria handshake; see panelHDRAfterHandshake below).
-        sourceVideoFormat = detectedFormat
-        sourceDVProfile = detectedDVProfileNum
+        // The capability pair is assigned before its publishing peers so their sinks read it current.
         sourceDVBLCompatID = detectedDVBLCompatIDNum
         sourceDolbyVisionBaseLayerPresentable = detectedDVBaseLayerPresentable
+        sourceVideoFormat = detectedFormat
+        sourceDVProfile = detectedDVProfileNum
         sourceDolbyVisionRPUProfile = detectedDVRPUProfile
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
@@ -5825,6 +5876,7 @@ public final class AetherEngine: ObservableObject {
         var requiresDeinterlaceWarmup = VideoRoutingPolicy.requiresDeinterlaceWarmup(
             codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
             spsIndicatesInterlaced: spsIndicatesInterlaced)
+        var frameSampleRefutesInterlace = false
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
         // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
@@ -5859,6 +5911,7 @@ public final class AetherEngine: ObservableObject {
             if InterlaceProbe.refutesDeclaredInterlace(verdict) {
                 useSoftwarePath = false
                 requiresDeinterlaceWarmup = false
+                frameSampleRefutesInterlace = true
                 EngineLog.emit(
                     "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
                     + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
@@ -5872,6 +5925,10 @@ public final class AetherEngine: ObservableObject {
                 )
             }
         }
+        sourceVideoScan = VideoScan.resolve(
+            codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
+            spsIndicatesInterlaced: spsIndicatesInterlaced,
+            frameSampleRefutesInterlace: frameSampleRefutesInterlace)
         // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
         // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
@@ -6136,6 +6193,10 @@ public final class AetherEngine: ObservableObject {
                 if Self.loadPerformsAutostart(options) {
                     softwareHost?.play()
                     state = .playing
+                } else {
+                    // AE#973: the loops only ran on play(), so a paused mount (and every rebuild of a
+                    // paused session, which mounts paused) never decoded the frame at the playhead.
+                    softwareHost?.pause()
                 }
                 startMemoryProbe()
                 startLiveTelemetrySampler()
@@ -7385,7 +7446,7 @@ public final class AetherEngine: ObservableObject {
         externalSubtitleRegistry = [:]
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
-        activeSecondaryExternalSubtitleTrackID = nil
+        setSecondarySubtitleIdentity()
         backgroundTeardownSelection = nil     // #357: leaving playback is not a reload
         pendingNativeRenderingRequest = nil   // #170: the session the latched request targeted is gone
         externalNativeStoreFillTask?.cancel()
@@ -7413,6 +7474,8 @@ public final class AetherEngine: ObservableObject {
         containerChapterSource = nil
         mediaChapters = []
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -7423,12 +7486,11 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil
+        sourceVideoScan = .unknown
         sourceVideoBitrate = 0
         sourceVideoStreamFormat = nil
         decodedVideoFormat = nil
@@ -8800,8 +8862,7 @@ public final class AetherEngine: ObservableObject {
         cancelNativeSubtitleReaders()
         nativeSubtitleRenditionAvailable = false
         cancelSidecarTask(channel: .secondary)
-        activeSecondaryEmbeddedSubtitleStreamIndex = -1
-        activeSecondaryExternalSubtitleTrackID = nil
+        setSecondarySubtitleIdentity()
         loadedSecondarySidecarURL = nil
         isSecondarySubtitleActive = false
         secondarySubtitleCues = []

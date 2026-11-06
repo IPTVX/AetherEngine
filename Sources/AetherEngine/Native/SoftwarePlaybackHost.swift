@@ -23,6 +23,9 @@ final class SoftwarePlaybackHost {
     nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
         switch codecID {
         case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue, AV_CODEC_ID_VC1.rawValue: return 32
+        // WMV1/2 decode only I/P pictures (FFmpeg msmpeg4dec.c / wmv2dec.c): no B reorder.
+        // Still hold one successor; never invent the last picture's presentation duration.
+        case AV_CODEC_ID_WMV1.rawValue, AV_CODEC_ID_WMV2.rawValue: return 1
         default: return nil
         }
     }
@@ -1277,7 +1280,8 @@ final class SoftwarePlaybackHost {
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
             let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
-            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval) else { return handler }
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
+            else { return handler }
             frameUpscaler = stage
             return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
         }
@@ -1869,13 +1873,7 @@ final class SoftwarePlaybackHost {
         case .none:
             break
         }
-        if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoLayer(renderer.displayLayer)
-        }
-        if !demuxLoopStarted {
-            demuxLoopStarted = true
-            startDemuxLoop()
-        }
+        startLoopsIfNeeded()
         // Cold start: demux loop arms the clock on first decoded audio sample; don't eager-start.
         rate = lastRate
         isPlaying = true
@@ -1999,16 +1997,28 @@ final class SoftwarePlaybackHost {
         audioOutput?.setPlaybackEnabled(false)
         pausedByHost = true
         rate = 0
-        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
+        let startsLoops = PausedFirstFrame.startsLoopsForFirstFrame(
+            loaded: isReady && failure == nil, loopsStarted: demuxLoopStarted)
+        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued)
+            || startsLoops,
            !stopRequested {
             pausedBeforeFirstFrame = true
             EngineLog.emit(
-                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents",
+                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents"
+                + (startsLoops ? " (AE#973: started for it, nothing had played this host)" : ""),
                 category: .swPlayback
             )
         }
         isPlaying = false
         inFlightSeekResumeIntent = false
+        if startsLoops, !stopRequested { startLoopsIfNeeded() }
+    }
+
+    private func startLoopsIfNeeded() {
+        guard !demuxLoopStarted else { return }
+        audioOutput?.attachVideoLayer(renderer.displayLayer)
+        demuxLoopStarted = true
+        startDemuxLoop()
     }
 
     /// Sodalite#104 round 4: the first frame of a session paused before it is in. Moves the stopped clock

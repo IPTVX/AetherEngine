@@ -5,8 +5,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/IPTVX/FFmpegBuild",
       "state": {
-        "revision": "e27734fb855d64411003896a44e58af4ed0db730",
-        "version": "3.12.1-iptvx"
+        "revision": "69928174f74f45f05c82da582bb77d8a9a57a628",
+        "version": "3.13.0-iptvx"
       }
     },
     {
@@ -23,8 +23,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/IPTVX/LibTrueHD",
       "state": {
-        "revision": "a7d28d71d78791b9f268958269f591d8dac3a7a5",
-        "version": "3.1.0-iptvx"
+        "revision": "a3fe1d77fedb860d748f43a23047ef21fa7b15bd",
+        "version": "3.2.0-iptvx"
       }
     },
     {
