@@ -66,6 +66,80 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.62.0 integration — November 9, 2026
+
+Merge the complete upstream `7.62.0` tag
+`a1d2cab8281cbf06f5f459b05dad4653ad12559f` into published
+`7.58.0-iptvx` (`d43e4953a1bdbd2c85ea6dc93388258b81157d1d`). This includes
+7.59.0, 7.60.0, 7.61.0 and 7.61.1, but no later upstream main changes.
+Keep iOS/tvOS 16, weak MetalFX and availability guards, the existing default
+traits, and LibTrueHD 3.2.0-iptvx. Use the complete private OS16 rebuilds of
+FFmpegBuild 3.14.0-iptvx (`9f7edc5f19c01b343cd77c99813c2df1125a5dac`) and
+LibDovi 2.2.0-iptvx (`71cffc53fad4a678a18628f17ae6bea83ee06963`).
+`DolbyVisionFelCurves` remains
+opt-in and is not a default trait. No LibDTSX or Rust dca dependency is added.
+
+The audio-delay correction remains active without a retired hunk. In
+`stopInternal`, preserve both the private pending-shaping generation reset and
+upstream `clearDisplaySwitchGate()`. In software Live DVR configuration, combine
+the expanded alignment window with upstream `liveDVRByteBudget`; the requested
+budget still passes through capacity clamps and is split between video retention
+and audio alignment. The new stop regression exercises real teardown while a
+gate is suspended and a shaping generation is pending. The existing signed
+180-second DVR delivery/seek regression now also requests an explicit 64 MiB
+budget. The finite-tail splitter drain from 7.58 remains intact.
+
+The ported 45-path snapshot SHA256 is
+`f3ab7f7ae9649cf81ce5ad7b9101608b9823025db70f173c81e633647b42f23c`.
+Reconstruction requires only published objects:
+
+1. Start from `7.58.0-iptvx`, reverse that tag's delay snapshot and commit the
+   uncorrected scratch baseline.
+2. Merge the complete `7.62.0` tag. Only dependency manifests conflict in this
+   uncorrected baseline; retain the private platform/trait policy and exact new
+   dependency pins. Source and test paths merge without manual correction.
+3. Copy the current delay snapshot. Check must report the correction missing;
+   apply, check and repeated apply must succeed.
+4. Compare every tracked `Sources/` and `Tests/` file with this release. All
+   1,378 paths reconstruct byte for byte, including both port regressions.
+
+The new display-switch flag is a load/reload gate, not a transport lock: public
+`play()` can still start transport before a paused mount's `load()` returns.
+Hosts must not use an early readiness callback to bypass the final display gate.
+Native and software autostart paths retain upstream's loading-state behavior.
+The 1,000 ms sink-relock margin is paid only for an engine-owned rate-only switch
+whose pre-write rate differed, not unconditionally on every load.
+
+Future-thumbnail generation remains a host-controlled optional capability;
+background previews and I-frame rendition must stay disabled when the host's
+rollout is forced off. The upstream source eligibility, sequential-source and
+read-budget constraints remain intact. The HDR PGS palette and SSAI changes are
+included from the complete tag rather than extracted as isolated fixes.
+
+Final validation uses the published FFmpegBuild and LibDovi revisions above,
+with LibTrueHD `a3fe1d77fedb860d748f43a23047ef21fa7b15bd` unchanged. FlowDeck's
+My Mac summaries report 474 passed results: 224 retained-contract results and
+250 release-boundary results, with no failures. The normalized result database
+contains 617 successful parameterized executions. Three skips are explicit:
+the trait-disabled language preference case is inapplicable because both object
+decoders are enabled, and the two external PGS decode/OCR cases require the
+absent local `Fixtures/external-pgs.sup`. Deterministic PGS/PQ, backward landing,
+VobSub/DVD and DVB canvas, slow external fetch, SSAI, finite HLS software
+escalation and ingest seek, URLSession-close, display gates, shaping matrix,
+cache pressure and lifecycle tests pass. All three system E-AC-3 JOC decode,
+re-anchor and flush tests execute successfully on My Mac.
+
+The retained batch includes 31 native large-delay playback executions using the
+public fixture, both signs of 180 seconds through actual native/software delivery,
+shaping, finite leading/tail handling, stop/rebuild and signed DVR seeks with the
+explicit budget. No playback timing failure is hidden behind a skipped fixture.
+Both complete iOS and tvOS test targets build unsigned through FlowDeck with
+minimum OS 16. Their Mach-O test bundles report minos 16.0 and weak MetalFX.
+Ten maintenance regressions pass and final reconstruction repeats successfully.
+No physical-device launch, installation, HDMI/AirPlay acceptance or OS16-device
+playback is claimed. Optional FEL-curve rendering and external trailer-based
+TrueHD/DTS:X acceptance remain outside this default-trait validation.
+
 ### 7.58.0 integration — November 6, 2026
 
 Merge the complete upstream `7.58.0` tag (`7ea27bff`) into published private

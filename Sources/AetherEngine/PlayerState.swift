@@ -663,6 +663,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// Nil preserves the default spool behavior.
     public var softwareDVRRetention: SoftwareDVRRetentionOptions? = nil
 
+    /// Disk budget in bytes for the software live DVR ring. Nil keeps the default (a quarter of the free
+    /// space, at most 2 GiB). An explicit value replaces the 2 GiB cap and is still clamped to a quarter of
+    /// the free space the other sessions have not claimed, with the 64 MiB playback floor. For a window
+    /// that has to hold hours of broadcast: 2 GiB is about 50 minutes of 5.7 Mbps MPEG-2. Ignored unless
+    /// `isLive` and `dvrWindowSeconds` are set and the session routes to software.
+    public var liveDVRByteBudget: Int? = nil
+
     /// LL-HLS blocking-reload (`#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD`) override for live loopback sessions.
     /// nil (default) = auto: for a `LiveIngestSourceInfo` custom reader the engine derives eligibility from
     /// the OBSERVED upstream arrival cadence (off until sustained discipline is proven, permanently off once
@@ -1753,7 +1760,13 @@ public struct SubtitleImage: @unchecked Sendable {
     /// .zero when unknown (pre-canvas cues): hosts fall back to treating canvas == video.
     /// DVB reports the video frame here (AE#971): its display covers the whole picture, and a
     /// 720x576 plane on HD video has non-square pixels, so `position` is normalized against the
-    /// plane while this carries the shape to map onto.
+    /// plane while this carries the shape to map onto. DVD does the same on a rescaled encode
+    /// (AE#993, a 720x480 plane on 1280x720 video), and reports the 16:9 frame at the video's width
+    /// when the video is wider than 16:9 (cropped before scaling).
+    /// The size is in the video's CODED pixels. On anamorphic video (1440x1080, or 720x576 at 16:9)
+    /// the displayed picture is wider than the coded frame, so map the canvas onto the coded frame
+    /// first (width-aligned, center-anchored), then scale that rect onto the displayed picture rect
+    /// per axis. Mapping width-aligned onto the displayed rect directly makes the canvas too tall.
     public let canvasSize: CGSize
     /// AV_SUBTITLE_FLAG_FORCED from the decoded rect (#146): the disc authored this object as a
     /// forced caption (sign / foreign-dialogue overlay shown even with subtitles off).

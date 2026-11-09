@@ -12,6 +12,31 @@ struct LiveAudioDelayTests {
     // - An old source teardown resumes after stop or replacement and reopens a retired session.
     // - Changes during a rebuild lose the latest delay or play/pause intent.
 
+    /// Teardown must retire both the private shaping transaction and the upstream display gate.
+    @Test
+    func stopClearsDisplayGateAndPendingShaping() async throws {
+        let engine = try AetherEngine()
+        let (release, continuation) = AsyncStream<Void>.makeStream()
+        defer { continuation.finish(); engine.stop() }
+        let gate = Task { @MainActor in
+            await engine.awaitingDisplaySwitch(generation: 7) {
+                for await _ in release { break }
+            }
+        }
+        try await waitFor { engine.isAwaitingDisplaySwitch }
+        try #require(engine.isAwaitingDisplaySwitch)
+        engine.pendingAudioShapingGeneration = 7
+
+        engine.stop()
+
+        #expect(engine.pendingAudioShapingGeneration == nil)
+        #expect(!engine.isAwaitingDisplaySwitch)
+        #expect(engine.state == .idle)
+        continuation.yield()
+        await gate.value
+        #expect(!engine.isAwaitingDisplaySwitch)
+    }
+
     /// Loads deterministic H.264/AAC media through the real native Live pipeline without DVR.
     private func withLiveEngine(
         _ body: (AetherEngine, URL) async throws -> Void

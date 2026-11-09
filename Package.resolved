@@ -5,8 +5,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/IPTVX/FFmpegBuild",
       "state": {
-        "revision": "69928174f74f45f05c82da582bb77d8a9a57a628",
-        "version": "3.13.0-iptvx"
+        "revision": "9f7edc5f19c01b343cd77c99813c2df1125a5dac",
+        "version": "3.14.0-iptvx"
       }
     },
     {
@@ -14,8 +14,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/IPTVX/LibDovi",
       "state": {
-        "revision": "631c9d2c112dfcdd962a0c2909b6f0aa8a01cdd1",
-        "version": "2.1.0-iptvx"
+        "revision": "71cffc53fad4a678a18628f17ae6bea83ee06963",
+        "version": "2.2.0-iptvx"
       }
     },
     {

@@ -504,7 +504,8 @@ final class SoftwarePlaybackHost {
 
     /// Same construction path for the live decoder and controlled-source contract fixtures.
     @discardableResult
-    func prepareLiveDVR(windowSeconds window: Double, retention: SoftwareDVRRetentionOptions? = nil) -> PacketRingBuffer? {
+    func prepareLiveDVR(windowSeconds window: Double, retention: SoftwareDVRRetentionOptions? = nil,
+                        requestedBytes: Int? = nil) -> PacketRingBuffer? {
         let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("aether-segments", isDirectory: true)
         let scratch = base.appendingPathComponent("dvr-\(UUID().uuidString)", isDirectory: true)
@@ -514,7 +515,7 @@ final class SoftwarePlaybackHost {
             let available = (try? base.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
                 .volumeAvailableCapacity.map(Int64.init)
             let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
-                PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0)
+                PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0, requestedBytes: requestedBytes)
             }
             let aligned = SoftwareAudioDelayTimeline(delaySeconds: audioDelaySeconds).requiresAlignment
             let budget = aligned ? claim.bytes / 2 : claim.bytes
@@ -1112,7 +1113,7 @@ final class SoftwarePlaybackHost {
         switch route {
         case .pcm: return .decoded
         case .compressedEAC3JOC: return .streamCopy
-        case .apac, .pcmBed: return .bridged
+        case .apac, .pcmBed, .decodedEAC3JOC: return .bridged
         }
     }
 
@@ -1298,6 +1299,7 @@ final class SoftwarePlaybackHost {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         dvrRetention: SoftwareDVRRetentionOptions? = nil,
+        liveDVRByteBudget: Int? = nil,
         forwardBufferSegments: Int? = nil,
         packetCacheStorage: SoftwarePacketCacheStorage = .automatic,
         sessionCacheByteBudget: Int? = nil
@@ -1328,7 +1330,8 @@ final class SoftwarePlaybackHost {
             ? AudioDelayDiscontinuityBudget(delaySeconds: audioDelaySeconds) : nil
         alignedVideoEdgeAdjustment = alignmentTimeline.requiresAlignment ? min(audioDelaySeconds, 0) : 0
         if isLive, let window = dvrWindowSeconds {
-            _ = prepareLiveDVR(windowSeconds: window + (alignmentTimeline.requiresAlignment ? abs(audioDelaySeconds) : 0), retention: dvrRetention)
+            _ = prepareLiveDVR(windowSeconds: window + (alignmentTimeline.requiresAlignment ? abs(audioDelaySeconds) : 0),
+                               retention: dvrRetention, requestedBytes: liveDVRByteBudget)
         } else if isLive, let cushion = LiveEdgePolicy.edgeCushion(liveEdgeCushionSeconds) {
             // The plain live feeder plays packets as the demuxer reads them, so there is nothing to
             // play behind. A ring as deep as the loopback's cushion window gives the join one.
@@ -1840,7 +1843,7 @@ final class SoftwarePlaybackHost {
 
     /// Waits for the registration on the route that needs it and never on any other.
     static func awaitAtmosPrimer(for route: SoftwareAtmosRoute, wait: @MainActor () async -> Void) async {
-        guard route == .compressedEAC3JOC else { return }
+        guard route.needsAtmosDecoder else { return }
         await wait()
     }
 
@@ -1918,6 +1921,7 @@ final class SoftwarePlaybackHost {
         return EmbeddedSubtitleDecoder(stream: stream,
                                        sourceVideoWidth: w > 0 ? w : 1920,
                                        sourceVideoHeight: h > 0 ? h : 1080,
+                                       sourceIsPQ: vpar?.pointee.color_trc == AVCOL_TRC_SMPTE2084,
                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                        teletextPage: teletextPageForSubtitleTap)
     }

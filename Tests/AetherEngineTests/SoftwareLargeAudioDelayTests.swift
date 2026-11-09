@@ -13,6 +13,7 @@ struct SoftwareLargeAudioDelayTests {
 
     /// Uses unique sources so concurrent suites cannot overwrite or tear down each other's files.
     private func withEngine(delay: Double, live: Bool, dvrWindow: Double? = nil,
+                            dvrByteBudget: Int? = nil,
                             shaping: AudioShaping = AudioShaping(),
                             body: (AetherEngine, ProbeTestBox<[(Double, Double)]>) async throws -> Void) async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("software-aligned-\(UUID()).ts")
@@ -21,9 +22,11 @@ struct SoftwareLargeAudioDelayTests {
         }.value
         let engine = try AetherEngine()
         defer { engine.stop(); try? FileManager.default.removeItem(at: url) }
-        try await engine.load(url: url, options: LoadOptions(
+        var options = LoadOptions(
             isLive: live, dvrWindowSeconds: dvrWindow, autoplay: false,
-            audioDelaySeconds: delay, audioShaping: shaping, preferredDecodePath: .software))
+            audioDelaySeconds: delay, audioShaping: shaping, preferredDecodePath: .software)
+        options.liveDVRByteBudget = dvrByteBudget
+        try await engine.load(url: url, options: options)
         try #require(engine.videoRoute == .software)
         let delivery = ProbeTestBox<[(Double, Double)]>([])
         engine.softwareHost?.observeDeliveredAudioForTesting { source, delivered in
@@ -122,7 +125,7 @@ struct SoftwareLargeAudioDelayTests {
     /// The public DVR edge describes video with available shifted audio, then a seek keeps delivery.
     @Test(arguments: [-180.0, 180.0])
     func dvrAvailabilityAndSeekPreserveAlignment(delay: Double) async throws {
-        try await withEngine(delay: delay, live: true, dvrWindow: 240) { engine, delivery in
+        try await withEngine(delay: delay, live: true, dvrWindow: 240, dvrByteBudget: 64 << 20) { engine, delivery in
             engine.play()
             try await waitFor { !delivery.value.isEmpty || engine.errorInfo != nil }
             try #require(engine.errorInfo == nil)
