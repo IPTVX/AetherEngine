@@ -3,7 +3,7 @@ import Testing
 
 /// #180: the native video path can own an `MPNowPlayingSession`, but only when the host asks for it.
 ///
-/// The audio path owns one unconditionally because it is always a bare AVPlayer. The native video
+/// The primary audio path owns one by default because it uses a bare AVPlayer. The native video
 /// player is also consumed by `AVPlayerViewController` hosts, where AVKit owns Now-Playing through
 /// private MediaRemote, so claiming a session by default would cost those hosts AVKit's card, its
 /// `externalMetadata` and its transport commands. These cover the opt-in gate and the staging
@@ -24,13 +24,16 @@ struct VideoNowPlayingOptInTests {
         #expect(NativeAVPlayerHost(ownsNowPlayingSession: true).ownsNowPlayingSession)
     }
 
-    #if os(tvOS) || os(iOS)
     @Test("The engine defaults to leaving Now-Playing to the host's UI layer")
     func engineDefaultsToOff() throws {
         let engine = try AetherEngine()
         #expect(!engine.ownsVideoNowPlayingSession)
+        #expect(!engine.ownsVideoNowPlayingCommands)
+        #expect(!engine.ownsAudioNowPlaying)
+        #expect(engine.ownsAudioNowPlayingSession)
     }
 
+    #if os(iOS) || os(tvOS) || os(visionOS)
     @Test("The engine builds hosts carrying its current ownership choice")
     func engineThreadsTheChoiceIntoHosts() throws {
         let engine = try AetherEngine()
@@ -45,6 +48,7 @@ struct VideoNowPlayingOptInTests {
         engine.ownsVideoNowPlayingSession = true
         #expect(engine.videoNowPlayingSession == nil)
     }
+    #endif
 
     // MARK: - Staging semantics
 
@@ -78,5 +82,4 @@ struct VideoNowPlayingOptInTests {
         engine.stop()
         #expect(engine.pendingVideoNowPlayingInfo.isEmpty)
     }
-    #endif
 }

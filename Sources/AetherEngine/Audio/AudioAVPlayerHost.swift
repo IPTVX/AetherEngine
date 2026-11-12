@@ -34,18 +34,18 @@ final class AudioAVPlayerHost {
     /// Created once, reused across replaceCurrentItem swaps for the host's lifetime.
     let avPlayer = AVPlayer()
 
-    #if os(tvOS) || os(iOS)
+    #if os(iOS) || os(tvOS) || os(visionOS)
     /// Now-Playing session bound to THIS player. The SHARED MPRemoteCommandCenter / MPNowPlayingInfoCenter aren't
     /// reliably bound to a bare AVPlayer: on background pause (rate 0) the app is dropped as active Now-Playing app
     /// and the shared center stops receiving ANY command (play button never returns). Binding a session keeps
     /// ownership across pause. WWDC22 guidance is "don't use MPNowPlayingSession on tvOS WHEN USING AVKit" (AVKit
     /// owns its own); for a bare AVPlayer with custom UI, owning the session explicitly is sanctioned. Mixing in the
     /// shared singletons is what produces the half-working state.
-    let nowPlayingSession: MPNowPlayingSession
+    private(set) var nowPlayingSession: MPNowPlayingSession?
     #endif
     /// Sodalite#175: false for a `.secondary` engine, which never claims Now Playing. Set per load, the
     /// host outlives a role change.
-    var ownsNowPlaying: Bool
+    private(set) var ownsNowPlaying = false
 
     // MARK: - Private state
 
@@ -84,7 +84,7 @@ final class AudioAVPlayerHost {
     /// Per-item Now-Playing dictionary (MPMediaItemProperty keys + the host's force-decoded, @Sendable-wrapped
     /// MPMediaItemArtwork) that the auto-publishing MPNowPlayingSession reads from AVPlayerItem.nowPlayingInfo.
     /// Stashed so a back-to-back item swap (replaceCurrentItem) replays it onto the new item.
-    #if os(iOS) || os(tvOS)
+    #if os(iOS) || os(tvOS) || os(visionOS)
     private var pendingNowPlayingInfo: [String: Any] = [:]
     #endif
 
@@ -93,11 +93,27 @@ final class AudioAVPlayerHost {
     init(ownsNowPlaying: Bool = true,
          diagnosticPool: ItemDiagnosticReadPool = .shared,
          diagnosticRead: @escaping AVPlayerItemDiagnostics.Read = ItemDiagnosticSnapshot.read) {
-        self.ownsNowPlaying = ownsNowPlaying
         self.diagnosticPool = diagnosticPool
         self.diagnosticRead = diagnosticRead
-        #if os(tvOS) || os(iOS)
-        nowPlayingSession = MPNowPlayingSession(players: [avPlayer])
+        setNowPlayingOwnership(ownsNowPlaying)
+    }
+
+    /// Applies the next load's ownership to the persistent player. Drop the session when the app
+    /// owns the system card, including when the same audio host is reused across loads.
+    func setNowPlayingOwnership(_ owned: Bool) {
+        guard ownsNowPlaying != owned else { return }
+        ownsNowPlaying = owned
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        if !owned {
+            // MediaPlayer removes the player observer when auto-publishing is disabled.
+            // Detach the player first so removePlayer() can remove its registered observer.
+            nowPlayingSession?.removePlayer(avPlayer)
+            nowPlayingSession?.automaticallyPublishesNowPlayingInfo = false
+            nowPlayingSession = nil
+            playerItem?.nowPlayingInfo = nil
+            return
+        }
+        let session = MPNowPlayingSession(players: [avPlayer])
         // Apple's documented path for a bare AVPlayer (WWDC22 110338, MPNowPlayingSession.h): the session
         // auto-publishes Now-Playing from the player (elapsed/rate/state/duration) merged with the per-item
         // AVPlayerItem.nowPlayingInfo we stamp. With YES, nowPlayingInfoCenter must NOT be written (we never do).
@@ -105,17 +121,18 @@ final class AudioAVPlayerHost {
         // fall back to (and decode) the asset's own embedded cover, which crashes on a corrupt one. This replaced a
         // manual-publish design whose MPMediaItemArtwork closure was non-@Sendable and tripped
         // dispatch_assert_queue_fail when MediaPlayer requested the bitmap off-actor.
-        nowPlayingSession.automaticallyPublishesNowPlayingInfo = true
-        if ownsNowPlaying { nowPlayingSession.becomeActiveIfPossible(completion: { _ in }) }
+        session.automaticallyPublishesNowPlayingInfo = true
+        nowPlayingSession = session
+        playerItem?.nowPlayingInfo = pendingNowPlayingInfo.isEmpty ? nil : pendingNowPlayingInfo
+        becomeActiveNowPlaying()
         #endif
     }
 
     /// Re-assert this session as active Now-Playing app on track start, reclaiming ownership if lost (keeps the
     /// Home overlay + remote commands alive across a background pause).
     func becomeActiveNowPlaying() {
-        #if os(tvOS) || os(iOS)
-        guard ownsNowPlaying else { return }
-        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        nowPlayingSession?.becomeActiveIfPossible(completion: { _ in })
         #endif
     }
 
@@ -138,8 +155,10 @@ final class AudioAVPlayerHost {
         item.externalMetadata = pendingExternalMetadata
         #endif
         // Stamp the per-item Now-Playing dict the auto-publishing session reads (iOS/tvOS 16+). Replays across swaps.
-        #if os(iOS) || os(tvOS)
-        item.nowPlayingInfo = pendingNowPlayingInfo.isEmpty ? nil : pendingNowPlayingInfo
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        if nowPlayingSession != nil, !pendingNowPlayingInfo.isEmpty {
+            item.nowPlayingInfo = pendingNowPlayingInfo
+        }
         #endif
         playerItem = item
         let diagnostics = AVPlayerItemDiagnostics(item: item, pool: diagnosticPool, read: diagnosticRead)
@@ -353,10 +372,12 @@ final class AudioAVPlayerHost {
     /// Stage the per-item Now-Playing dictionary (current and subsequent items). The auto-publishing session merges
     /// these keys with the player's elapsed/rate/duration. Pass an empty dict to clear. Writing the per-item
     /// AVPlayerItem.nowPlayingInfo property is the documented, queue-safe channel (no MPNowPlayingInfoCenter write).
-    #if os(iOS) || os(tvOS)
+    #if os(iOS) || os(tvOS) || os(visionOS)
     func setNowPlayingInfo(_ info: [String: Any]) {
         pendingNowPlayingInfo = info
-        playerItem?.nowPlayingInfo = info.isEmpty ? nil : info
+        if nowPlayingSession != nil {
+            playerItem?.nowPlayingInfo = info.isEmpty ? nil : info
+        }
     }
     #endif
 
@@ -413,7 +434,7 @@ final class AudioAVPlayerHost {
         isRebuffering = false
         // Clear the staged dict so the next track starts clean; the auto-publishing session drops the Now-Playing
         // entry when the player has no current item.
-        #if os(iOS) || os(tvOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         pendingNowPlayingInfo = [:]
         #endif
         // Host is persistent across tracks; clear terminal flags so the next load's subscriptions (wired before

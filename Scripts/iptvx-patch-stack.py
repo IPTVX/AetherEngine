@@ -11,6 +11,7 @@ from pathlib import Path
 # Oldest first: a successor is authored against the complete preceding stack.
 PATCHES = [
     ("IPTVX-LIVE-AUDIO-DELAY", "Patches/IPTVX/live-audio-delay-without-dvr.patch"),
+    ("IPTVX-AUDIO-NOW-PLAYING-OWNERSHIP", "Patches/IPTVX/audio-now-playing-ownership.patch"),
 ]
 
 

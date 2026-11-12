@@ -66,6 +66,48 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.64.0 integration
+
+Merge the complete upstream `7.64.0` tag
+`b0d91055ba6042c74b6adf4036e4a87731b214ba` into private `7.62.0-iptvx`
+(`f6f87a9f3bcfea95429e89953d7b1939766c5344`). Keep the same platform floors,
+weak MetalFX, default traits and exact FFmpegBuild, LibDovi and LibTrueHD pins.
+The build contains the Anime4K shaders even when line-art upscaling is unused.
+Ship the Anime4K notice alongside the prior notices.
+
+The private software packet alignment stays in front of decoding. Adopt
+upstream's bounded parked-video read wait through the shared packet read
+function, and reset the new `pauseArmOpen` latch when a Live alignment epoch
+starts. Keep the upstream #1037 stop guard between awaited software audio setup
+and subsequent demuxer stream access.
+
+The 45-path delay snapshot SHA256 is
+`4d431ee3dc64f3937a2ae56bb86388a1e9a6ab9a8012366d3339e8e44e239bfa`.
+To reconstruct, reverse the 7.62 delay snapshot on the 7.62 IPTVX tag, commit
+the disposable baseline and merge the full upstream 7.64 tag. Source and test
+paths in that baseline merge without a manual resolution. Copy both current
+snapshots and the current stack script. Verify that check finds the corrections
+missing, then apply, check again, and repeat apply. The result must match every
+tracked `Sources/` and `Tests/` path from the final port.
+
+#### IPTVX-AUDIO-NOW-PLAYING-OWNERSHIP
+
+The native audio-only AVPlayer session auto-publishes independently of
+`ownsAudioNowPlaying`. The app sets `ownsAudioNowPlayingSession` and
+`ownsAudioNowPlaying` to false before load to retain its own card and commands.
+The AVPlayer session remains enabled by default for primary playback. Secondary
+playback and explicit opt-out omit the session. If the existing player is reused
+after opting out, detach it from the previous session and disable auto-publishing.
+Renderer audio-session activation and recovery are unchanged.
+
+Apply this five-path patch after the delay snapshot because both touch
+`AetherEngine.swift` and `AetherEngine+Loading.swift`. Its SHA256 is
+`15ab13f88cad176b926524c8dac39e6732515047f71e7aa4ada7de4bd1f2da3c`.
+Run `AudioNowPlayingOwnershipTests` on an iOS or tvOS simulator to cover the
+AVPlayer route, repeated loads and session removal. Run `NowPlayingRoutingTests`
+and `SharedOutputCoordinatorTests` to check the command publisher and renderer
+ownership policies separately.
+
 ### 7.62.0 integration — November 9, 2026
 
 Merge the complete upstream `7.62.0` tag
