@@ -773,7 +773,7 @@ if player.supportsCacheBackedStills {
 
 - Show the preview only when `supportsCacheBackedStills` is true.
 - A nil means "no image for this position yet", not an error. Show the time only.
-- A host on `AVPlayerViewController` sets `LoadOptions(serveIFramePlaylist: true)` instead and gets AVKit's own thumbnails.
+- A host on `AVPlayerViewController` sets `LoadOptions(serveIFramePlaylist: true)` instead and gets AVKit's own thumbnails. The engine reads the ones around the playhead ahead of time, so a scrub does not wait on each of them.
 - A host that shows no previews at all sets `generatesBackgroundScrubPreviews: false`. The engine then builds no set of preview images in idle time.
 
 Details in [api.md › Stills and thumbnails](api.md#stills-and-thumbnails).
@@ -849,6 +849,7 @@ SDR video below 1080p is scaled up to the display's native size, with VideoToolb
 - **It moves the title onto the software path,** so that path's rules apply: PiP through `softwarePiPSource`, no native subtitle renditions.
 - **Some titles keep their usual route:** HDR, Dolby Vision, a display no larger than the source, and any AirPlay route. The load logs one `[Upscale]` line saying why.
 - **It never stops playback.** A stage that falls behind degrades, then switches itself off. `$activeUpscale` then carries `degraded` or `disabledReason`.
+- **A failing VideoToolbox pass is dropped, not the stage.** Some devices (an A12 Apple TV on tvOS 27.2) report VideoToolbox super resolution and then refuse every frame. MetalFX alone then scales to the same size, and `$activeUpscale` shows `degraded` with `mlScale` nil.
 
 Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
 
@@ -900,6 +901,21 @@ player.setAudioShaping(AudioShaping(loudnessTargetLUFS: -23))   // raise quiet f
 - The same `AudioShaping` also carries the channel cap, the dialogue lift and night mode.
 
 Details in [api.md › Audio shaping](api.md#audio-shaping).
+
+### Even loudness across a music queue
+
+```swift
+var options = LoadOptions(audioOnly: true)
+options.normalizationGainDB = track.normalizationGain   // e.g. -7.9, or +4.2 for a quiet master
+try await player.load(url: url, options: options)
+```
+
+**This plays every track at the loudness your server measured.** Pass the track's ReplayGain or normalization gain on each load. Unlike `volume` it can lift a quiet track, with a -1 dBFS limiter so the lift does not clip, and it works on both audio-only hosts without moving a track between them.
+
+- `setNormalizationGain(_:)` changes it mid-track, for a setting the listener toggles.
+- `normalizationGainReport` says what was applied and how hard the limiter worked. Read it before the next load to log the finished track.
+
+Details in [api.md › Track loudness on audio-only sessions](api.md#track-loudness-on-audio-only-sessions).
 
 ### Stereo downmix for a 2.1 system
 

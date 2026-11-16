@@ -2482,6 +2482,8 @@ public final class AetherEngine: ObservableObject {
     /// gates whether this is the active backend.
     var audioAVPlayerHost: AudioAVPlayerHost?
     var audioAVPlayerActive = false
+    /// Sodalite#242: the last torn-down audio-only session's normalization figures.
+    var lastNormalizationGainReport: NormalizationGainReport?
     var audioNativeCancellables = Set<AnyCancellable>()
 
     /// Periodic memory diagnostic (30 s). Emits grep-friendly lines:
@@ -2814,6 +2816,9 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#923: the narrow write for `setAudioShaping`, for the same reason as the delay above.
     func setLoadedAudioShaping(_ shaping: AudioShaping) { loadedOptions.audioShaping = shaping }
+
+    /// Sodalite#242: the narrow write for `setNormalizationGain`, same reason as the delay above.
+    func setLoadedNormalizationGain(_ gainDB: Double?) { loadedOptions.normalizationGainDB = gainDB }
 
     /// AE#464 round 2: the fourth narrow write, and the one that makes a session-preserving reload
     /// preserve the session's transport. `autoplay` describes a MOUNT, and a rebuild is not a mount;
@@ -5680,6 +5685,7 @@ public final class AetherEngine: ObservableObject {
                 && (probe.stream(at: resolvedInitialAudio).map {
                     AACAudioSpecificConfig.coreMediaRejects(UnsafePointer($0.pointee.codecpar))
                 } ?? false)
+            let containerUnreadable = !Self.avPlayerReadsAudioContainer(probeOpened ? probe.containerFormatName : nil)
             // AE#946: AVPlayer times every fixed-blocksize FLAC frame by STREAMINFO's max_blocksize, so a
             // stream whose frames are smaller runs its clock past the real length or fails. Peeked only
             // when AVPlayer would otherwise get the stream.
@@ -5687,7 +5693,8 @@ public final class AetherEngine: ObservableObject {
                 && Self.audioOnlyUsesAVPlayer(
                     codecID: audioCodecID, isCustomSource: isCustomSource,
                     flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: false,
-                    flacSeeksMisplaced: flacSeeksMisplaced, preferred: options.preferredDecodePath)
+                    flacSeeksMisplaced: flacSeeksMisplaced, containerUnreadable: containerUnreadable,
+                    preferred: options.preferredDecodePath)
                 ? Self.firstFLACFrameBlockSize(demuxer: probe, streamIndex: resolvedInitialAudio)
                 : nil
             let flacDeclaredMax = probe.stream(at: resolvedInitialAudio)
@@ -5701,17 +5708,19 @@ public final class AetherEngine: ObservableObject {
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
                 flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
+                containerUnreadable: containerUnreadable,
                 preferred: options.preferredDecodePath)
             // Named only when it decided the route (AVPlayer otherwise), so a host can tell its
             // preference arrived.
             let hostAskedSoftware = !useNativeAudio && Self.audioOnlyUsesAVPlayer(
                 codecID: audioCodecID, isCustomSource: isCustomSource,
                 flacBlocksTooSmall: flacBlocksTooSmall, flacFramesMistimed: flacFramesMistimed,
-                flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE, preferred: .automatic)
+                flacSeeksMisplaced: flacSeeksMisplaced, aacLayoutInPCE: aacLayoutInPCE,
+                containerUnreadable: containerUnreadable, preferred: .automatic)
             let mistimedNote = flacFramesMistimed
                 ? " (FLAC frames carry \(flacFrameBlockSize ?? 0) samples, STREAMINFO declares \(flacDeclaredMax ?? 0), AE#946)"
                 : ""
-            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")\(mistimedNote)\(flacSeeksMisplaced ? " (raw FLAC, CoreMedia misplaces its seeks, AE#946)" : "")\(aacLayoutInPCE ? " (AAC layout in a PCE, CoreMedia refuses it, AE#1047)" : "")\(hostAskedSoftware ? " (host asked for the software path, #461)" : "")", category: .engine)
+            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")\(mistimedNote)\(flacSeeksMisplaced ? " (raw FLAC, CoreMedia misplaces its seeks, AE#946)" : "")\(aacLayoutInPCE ? " (AAC layout in a PCE, CoreMedia refuses it, AE#1047)" : "")\(containerUnreadable && Self.avPlayerCanDecodeAudio(audioCodecID) ? " (container \(probe.containerFormatName ?? "?") is not one AVPlayer opens)" : "")\(hostAskedSoftware ? " (host asked for the software path, #461)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
             if nativeHost != nil {
@@ -9223,6 +9232,8 @@ public final class AetherEngine: ObservableObject {
 
         // Clear audioHost so music<->video handoffs start from a clean slate; the engine is a process-wide
         // singleton and a lingering host would keep the old synchronizer alive under the next session.
+        // Sodalite#242: the figures die with the hosts, so they are kept (and logged) first.
+        captureNormalizationGainReport()
         audioCancellables.removeAll()
         audioHost?.stop()
         audioHost = nil

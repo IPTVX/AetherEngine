@@ -45,6 +45,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+RequestHeaders.swift` | `updateRequestHeaders(_:)` (AE#792): swaps a live session's request headers (a rotated bearer token) without a rebuild. |
 | `AetherEngine+SoftwarePathEscalation.swift` | AE#561: the rung under every native recovery. Moves a session AVPlayer refuses on its merits onto the software host. |
 | `AetherEngine+StereoFallback.swift` | Rebuilds a 3D session AVPlayer refuses at startup once in 2D (`stereoPresentation = .mono`). |
+| `AetherEngine+Normalization.swift` | `setNormalizationGain(_:)`, `normalizationGainReport` and `NormalizationGainReport`: the per-track loudness gain on audio-only sessions (Sodalite#242). |
 | `AetherEngine+AudioDelay.swift` | `setAudioDelay(_:)` / `audioDelaySeconds` (AE#464): the viewer's lip-sync nudge as a live setting, placed per route by `AudioDelayPolicy`. |
 | `AetherEngine+AudioMenu.swift` | AE#1049: names every audio track for the master's audio group and answers a pick in AVKit's audio menu with `selectAudioTrack`. |
 | `AetherEngine+AudibleReadback.swift` | Logs once per load what AVFoundation resolved from the audio the engine served (AE#458). Read-only: it never selects an option. |
@@ -126,6 +127,13 @@ Notes:
 | `AudioShapingMatrix.swift` | The cap, the centre lift and the LFE level as one libswresample remix matrix. |
 | `AudioShapingGraph.swift` | The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat. Runs on its own sample counter so its latency never reaches the timeline. |
 | `LoudnessNormalizer.swift` | The loudness target (AE#1036): BS.1770 integrated loudness over what has played, and the bounded, latency-free gain toward the target, applied in front of the graph. |
+
+### `Audio/Normalization/`
+
+| File | What it does |
+| --- | --- |
+| `NormalizationGainProcessor.swift` | The track gain and a 5 ms lookahead limiter at -1 dBFS on Float32 PCM, interleaved or planar, with its statistics (Sodalite#242). The FFmpeg audio host runs it in `AudioDecoder`. |
+| `NormalizationTap.swift` | The same processor inside an `AVPlayerItem` through an `MTAudioProcessingTap` on its `AVAudioMix`, for `AudioAVPlayerHost`. |
 
 ### `Audio/Spatial/`
 
@@ -276,7 +284,7 @@ Notes:
 | `MallocBlockCensus.swift` | In-process census of live malloc blocks by size class (#220), so a step in resident memory can name the allocation instead of guessing it from a block count and a total. |
 | `MallocBlockCensusTrigger.swift` | Captures that census when memory jumps. Every recorded kill is flat and then steps inside a single 30 s memprobe sample, so a periodic sampler can never catch the allocation (#220). |
 | `ThreadCPUSampler.swift` | CPU time per thread group between two samples (consumed time, including ended threads): the `cpuprobe` line next to every memprobe. Public, so a host can profile its UI from a field log. |
-| `PerFrameBenchmark.swift` | `AetherEngine.runPerFrameBenchmarks` (AE#957): per-frame time of the software path's frame work. Backs `aetherctl bench`. |
+| `PerFrameBenchmark.swift` | `AetherEngine.runPerFrameBenchmarks` (AE#957): per-frame time of the software path's frame work, the frame chain and the upscale stage. Backs `aetherctl bench`. |
 | `VMRegionCensus.swift` | Per-`user_tag` census of the dirty + swapped pages `phys_footprint` counts, as a delta against the session's first tick. Names the region a rising footprint rose in when every itemized bucket (heap census included) is flat, which is where AE#445 kept ending up. |
 | `SubtitleDeliveryStatement.swift` | Value and formatter for the #357 line. See note. |
 | `LogRedaction.swift` | Strips credentials (tokens in URL queries, auth headers) out of a line before `EngineLog` emits it. |
@@ -504,12 +512,13 @@ Notes:
 | File | What it does |
 | --- | --- |
 | `HLSVideoEngine.swift` | Native path: session orchestrator (start/stop, producer construction and restart, shift handling). |
-| `KeyframeStillLadder.swift` | Native VOD: which keyframe the sparse scrub-still ladder reads next (one a minute, then every 30 s, nearest the playhead first) and whether the origin is idle enough to read it (nothing in flight or queued, no recent refusal, 30 s buffered). Lets `scrubPreviewFrame` answer beyond the resident window on a one-connection plan. |
+| `KeyframeStillLadder.swift` | Native VOD: which keyframe the sparse scrub-still ladder reads next (one a minute, then every 30 s, nearest the playhead first; with an I-frame rendition served, every segment within 30 of the playhead's before that) and whether the origin is idle enough to read it (nothing in flight or queued, no recent refusal, 30 s buffered). Lets `scrubPreviewFrame` answer beyond the resident window on a one-connection plan. |
 | `HLSVideoEngine+AudioRoute.swift` | Native path: audio cascade of stream-copy, then `AudioBridge` (E-AC-3 above stereo by default, FLAC with `.lossless`, or the object-audio bed through `SpatialAudioBridge`), then video-only. |
 | `HLSVideoEngine+SegmentPlanning.swift` | Native path: keyframe / uniform segment plans, extradata and AAC fixups. |
 | `HLSVideoEngine+LiveReopen.swift` | Native path: live source-loss recovery (capped-backoff reopen on the same timeline), and the VOD backpressure-wedge re-anchor plus consumer re-engage nudge. The nudge re-reads the rendered position at nudge time, so the zero-tolerance seek never lands behind the on-screen frame (#115). |
 | `CodecRoutePolicy.swift` | Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE). |
 | `AnnexBSampleConverter.swift` | Native path: the session muxer rewrites Annex-B HEVC samples to length-prefixed NALs, keeping in-band VPS/SPS/PPS. movenc's own conversion under `hvc1` drops them, so a stream that sends a new PPS mid-title stopped decoding at the change (PR #703). |
+| `HEVCConformanceCrop.swift` | tvOS native path: clears the SPS conformance window of HEVC coded 3840x2176 and cropped to 2160, in the init segment and in-band, because an Apple TV restarts on it; the muxer crops with `clap` instead (PR #1072). |
 | `FelCurves/` | `DolbyVisionFelCurves` trait. See note. |
 | `DoviRpuConverter.swift` | libdovi RPU surgery for both routes. See note. |
 | `DoviRpuConverter+Probe.swift` | Diagnostic DV-conversion probe (`doviConvertProbe` / `DoviConvertProbeResult`); backs `aetherctl dovitest`. |
@@ -528,6 +537,7 @@ Notes:
 | `VODSegmentCutter.swift` | Native path: decode-order, keyframe-gated VOD segment cutter (the IRAP opens its segment, #92). |
 | `PlanBoundaryAxis.swift` | Which axis a container stamps its index entries on, and so which packet timestamp the cutter gate may compare with a plan boundary: decode for a mov/mp4 sample table, presentation for a Matroska Cue (#358, AE#561). |
 | `VideoConfigRecord.swift` | The `hvcC` / `avcC` config record and the framing question that hangs off it (#365). See note. |
+| `AC3FrameLayout.swift` | The AC-3 / E-AC-3 header fields the fMP4 `dac3` / `dec3` box is built from (sample rate, bsid, `acmod`, LFE, substreams), so a live layout change on the same PID gets a new init. |
 | `H264SPS.swift` | Hand-written H.264 SPS parser (SSAI ad-creative coded dimensions / codec config, and the slice context `H264FieldPairJoiner` reads field headers with). |
 | `H264FieldPairJoiner.swift` | AE#1070: joins the two fields of a field-coded (PAFF) H.264 frame into one packet between the Demuxer and `HLSSegmentProducer`, so the native route muxes one sample per frame. |
 | `H264CompositionOffsetRepair.swift` | Rebuilds the presentation axis of an MP4 whose writer dropped `ctts` while the bitstream still reorders pictures (#409, HEVC #699). See note. |
@@ -579,13 +589,14 @@ Notes:
 | `VideoPacketTap.swift` | Copies source video packets before the Profile 7 conversion strips the EL, with the time the served stream shows them. |
 | `VideoPacketHistory.swift` | Bounded on-disk history of tapped packets, so the EL route can follow AVPlayer to any cached position. |
 | `CompositorPreviewBuilder.swift` | Turns a resident segment into a video-only fMP4 a second AVPlayer shows, the only way DV P5 / 10.0 scrub previews get their colour. |
-| `IFrameRendition.swift` | AE#682: the I-frame rendition the segment provider serves for AVKit's scrubber, and its format. |
+| `IFrameRendition.swift` | AE#682: the I-frame rendition the segment provider serves for AVKit's scrubber, and its format. `prefetch(at:buildsFragment:)` is the still ladder's way in. |
 | `IFrameRenditionEligibility.swift` | AE#682: whether a session serves the I-frame rendition, all or nothing. |
 | `IFrameSideReader.swift` | AE#682: reads a plan segment's opening keyframe on a demuxer of its own. |
 | `IFrameFragmentBuilder.swift` | AE#682: wraps one keyframe into one fMP4 fragment on the main rendition's timeline. |
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
-| `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. |
+| `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. `UpscaleBenchmarkStage` builds the same stage for the benchmark. |
+| `PipelinedFrameStage.swift` | AE#957: runs a per-frame GPU stage with two frames in flight, delivered in decode order; `settle()` delivers them after a decoder flush. `EncodedGPUWork` is one frame's uncommitted command buffer. |
 | `FrameToneMapper.swift` | #957: the per-frame picture processing stage: a frame chain with the tone map, rebuilt for a frame's own metadata, with the overrun and HDR10+ switch-off. |
 | `BT2390ToneCurve.swift` | AE#957: the BT.2390 tone curve from a source peak to a target peak on PQ values (the CPU reference), the PQ conversions, which source value sets the peak (`ToneMapSourcePeak`), and the curve's shader parameters. |
 | `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |

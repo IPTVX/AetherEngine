@@ -173,6 +173,8 @@ The only rewrite happens as the bytes are served: each moof gets the virtual fil
   - Text and image (thumbnail) adaptation sets are not carried.
 - **Languages.** An adaptation set's `lang` replaces a track's `und`, mapped to ISO 639-2/T (`en` becomes `eng`, `de-DE` becomes `deu`).
 - **Network cost.** One request for the manifest and one per representation before the first media byte. During playback each representation file is read forward in requests that grow the way a single file's do. A small block cache per file (eight 1 MiB blocks) sits in front of them. It matters because libavformat reads an interleaved file in decode order, switching between a video fragment and the audio fragments beside it on every sample. Without the cache, each return to the video file would cost a fresh request: measured 1,042 requests for 45 s of one video file, against 65 with the cache. The origin byte total is the same as for the equivalent single MP4.
+- **No cue prewarm.** A seekable file normally gets a seek to its middle before the segment plan is built, which is how libavformat loads an MKV's Cues or an MP4's `stss` (see [Segment plan](architecture-native.md#segment-plan)). The virtual MP4 has neither: it is fragmented, and libavformat indexes it one fragment at a time, so the seek would add only the fragment at the middle. The native route skips it for a DASH source (AE#1075). Measured on a 10 minute presentation behind an origin with 80 ms latency and 4 MB/s, the seek cost about 5.7 MB and 2 s before `readyToPlay`, and the plan came out the same without it.
+- **Segment plan from the `sidx`.** The video representation's `sidx` says which subsegments start with a random-access point and when. The native route cuts its HLS segments on those points instead of on an even grid that ignores the GOPs (AE#1075, see [Declared boundaries](architecture-native.md#segment-plan)). Measured on a 5 minute presentation with keyframes 1.5 to 9 s apart: every segment decodes on its own (35 of 35, against 25 of 40 on the grid), and seeks to 15, 150 and 285 s land exactly, where the grid landed 1.8 and 3.3 s late.
 - **Refused, with the reason in the error:** live manifests (`type="dynamic"`), more than one Period, `SegmentTemplate` and `SegmentList` addressing, an initialization segment in a separate file, hierarchical `sidx` (`reference_type` 1), and encryption (`ContentProtection`, `pssh`, `encv` / `enca`). An unplayable audio adaptation set is skipped when the video plays. An unplayable video one fails the load.
 - **Seeking a fragmented MP4.** libavformat indexes such a file one fragment at a time. Without a guard, a forward seek whose next sync sample starts an unread fragment lands on whatever later fragment an earlier read indexed (a start at 150 s and a seek to 60 s rendered 122 s). So `Demuxer.seek(to:streamIndex:)` checks the samples between the target and the chosen sync sample for a hole in the index. If it finds one, it lands on the sync sample before the target instead. This applies to every fragmented MP4, not only to DASH.
 
@@ -330,10 +332,25 @@ Some files carry timestamps or bitstreams that a player would show wrongly. The 
 | MP4 whose composition offsets are missing only in later regions (judder after a seek) | Streams the same slot repair per sequence | None | [architecture › MP4 with composition offsets missing only in later regions](architecture-native.md#mp4-with-composition-offsets-missing-only-in-later-regions), [regression and reproduction](notes/partial-composition-regression.md) |
 | H.264 VOD whose parameter sets change mid-file (audio, no picture) | Moves the session to the software path | Software decode | [Below](#h264-vod-with-changing-parameter-sets) |
 | A video sample whose NAL chain overruns it, or confirmed HEVC with an incomplete two-byte NAL header (AE#561, #960) | Cuts an overlong chain at its last complete NAL; removes incomplete HEVC headers while preserving valid NALs, dropping a sample with no complete header. A CoreMedia refusal that still happens rebuilds the session on the software path, once | None, or software decode | [architecture › A video sample whose NAL chain overruns it](architecture-native.md#a-video-sample-whose-nal-chain-overruns-it) |
+| HEVC coded 3840x2176 and cropped to 2160 by a conformance window, on tvOS. An Apple TV (AppleTV18,1, tvOS 27.2.1) restarts when its hardware decoder gets this SPS | Sets the window's offsets to zero in the init segment and in the in-band SPS of every sample, and crops the 16 padding lines with a `clap` box instead (`HEVCConformanceCrop`) | None, hardware decode stays | [Below](#hevc-coded-3840x2176-and-cropped-to-2160) |
 | 24p film stamped with 2:3 pulldown times, 50 and 33 ms per frame (Sodalite#236) | Puts each frame on its 24p slot on the native route (`PulldownCadenceRetimer`) | None | [architecture › 2:3 pulldown timing on 24p film](architecture-native.md#23-pulldown-timing-on-24p-film) |
 | A declared frame rate that is not a standard rate (mkvmerge writes the first frame's duration, so such a file declares 20 fps) | Measures the rate on the head packets the probe already queued and uses that (23.976 here) for the display switch, the master's `FRAME-RATE` and the frame grid | None | |
 
 On the pulldown clip, 587 of 606 frame steps came out at exactly 41.7 ms, where every step had been 50 or 33. Content that is not film (true 30p or 60p, constant-rate stretches) is untouched.
+
+#### HEVC coded 3840x2176 and cropped to 2160
+
+**The problem.** Some encoders pad a 2160-line picture to 2176 lines and crop the 16 extra lines with the SPS conformance window. On an Apple TV (AppleTV18,1, tvOS 27.2.1) the hardware decoder takes such a stream and the device restarts within about 160 ms of the first frame. An iPhone plays the same segments. The software path plays them on the Apple TV.
+
+**What was measured.** One variable was changed at a time on the device. The same pictures play once the window's offsets are zero. An ordinary x265 encode restarts the device as soon as it carries this window. The level, the HRD parameters, the timing SEI, the access unit delimiters and the coding tools make no difference.
+
+**What happens.** On tvOS the muxer rewrites the SPS so the window's four offsets are zero. This covers the configuration record in the init segment (an `hvcC` record or Annex-B parameter sets) and the in-band SPS of every sample, Annex-B or length-prefixed (an `hev1` or Matroska source).
+
+Without the window the decoder hands out all 2176 lines. So the sample entry states the coded height, and a `clap` box (clean aperture, the container's own crop) of 3840x2160 hides the 16 padding lines. The device played this combination in the same test series.
+
+The `clap` carries a vertical offset of +8, not the -8 the spec asks for. tvOS applies that offset with the opposite sign to the spec and to macOS. Measured on an Apple TV (AppleTV14,1) with a test pattern, over HLS and from an MP4: -8 shows lines 16 to 2175, so 16 lines of picture go missing at the top and 16 padding lines show at the bottom. +8 shows exactly lines 0 to 2159. The same file would sit 16 lines low on macOS, which is another reason the repair stays on tvOS.
+
+The repair is fail-closed. Only a 4:2:0 base-layer SPS of exactly 3840x2176 with a bottom crop of 16 lines and no other crop is rewritten. Other platforms keep the window, since only the Apple TV failed on it.
 
 #### H.264 VOD with changing parameter sets
 
@@ -1666,6 +1683,15 @@ With a fixed 4 s lead instead, the buffer runs dry before every 10 s segment and
 - A PMT that first arrives after the release adds its streams during playback, as a PMT version change does.
 
 Measured through `aetherctl play --live` on a live-paced synthetic channel, median of 5: the stream analysis went from 58.7 s (32 MB, three requests, because the reader reconnects at the end of the 30 s fixture and the pass runs on to its 60 s cap) to 2.5 s (1.6 MB, one request), with both tracks. With audio that starts 5 s late it takes 4.9 s, and with a join 3 s into a 10 s GOP 7.6 s, the same as those channels without the silent program.
+
+### Live AC-3 that changes layout
+
+Some channels carry AC-3 2.0 during ads and 5.1 during the programme on the same PID. The fMP4 `dac3` / `dec3` box (the audio track's configuration) is written once per init segment, from one parsed frame.
+
+- On a live source the producer compares each stream-copied AC-3 / E-AC-3 frame with the layout of the current init: sample rate, bsid, `acmod`, LFE, and the E-AC-3 substreams.
+- On a change it cuts at the next keyframe, marks the segment with `#EXT-X-DISCONTINUITY` and gives it a versioned `#EXT-X-MAP` primed with a frame in the new layout, the same rotation as the SSAI program switch. The log line is `audio layout change`.
+- Until that keyframe, the frames in the new layout stay in the segment on the old init.
+- A bridged track is untouched: its encoder output keeps one layout.
 
 ## Known limitations
 

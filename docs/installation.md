@@ -14,7 +14,7 @@ How to add AetherEngine to an app, what it needs, and how to turn on the optiona
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.68.0-iptvx")
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.69.0-iptvx")
 ```
 
 Then link the `AetherEngine` product. Add `AetherEngineSMB` too if you want to play from SMB shares ([guide.md › SMB shares](guide.md#smb-shares)).
@@ -98,7 +98,7 @@ How each works and how close the fold gets to the composed picture: [Dolby Visio
 List the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.68.0-iptvx",
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.69.0-iptvx",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DolbyVisionFelCurves", "DolbyVisionStillReshaping"])
 ```
 

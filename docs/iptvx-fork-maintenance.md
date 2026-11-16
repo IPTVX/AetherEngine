@@ -66,6 +66,38 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.69.0 integration
+
+Merge the complete upstream 7.69.0 tag
+`a7aaa8d1f1e47c1bb171b376cdd336ccc136f44e` on the local validated
+7.68.0-iptvx candidate `55a2f74e4094dec31bc28097360ef4bf33567c23`.
+All 38 upstream commits and 66 changed paths are included. The former
+main-only AVKit prefetch, HEVC 3840×2176 conformance crop, AC-3 Live
+layout reinitialization and PMT test-hygiene corrections are now part
+of this requested tag. No commits after the tag are selected.
+
+Preserve iOS/tvOS 16, weak MetalFX and MIME override availability, the
+exact FFmpegBuild 3.15.0-iptvx `f3eca1cae075935cfc46a2e7ec5162a4e88cee35`,
+LibDovi 2.2.0-iptvx, LibTrueHD 3.2.0-iptvx, and default traits. The
+upstream dependency manifest is unchanged from 7.68.0. Normalization
+remains opt-in (nil) and no host settings are added.
+
+Keep both upstream muxer layout reinitialization bookkeeping and the
+fork's finite-opening padding. The private combined software reader
+passes frames through the new bounded frame pipeline, just like the
+upstream ordinary and DVR loops. The signed compressed-packet delay
+partition and teardown ownership remain separate from GPU processing.
+Rebuild the delay snapshot against this core; ownership snapshot
+continues to reverse/replay cleanly. Both correction checks and all
+10 maintenance regressions pass. The upstream PMT hygiene correction
+also makes `Scripts/check-test-hygiene.py` clean.
+
+The new I-frame prefetch remains behind
+`generatesBackgroundScrubPreviews` and source admission checks; IPTVX
+keeps that consent-controlled effective option false. GPU upscaling and
+HDR10 processing remain opt-in and off in the host. Their physical
+rendering and receiver behaviors are not established by source merging.
+
 ### 7.68.0 integration
 
 Integrate all 141 commits in the tagged upstream 7.64.0…7.68.0 range, through

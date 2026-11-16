@@ -1293,6 +1293,7 @@ A settings screen reads `AetherEngine.displayCapabilities` instead of guessing f
 | `$activeAudioTrackIndex` | The selected track's id. On `.remoteBypass`, the enabled item track's. |
 | `selectAudioTrack(index:)` | Session-preserving reload. `index` is `TrackInfo.id`. See [Switching audio tracks](#switching-audio-tracks). |
 | `audioShaping`, `setAudioShaping(_:)`, `$audioShapingState` | Shape the session's audio before it reaches the output (AE#923). See [Audio shaping](#audio-shaping). |
+| `normalizationGainDB`, `setNormalizationGain(_:)`, `normalizationGainReport` | Per-track loudness gain on audio-only sessions, lift included. See [Track loudness on audio-only sessions](#track-loudness-on-audio-only-sessions). |
 | `installAudioTap(channels:)`, `removeAudioTap()`, `audioTapHasDeliverySource`, `AetherEngine.audioTapFormat` | Opt-in decoded PCM, mono Float32 48 kHz with source-PTS stamps, off the render path. `channels` is an `AudioTapChannels`: `.downmix` (default) or `.dialogue` (the centre channel alone). See [the audio tap contract](#the-audio-tap-ends-with-its-session). |
 
 **`$audioTracks` on `.remoteBypass`** lists the audio tracks AVPlayer built for the item, normally just the one playing. They are read from their format descriptions:
@@ -1337,6 +1338,18 @@ Values are clamped, and read back clamped. The default shapes nothing and leaves
 - **`$audioShapingState`** publishes an `AudioShapingState`: `.off` (nothing asked, or the rebuild that carries a new value is still on the way), `.applied`, or `.unavailable` (AVPlayer owns the audio on `.remoteBypass` and the native audio-only host, or the session plays no audio).
 
 See [Audio shaping](formats.md#audio-shaping) for what each setting does to the signal.
+
+### Track loudness on audio-only sessions
+
+`LoadOptions.normalizationGainDB` applies a fixed gain in dB to an `audioOnly` session: the track's ReplayGain, or a server's measured normalization gain (Jellyfin's `NormalizationGain`). nil (the default) applies none. Video sessions ignore it.
+
+- **It can lift.** `volume` stops at 1.0, so a quiet track could only be turned down before. This gain runs inside the engine with a -1 dBFS lookahead limiter behind it (`NormalizationGainReport.ceilingDBFS`), so a lift cannot clip.
+- **The track stays on its host.** On the AVPlayer audio host the gain runs in an `MTAudioProcessingTap` on the item. On the FFmpeg audio host it runs in the decoder, ahead of `audioShaping`.
+- **Clamped** to `NormalizationGainReport.gainRange`, -30 to +18 dB.
+- **The limiter delays the audio by 5 ms.** A track starts 5 ms later than without the gain, and the FFmpeg host pushes the held tail out at the end.
+- **`setNormalizationGain(_:)`** changes it on the running track. The gain ramps to the new value over one audio buffer, no rebuild. nil turns it off; a tap already on the item stays at 0 dB until the track ends.
+- **`normalizationGainReport`** returns a `NormalizationGainReport`: the gain asked for and applied, the host, the stage (`.tap`, `.decoder`, `.volume`, `.none`), the limiter's largest reduction in dB (`limiterMaxReductionDB`) and the share of played audio it was reducing (`limitingShare`, 0 to 1). Between tracks it holds the last session's figures, captured at teardown, which also writes them to the log. Read it before loading the next track to log the finished one.
+- **Where less is applied.** If AVPlayer gives the tap no audio track to bind to, `volume` carries the cut part of the gain and a lift is dropped (`stage == .volume`, `appliedDB` below `requestedDB`, `note` says why).
 
 ## Subtitles
 
@@ -1793,6 +1806,7 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
 
 - **Republished with `degraded` true** when the stage keeps overrunning its frame budget, and a VideoToolbox + MetalFX stage drops MetalFX. Frames then go out at the VideoToolbox output size (`targetSize`), with the source's pixel aspect ratio.
   - The overrun is remembered for the process. A stage built later, whose MetalFX output is at least that large at a frame interval at least as short, starts degraded from the outset, without MetalFX. (Without a VideoToolbox pass it starts with `disabledReason` set instead.) It logs `[Upscale] starting ML only: ...`.
+- **Republished with `degraded` true and `mlScale` nil** when the VideoToolbox pass fails three times in a row and MetalFX is there: the stage carries on with MetalFX alone, from the source to the same `targetSize`. If the pass never delivered a frame, the device is taken to refuse it (an A12 Apple TV on tvOS 27.2 reports support and fails every pass), and later loads in the process plan without it.
 - **Republished with `disabledReason` set** if the stage cannot be built, or switches itself off: after repeated failures, or a sustained overrun when it has nothing left to drop. Frames are then delivered as decoded.
 
 ### Picture processing status
@@ -2313,7 +2327,7 @@ Both are per session, not a process-wide total. Two players with a 256 MiB cap c
 
 ### Per-frame benchmark
 
-`AetherEngine.runPerFrameBenchmarks(iterations:width:height:)` times the software path's work around each decoded frame on the device it runs on, and returns a `PerFrameBenchmarkReport` (device, OS, picture size, one `PerFrameBenchmarkResult` per case with min, median, p95, p99 and max in microseconds). Both are `Codable`, so a report can be saved and compared with a later build: `report.regressions(against: baseline, tolerance: 0.2)` returns one `PerFrameBenchmarkRegression` (case `name`, `reason`) per case that got slower than the tolerance and `PerFrameBenchmarkReport.regressionFloorMicroseconds`, or that ran in the baseline and is skipped or missing now. It plays nothing and needs no session; call it on the main actor, away from playback, because it keeps the CPU and GPU busy for a few seconds. The cases and the regression rule are in [cli.md › bench](cli.md#bench).
+`AetherEngine.runPerFrameBenchmarks(iterations:width:height:)` times the software path's work around each decoded frame on the device it runs on, and returns a `PerFrameBenchmarkReport` (device, OS, picture size, one `PerFrameBenchmarkResult` per case with min, median, p95, p99 and max in microseconds). Both are `Codable`, so a report can be saved and compared with a later build: `report.regressions(against: baseline, tolerance: 0.2)` returns one `PerFrameBenchmarkRegression` (case `name`, `reason`) per case that got slower than the tolerance and `PerFrameBenchmarkReport.regressionFloorMicroseconds`, or that ran in the baseline and is skipped or missing now. `width` and `height` set the picture of the metadata and frame chain cases; the upscale cases use fixed 480p, 720p and 1080p sources for a 3840x2160 display. It plays nothing and needs no session; call it on the main actor, away from playback, because it keeps the CPU, GPU and Neural Engine busy for several seconds (each VT super-resolution session takes about 4 s to start on an Apple TV). The cases and the regression rule are in [cli.md › bench](cli.md#bench).
 
 ## Optional components
 
@@ -2386,7 +2400,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
    - `disk` opts into temporary files, with the existing safeguards for the volume and the multi-session budget. Disk can compete with tvOS flash I/O; choosing it is no performance recommendation.
    - `memory` uses the existing bounded purgeable-memory store. Played history in memory may disappear and then need a source seek.
    - Local files that bypass packet caching, live DVR, and native HLS are unchanged.
-4. **`generatesBackgroundScrubPreviews`.** Set false when the host shows no scrub previews; then no ladder step or ladder side reader is created. It is independent of `serveIFramePlaylist`. It does not turn off on-demand snapshots, held pictures across an item swap, or Dolby Vision compositor/reshaping. When true, all existing source eligibility and request-budget checks still apply.
+4. **`generatesBackgroundScrubPreviews`.** Set false when the host shows no scrub previews; then no ladder step or ladder side reader is created. With `serveIFramePlaylist` it also stops the rendition's prefetch (see [`serveIFramePlaylist`](#serveiframeplaylist)), so AVKit's thumbnails are then read only when AVKit asks. It does not turn off on-demand snapshots, held pictures across an item swap, or Dolby Vision compositor/reshaping. When true, all existing source eligibility and request-budget checks still apply.
 
 ### Live
 
@@ -2643,6 +2657,7 @@ Serves an I-frame rendition next to the master, so a stock `AVPlayerViewControll
 
 - One still per segment. An SDR source gets its own keyframes at full resolution. An HDR10, HLG or Dolby Vision source gets tone-mapped 640-pixel Motion JPEG stills, because AVKit shows no scrub thumbnail from a PQ or Dolby Vision keyframe.
 - Opens a second reader on the source.
+- Reads ahead while the link is idle. Every segment within 30 of the playhead's is read first, nearest first, then the coarse rungs of the still ladder. An HDR source's JPEG is built at the same time, so a thumbnail near the playhead is answered from the cache instead of after a read and a tone map. The prefetch runs under the still ladder's rules (15 s after the start, 30 s buffered, nothing else in flight on the origin, one read every 2 s) and stops with `generatesBackgroundScrubPreviews = false`. The ladder then shares the rendition's reader and cache instead of opening its own. The log says `[StillLadder] reading through the I-frame rendition`.
 - It is absent in these cases, and one log line says why:
   - live
   - sources whose segment boundaries are not keyframes (`planNotKeyframeAligned`)
@@ -2846,10 +2861,11 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
 **It never stops playback.** A frame the stage cannot process is delivered as decoded.
 
 - **Building.** The stage is built off the main thread, because starting VideoToolbox super resolution loads its model on the Neural Engine (about 4 s cold on Apple TV). Until it is ready, frames are delivered as decoded. This is logged once as `[Upscale] passing frames through: stage still building`, then `[Upscale] stage built in ... ms`. A stage that cannot be built switches itself off like a failing one (`disabledReason` `stage not built: ...`).
-- **Overrun.** The frame budget is 90% of the frame interval, measured over 48 frames.
+- **Overrun.** The frame budget is 90% of the frame interval, measured over 48 frames. The time counted is how long each frame holds the decoder's thread: the stage keeps two frames on the GPU at once ([architecture-software.md › Two frames in flight on the GPU](architecture-software.md#two-frames-in-flight-on-the-gpu)).
   - It is that generous because the GPU lowers its clock until a steady load fills most of the interval. On an A15, work that takes 14 ms back to back reads 32 ms at 24 fps. A stricter budget would trip on the clock, not on a stage that really falls behind.
   - A sustained overrun first drops MetalFX where VideoToolbox super resolution also runs. This is logged once as `[Upscale] degraded: ...` and published as `UpscaleStatus.degraded`.
   - The overrun is remembered for the process. A later session or in-session rebuild that is at least as heavy and as fast starts without MetalFX.
+- **A failing VideoToolbox pass.** Three ML failures in a row drop the pass instead of switching the stage off: MetalFX takes the source to the same target (logged as `[Upscale] degraded: ML pass failed ...`). When the pass never delivered a frame, `FrameUpscaler.mlScaleFactors` offers no factor for the rest of the process, so later loads plan MetalFX alone. A stage with no MetalFX, or already on its VideoToolbox-only step, still switches off.
 - **Switching off.** Repeated failures, or an overrun with nothing left to drop, switch it off for the session (logged once, and published through `$activeUpscale`).
   - A stage that switched itself off stays off for the rest of the session, also across in-session rebuilds (audio switch, background return), and `$activeUpscale` keeps its `disabledReason`.
   - Its plan (source, ML output and target size) is remembered for the process, together with the source frame rate. A later load with the same plan, at that rate or faster, logs `[Upscale] not taken (the stage disabled itself for this plan earlier in this process)`.
@@ -2994,7 +3010,7 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 
 1. **`TitleInfo`.** `id` is a position in the current scan. `playlist` and `titleSet` name the title on the disc, so store those to recognize a title at a later open.
 2. **`ChapterInfo`.** `discChapters` are relative to the title and reached through `selectChapter(id:)`. `mediaChapters` are on the 0-based `currentTime` / `seek(to:)` axis (the container start already subtracted): a host passes `startSeconds` straight to `seek(to:)`, and `selectChapter` does nothing for them.
-3. **`UpscaleStatus.degraded`** is true when the stage runs below its top step. Either a sustained overrun or missing MetalFX made it deliver the VideoToolbox output at its own size (which `targetSize` then is, with the source's pixel aspect ratio), or a line-art overrun fell back to the automatic scaler. It stays true when the stage later switches itself off.
+3. **`UpscaleStatus.degraded`** is true when the stage runs below its top step. Either a sustained overrun or missing MetalFX made it deliver the VideoToolbox output at its own size (which `targetSize` then is, with the source's pixel aspect ratio), a failing VideoToolbox pass left MetalFX alone at the same `targetSize` (`mlScale` nil), or a line-art overrun fell back to the automatic scaler. It stays true when the stage later switches itself off.
 
 **`SourceProbe` HDR flags.**
 

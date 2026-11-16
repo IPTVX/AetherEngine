@@ -99,6 +99,7 @@ A VOD playlist lists every segment before any of them exists, so the engine must
 The plan needs the source's keyframe positions, read from the container's keyframe index:
 
 - **MKV / MP4:** from a brief cue prewarm, a bounded seek that loads the index (Matroska Cues, or the MP4 `stss` sync-sample table).
+- **No prewarm** where the seek cannot load an index or would cost too much: a forward-only source (the seek would be a linear read of the producer's only pass, AE#550), a segmented HLS ingest (every reposition refetches a segment, #268), and an MPEG-DASH source (a fragmented MP4 with no `stss`, AE#1075). `cuePrewarmMayRun` holds that rule.
 - **MPEG-TS / M2TS:** these have no index, so only whatever `avformat_find_stream_info` plus that seek happened to scan.
 
 `keyframeIndexIsTrustworthy` runs three checks before trusting that index. If one fails, the engine uses a uniform-stride plan instead (boundaries at even intervals).
@@ -110,6 +111,15 @@ The plan needs the source's keyframe positions, read from the container's keyfra
 | Tail | The coverage reaches within 60 s of the source duration. | A dense index that stops minutes short is a partial scan, for example an MKV whose Cues are missing or point past EOF, so only what the capped prewarm walked is known. Trusting it cuts a last segment from the final scanned keyframe to the end of the title, which the producer can never finish (PR #703). |
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
+
+**Declared boundaries come first.** Two sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
+
+- **HLS VOD ingest:** the playlist's segment starts, summed from `EXTINF` (#268).
+- **MPEG-DASH:** the video `sidx`, which marks each subsegment that starts with a SAP (a random-access point) and gives its time (AE#1075). Only SAP types 1 and 2 count (closed GOP). If one subsegment lacks such a SAP, the source declares nothing and the plan falls back as above.
+
+Each boundary is pulled up to 0.5 s below its declared time. The declared time and the container timestamp can differ by rounding, and a boundary that lands past its keyframe would open the segment one GOP late.
+
+DASH needs one more rule. In the virtual MP4, an audio subsegment that starts just before a video one is read whole before it, so audio runs ahead of video by up to one audio subsegment. A plan segment shorter than that loses its keyframe: the audio crosses the next boundary first, and the keyframe lands in the following segment. So `coalescedRandomAccessStarts` drops a SAP closer to the previous kept one than the target length, or the longest audio subsegment plus the backoff, whichever is larger. On an irregular-GOP fixture with 4 s audio subsegments, `segverify` found 35 of 35 segments independent this way, 27 of 30 without the rule, and 25 of 40 with the uniform fallback.
 
 ### Cutting segments at runtime
 
@@ -543,6 +553,7 @@ Scrub images (the thumbnails shown while the viewer drags the timeline) come fro
 - **I-frame rendition.** With `serveIFramePlaylist` (AE#682), the master lists an I-frame playlist (a playlist of keyframes only), so a stock `AVPlayerViewController` shows scrub thumbnails with no host code. The local server answers `iframe_init.mp4` and `iframe{N}.mp4` through `IFrameRendition`:
   - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk.
   - `IFrameFragmentBuilder` wraps it in one fMP4 fragment on the main rendition's timeline. Each fragment gets a fresh muxer, because AVKit asks for I-frames in any order.
+  - The still ladder fills the rendition ahead of AVKit (`IFrameRendition.prefetch`). While the rendition is served, the ladder reads through it instead of opening a reader of its own: first every segment within `KeyframeStillLadder.iFrameWindowSegments` (30) of the playhead's, then its coarse rungs. For a JPEG rendition it builds the fragment inside that window too. Without this, every thumbnail waited on its read (and for HDR on decode, tone map and encode), and AVKit showed its grey placeholder in the meantime.
   - HDR and Dolby Vision sources get one SDR Motion JPEG per keyframe instead (`IFrameJPEGBuilder`), because the tvOS scrubber gives up on PQ I-frames.
   - The rendition is all or nothing (`IFrameRenditionEligibility`). Live sessions, sequential and held origins, serial origins, disc sources and plans whose boundaries are not keyframes list none.
 

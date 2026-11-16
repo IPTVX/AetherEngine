@@ -51,7 +51,7 @@ AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionO
 Add the package:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.68.0-iptvx")
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.69.0-iptvx")
 ```
 
 Play a video:
@@ -144,8 +144,8 @@ AetherEngine follows [Semantic Versioning](https://semver.org). Every `public` d
 ## Used by
 
 <!-- used-by:start -->
-- [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
-- [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native macOS media player.
+- [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV, iPhone, iPad and Mac.
+- [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native media player for Mac, iPhone and iPad.
 - [NowSeen](https://discord.com/invite/7AFh3Hy8p4): IPTV / Manifest app for tvOS.
 - [KSKPix](https://ksktech.dev/kskpix): KSKPix is a premium IPTV player for Live TV, Movies & Series.
 - [Syravo](https://syravo.app): Xtream Codes, Jellyfin and radio client for iPhone, iPad and Apple TV.
@@ -168,6 +168,7 @@ AetherEngine follows [Semantic Versioning](https://semver.org). Every `public` d
 - [Lume](https://github.com/bilipp/Lume/): SwiftUI native open source IPTV and media player for iOS, tvOS and macOS.
 - [Prowlogue](https://prowlogue.app/): Native Apple TV client for the Jellyfin media server.
 - [BoraMin](https://github.com/jonpurdy/boramin): A native, minimal, iCloud-syncing SMB and HTTP(S) video player for tvOS, iPhone, and Mac.
+- [Arcfin](https://git.psmattas.com/ArcFin/ArcFin): A premium native Jellyfin media client for the Apple ecosystem.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
