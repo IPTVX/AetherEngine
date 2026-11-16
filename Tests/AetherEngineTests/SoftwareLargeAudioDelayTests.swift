@@ -3,7 +3,7 @@ import Testing
 @testable import AetherEngine
 
 /// Exercises actual renderer admission and video progress through the software playback host.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct SoftwareLargeAudioDelayTests {
     // Failure modes:

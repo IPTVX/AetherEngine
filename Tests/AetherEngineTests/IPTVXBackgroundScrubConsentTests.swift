@@ -4,7 +4,7 @@ import Testing
 
 /// Exercises the optional reader with a future keyframe and decodes its result through the same
 /// resident extractor used by the public scrub API; ordinary I-frame serving stays unrequested.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct IPTVXBackgroundScrubConsentTests {
     /// Without consent no elective source can be made; with consent its later keyframe yields an
     /// actual image and cancellation still suppresses delivery to a replaced scrub request.

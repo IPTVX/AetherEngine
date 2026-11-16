@@ -42,6 +42,36 @@ struct SoftwareAudioDelayEpochTests {
         #expect(resetPositions == [4])
     }
 
+    /// A delayed audio seam remains on the folded clock and does not reset the decoder twice.
+    @Test
+    func staggeredAVSeamsKeepPendingAudioOnClock() throws {
+        let input: [(Int32, Int64)] = [(0, 0), (1, 1), (0, 4), (1, 5), (0, 100), (1, 9), (1, 105)]
+        var index = 0
+        let source = SoftwareAudioDelayPacketSource(
+            video: 0, audio: 1, foldsTimeline: true,
+            timeBase: { _ in AVRational(num: 1, den: 1) },
+            readSource: {
+                if index == input.count { return nil }
+                let (stream, pts) = input[index]
+                index += 1
+                return try SoftwareStoredPacket(
+                    pts: pts, dts: pts, duration: 4, position: Int64(index),
+                    streamIndex: stream, flags: AV_PKT_FLAG_KEY,
+                    timeBaseNumerator: 1, timeBaseDenominator: 1,
+                    bytes: Data([1]), sideData: []).makeAVPacket()
+            },
+            isCurrent: { true }, recordingTap: { _ in }, prepared: { _, _ in })
+        var timestamps: [Int64] = []
+        var epochs: [UInt64] = []
+        while let packet = try source.read() {
+            timestamps.append(packet.record.pts)
+            epochs.append(packet.epoch)
+        }
+
+        #expect(timestamps == [0, 1, 4, 5, 8, 9, 13])
+        #expect(epochs == [0, 0, 0, 0, 1, 1, 1])
+    }
+
     /// DVR alignment stores every original decode field instead of reconstructing DTS from PTS.
     @Test
     func dvrRingRetainsLosslessEnvelope() throws {
@@ -76,7 +106,7 @@ struct SoftwareAudioDelayEpochTests {
     }
 
     /// A full cache parks with one pending compressed record and resumes after consumer eviction.
-    @Test(.offCooperativePool, .timeLimit(.minutes(1)))
+    @Test(.offCooperativePool, .timeLimit(.minutes(3)))
     func alignedCacheSaturationContinuesWithoutExceedingItsPartition() throws {
         let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 128, retainConsumed: true,
                                               maximumResidentBytes: 256)

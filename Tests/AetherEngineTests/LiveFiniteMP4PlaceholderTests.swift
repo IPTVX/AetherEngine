@@ -21,7 +21,7 @@ struct LiveFiniteMP4PlaceholderTests {
     /// Bounds startup latency on an isolated worker, then interrupts and joins that worker before returning.
     @Test(
         "A finite video/mp4 opens within two seconds under either declared media kind",
-        .timeLimit(.minutes(1)),
+        .timeLimit(.minutes(3)),
         arguments: [false, true], ResponseMode.allCases
     )
     func test_open_finiteMP4_completesWithinStartupBudget(

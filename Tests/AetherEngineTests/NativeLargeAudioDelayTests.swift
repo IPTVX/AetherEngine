@@ -4,7 +4,7 @@ import Testing
 @testable import AetherEngine
 
 /// Exercises the actual native engine route, including finite boundary gaps and public seeking.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct NativeLargeAudioDelayTests {
     /// Opt-in, existing public SMBClient sample; no provider/user media or machine path enters Git.

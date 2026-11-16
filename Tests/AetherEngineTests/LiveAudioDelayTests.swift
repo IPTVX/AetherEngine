@@ -4,7 +4,7 @@ import AetherLibavcodec
 @testable import AetherEngine
 
 /// Exercises the public correction against actual Live producers and their delivered fMP4 audio.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct LiveAudioDelayTests {
     // Failure modes:

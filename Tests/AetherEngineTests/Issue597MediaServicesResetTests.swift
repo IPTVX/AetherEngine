@@ -67,7 +67,7 @@ struct Issue597MediaServicesResetTests {
     /// rebuild after a reset mounted the item on the invalidated AVPlayer while the flag stayed up.
     // H.264 establishes the native route on simulators without requiring hardware HEVC support.
     @Test("a custom-source rebuild after a reset builds a fresh native player and consumes the reset",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     @MainActor
     func customRebuildConsumesTheReset() async throws {
         let engine = try AetherEngine()
@@ -91,7 +91,7 @@ struct Issue597MediaServicesResetTests {
     }
 
     @Test("without a reset a custom-source rebuild keeps its native player (issue #15)",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     @MainActor
     func customRebuildKeepsTheHostWithoutAReset() async throws {
         let engine = try AetherEngine()

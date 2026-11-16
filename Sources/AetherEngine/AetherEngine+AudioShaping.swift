@@ -16,7 +16,9 @@ extension AetherEngine {
     ///
     /// The value is clamped (`AudioShaping.clamped`) and stored in the options every rebuild replays,
     /// so it survives audio-track switches, reloads and background returns, and it is what the next
-    /// load uses. Passing the value already in force does nothing.
+    /// load uses. Passing the value already in force does nothing, and so does going from one
+    /// inactive value to another (for example setting `lfeMixDB` with no cap): it is stored, but the
+    /// pipeline would be the same, so there is no rebuild.
     ///
     /// **What it costs.** A change rebuilds the session at the playhead (`reloadAtCurrentPosition`):
     /// measured for the delay on the loopback route, about 0.3 s of held picture with the position
@@ -32,11 +34,20 @@ extension AetherEngine {
     /// retains its video position. Changes during that owned warmup interrupt its obsolete graph.
     public func setAudioShaping(_ shaping: AudioShaping) {
         let next = shaping.clamped
-        guard next != loadedOptions.audioShaping else { return }
+        let previous = loadedOptions.audioShaping
+        guard next != previous else { return }
         setLoadedAudioShaping(next)
         // Only a pipeline the engine owns carries it, and that pipeline is what decides the state.
         // Asked off the old pipeline until the rebuild replaces it, which is exactly what is playing.
         recomputeAudioShapingState()
+
+        // AE#1044: two inactive values build the same pipeline (an LFE level without a cap is one),
+        // so there is nothing to rebuild for. The value is stored for the next cap that needs it.
+        guard next.isActive || previous.isActive else {
+            EngineLog.emit("[AetherEngine] AE#923: audio shaping = \(next.summary) stored; nothing in it is "
+                           + "active, so the session keeps its pipeline", category: .engine)
+            return
+        }
 
         switch state {
         case .idle, .ended, .error:
@@ -86,7 +97,7 @@ extension AetherEngine {
     /// Reconcile after installation instead of opening another reader while that load still owns it.
     /// A replaced/stopped generation cannot carry its pending preference into a different session.
     func reconcileCapturedAudioShaping() {
-        guard pendingAudioShapingGeneration == loadGeneration, !currentLoadIsInFlight,
+        guard pendingAudioShapingGeneration == loadGeneration, !loadInFlight,
               audioShapingRebuildIsPossible,
               liveAudioDelayRejoinID == nil else { return }
         let delivered: AudioShaping?

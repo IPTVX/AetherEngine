@@ -66,6 +66,56 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.68.0 integration
+
+Integrate all 141 commits in the tagged upstream 7.64.0…7.68.0 range, through
+`0de31d0b9478b99dd49baa2bd8318604a49f99a3`, on the published IPTVX
+7.64.0 base `05195c22b5e51246995a823f698eb8907f46d699`. Keep fork and
+upstream main independent of this release. Post-tag AVKit I-frame prefetch,
+3840×2176 HEVC and Live AC-3 layout fixes are outside this release.
+
+Keep iOS/tvOS 16, macOS 14, weak MetalFX, the existing default object-audio and
+still-reshaping traits, and the private LibDovi 2.2.0-iptvx and
+LibTrueHD 3.2.0-iptvx pins. The exact FFmpegBuild 3.15.0-iptvx pin retains
+FFmpeg n8.1.3, the FFmpeg dca decoder, and Aether framework isolation while adding
+the missing PCM decoders and MPEG-1 Layer I. Do not add LibDTSX or Rust dca.
+The BT.2390 processing stage stays opt-in, off by default and unavailable before
+OS 26 or in simulators. iOS/tvOS 16 preserve request headers and AVFoundation’s
+default typing; the body-proven HLS MIME override takes effect from OS 17.
+
+Use the upstream per-stream Live timestamp fold in the software DVR reader
+and in the forward-only alignment source;
+advance the alignment epoch once for each distinct seam so a matching seam on
+the other stream does not discard buffered media a second time. Keep the private
+bounded alignment partition and the tagged upstream disk admission for fragment
+writes. Inactive shaping changes do not open another reader. Preserve the #1037
+stop check immediately after awaited software audio setup, and share the
+upstream #1061 load-settlement latch for pending shaping. Track picks wait for
+load and are released by return, Stop or replacement.
+
+The AirPlay interlace route can reload at the playhead in either direction on
+iOS when the host can report whether its AirPlay receiver shows video. The
+route type alone does not tell the engine whether the receiver has a screen.
+The new capability publisher describes an optional host action; it is not
+a receiver detector. Keep Profile 20 still reshaping and the 2D Profile 5
+route, and leave background scrub preview opt-in to the host.
+
+Reconstruction: peel the two snapshots from the IPTVX 7.64.0 base, then
+merge the exact upstream release on the disposable baseline. Keep the fork
+platform policy, accessibility audio preference, and the tagged DTS:X toggle.
+Make the OS17 MIME availability adjustment and use the tagged 3-minute timeout
+for fork tests. Copy the current snapshots and run check (both missing), apply,
+check, and apply again. All 1,443 tracked source and test paths reproduce.
+
+- `IPTVX-LIVE-AUDIO-DELAY` (45 paths), SHA-256:
+  `a803f43aaba04ce2a9e12e9381e018a30ed01c23f117ca83933373fd68cafdec`.
+- `IPTVX-AUDIO-NOW-PLAYING-OWNERSHIP` (5 paths), SHA-256:
+  `cdc05fb05a1b86a4a7a908abe67662b3988443e8fd177c323d7aa26ca611d42c`.
+
+The tag contains the upstream PMT test’s global GCD close timer, which trips
+the tagged test hygiene checker. The upstream test-only repair is after 7.68.0
+and is excluded from this integration.
+
 ### 7.64.0 integration
 
 Merge the complete upstream `7.64.0` tag

@@ -5,8 +5,8 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/IPTVX/FFmpegBuild",
       "state": {
-        "revision": "9f7edc5f19c01b343cd77c99813c2df1125a5dac",
-        "version": "3.14.0-iptvx"
+        "revision": "f3eca1cae075935cfc46a2e7ec5162a4e88cee35",
+        "version": "3.15.0-iptvx"
       }
     },
     {

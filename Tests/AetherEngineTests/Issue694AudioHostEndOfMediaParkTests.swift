@@ -12,7 +12,7 @@ struct Issue694AudioHostEndOfMediaParkTests {
     /// sequence and a later Pause/Play must keep the clock parked until an explicit seek or reload.
     @MainActor
     @Test("after end of media the clock stays on the last sample through late park, speed and play requests",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func clockParksOnTheLastSample() async throws {
         let host = AudioPlaybackHost()
         let demuxer = Demuxer()

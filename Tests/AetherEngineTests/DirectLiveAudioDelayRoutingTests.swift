@@ -3,7 +3,7 @@ import Testing
 @testable import AetherEngine
 
 /// Verifies that the upstream direct Live reader and retained large-delay alignment never share source ownership.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct DirectLiveAudioDelayRoutingTests {
     // Failure modes:

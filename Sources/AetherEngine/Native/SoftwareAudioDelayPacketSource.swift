@@ -9,12 +9,8 @@ final class SoftwareAudioDelayPacketSource {
     private(set) var epoch: UInt64 = 0
     /// First video timestamp before alignment; Live warmup is measured from this origin.
     private(set) var firstVideoSeconds: Double?
-    /// Source-order previous video timestamp used to distinguish a seam from intentional reordering.
-    private var previousVideoSeconds: Double?
-    /// Last ordinary source frame interval, retained across a seam.
-    private var frameIntervalSeconds: Double = 0
-    /// Accumulated source discontinuity removed from both streams.
-    private var discontinuitySeconds: Double = 0
+    /// Each stream owns its fold until it catches the other side of the same transport seam.
+    private var timelineFold = LiveTimelineFold()
     /// Resolved stream identities and time bases, independent of AVPacket.time_base omissions.
     private let video: Int32
     private let audio: Int32
@@ -51,23 +47,19 @@ final class SoftwareAudioDelayPacketSource {
         let stream = packet.pointee.stream_index
         let tb = timeBase(stream)
         let secondsPerTick = tb.den > 0 ? Double(tb.num) / Double(tb.den) : 0
-        if foldsTimeline, stream == video, packet.pointee.pts != Int64.min, secondsPerTick > 0 {
-            let current = Double(packet.pointee.pts) * secondsPerTick
-            if let previousVideoSeconds {
-                let delta = current - previousVideoSeconds
-                if abs(delta) >= 10 {
-                    discontinuitySeconds += delta - frameIntervalSeconds
-                    epoch &+= 1
-                } else if delta > 0 {
-                    frameIntervalSeconds = delta
-                }
+        if foldsTimeline, secondsPerTick > 0 {
+            let foldStream: LiveTimelineFold.Stream = stream == audio ? .audio : .video
+            if (stream == video || stream == audio), packet.pointee.pts != Int64.min,
+               let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * secondsPerTick),
+               !seam.adopted {
+                epoch &+= 1
             }
-            previousVideoSeconds = current
-        }
-        if foldsTimeline, discontinuitySeconds != 0, secondsPerTick > 0 {
-            let ticks = SourceTimestampBounds.roundedTicks(discontinuitySeconds / secondsPerTick)
-            packet.pointee.pts = SourceTimestampBounds.shifted(packet.pointee.pts, back: ticks)
-            packet.pointee.dts = SourceTimestampBounds.shifted(packet.pointee.dts, back: ticks)
+            let offset = timelineFold.offsetSeconds(for: foldStream)
+            if offset != 0 {
+                let ticks = SourceTimestampBounds.roundedTicks(offset / secondsPerTick)
+                packet.pointee.pts = SourceTimestampBounds.shifted(packet.pointee.pts, back: ticks)
+                packet.pointee.dts = SourceTimestampBounds.shifted(packet.pointee.dts, back: ticks)
+            }
         }
         let pts = packet.pointee.pts != Int64.min ? Double(packet.pointee.pts) * secondsPerTick : .nan
         if stream == video, firstVideoSeconds == nil, pts.isFinite { firstVideoSeconds = pts }
