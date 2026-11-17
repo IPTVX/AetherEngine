@@ -48,6 +48,48 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.69.1] - 2026-11-17
+
+### Fixed
+
+- **After a rendered Atmos title, the next 5.1 title no longer reaches the receiver as Atmos (AE#1081).**
+  On tvOS the `AtmosOutputActivator` keeps a second player looping a silent Atmos stream while a TrueHD
+  Atmos or DTS:X bed plays. At `stop()` that player was paused and emptied but stayed on the engine, and
+  it kept the HDMI route in its 32-channel layout. On an engine reused across titles, a 5.1 PCM title
+  played afterwards showed as Dolby Atmos on the receiver until the process ended. The player is now built
+  when the stream starts and released with it. Thanks to narenh for the report and the side by side with
+  a fresh engine.
+
+- **Native video on iOS can keep its sound in the background (AE#1080).** The engine kept a playing native
+  session alive when the app left the foreground, but the AVPlayer inside still had the `.automatic`
+  background policy, and under it iOS pauses any item that carries video. The native player now uses
+  `.continuesIfPossible` while `backgroundPlaybackEnabled` is on and goes back to `.automatic` when it is
+  off. The host app still needs the `audio` background mode. tvOS is unchanged. Thanks to nulltuple for
+  the report.
+
+- **DASH on the software path no longer freezes the picture at every subsegment (AE#1079).** The read gate
+  stopped reading at 4 s of audio lead or 256 parked video packets. The DASH source interleaves whole
+  subsegments, so the next video could sit behind a whole audio subsegment, or the next audio behind a
+  whole video one. With 10 s audio and 4 s video subsegments at 60 fps the picture froze for 3 to 5 s at
+  every audio subsegment while the sound played on. With 10 s video and 2 s audio the clock stalled at
+  10 s. The gate is now sized from the subsegment durations in the `sidx`. Other sources are unchanged.
+  Thanks to nulltuple for the analysis and the fixture.
+
+- **A live channel at a low bitrate opens in milliseconds instead of seconds (AE#1076).** The network reader
+  held every live read until FFmpeg's whole 256 KB buffer was full. On a 0.5 Mbit/s HDHomeRun sub-channel
+  that is 4 s per read: `open_input` took 1.7 to 2.9 s against 0.3 s on the main channels, and during
+  playback the live edge moved in 3 s steps. A live read now returns what has arrived. Measured on a
+  real-time 0.68 Mbit/s MPEG-TS origin, `open_input` went from 3.07 s to 20 ms. VOD reads are unchanged.
+  Thanks to en0x for the measurements that pointed at it.
+
+- **A live session stays live after an audio-track switch.** The rebuild behind `selectAudioTrack`
+  (and the disc-title pick and the custom-source `reloadAtCurrentPosition`) runs `stopInternal`, which
+  clears `isLive`, `isSequentialOrigin` and the live window, and then reopens through `loadNative` or
+  `loadSoftware`, which never set them again. A live MPEG-TS channel switched to its second audio track
+  came back with `isLive == false` and no DVR window, and every `startRecording(to:)` threw `.notLive`
+  until the next `load`. The rebuild now takes the liveness of the session's options exactly as `load`
+  does. Thanks to MistyKuu for the fix (#1078).
+
 ## [7.69.0] - 2026-11-16
 
 ### Added

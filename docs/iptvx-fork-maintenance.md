@@ -66,6 +66,31 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.69.1 integration
+
+Merge the complete upstream 7.69.1 tag
+`1e67e2a717983001c890f06e7a60ce91c0e474fe` on local candidate
+`b76393b1b153f30cb8f65c3b3f4f494bac3870f0`. All 15 upstream commits
+and 31 changed files are included; no commits after the tag are selected.
+The dependency manifest is unchanged: keep FFmpegBuild 3.15.0-iptvx
+`f3eca1cae075935cfc46a2e7ec5162a4e88cee35`, LibDovi 2.2.0-iptvx,
+LibTrueHD 3.2.0-iptvx, iOS/tvOS 16, weak MetalFX and the MIME fallback.
+
+Retain the per-stream Atmos activator player release, native iOS
+background policy and Live short-read implementation. The new
+`adoptSessionLiveness` helper runs for initial load and every rebuild;
+keep the fork's alignment play-intent mirror beside the initial load
+adoption. Compute the DASH read-gate budget before the fork's shared
+combined demux launcher and pass it through every combined invocation,
+including the delay-alignment route. Ordinary sources keep the upstream
+4-second/256-packet budget; compressed delay partition and source
+ownership remain separate from the DASH interleave budget.
+
+The regenerated delay snapshot and unchanged ownership snapshot replay
+identically across the complete tracked source/test tree. Patch checks,
+all ten maintenance regressions and test hygiene pass. Runtime playback
+checks are recorded separately from this source integration proof.
+
 ### 7.69.0 integration
 
 Merge the complete upstream 7.69.0 tag

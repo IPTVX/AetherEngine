@@ -1313,6 +1313,7 @@ The ids are synthetic (from 400000 up), because there is no stream index on that
 - **Rapid picks** are merged, so only one rebuild runs at a time. A pick back to the active track costs nothing, and `stop()` or a new `load` drops what is queued.
 - **A pick during a load** waits until that `load` returns, then rebuilds. `audioTracks` is published before the load's display handshake, and a rebuild that replaced the load there lost the HDR route (AE#1061). The host's `load()` now also returns normally instead of throwing `CancellationError`. To skip the extra rebuild, pass the track to `load` as `audioSourceStreamIndex`.
 - **Transport.** Like `reloadAtCurrentPosition()`, it comes back in the session's transport state: a paused session stays paused. A `play()` or `pause()` that arrives while the rebuild waits on I/O decides the final state.
+- **A live session stays live.** The rebuild keeps `$isLive` and the DVR window as `load` set them, so `startRecording(to:)` works after a switch. A recording running at the switch ends with `.ended(.sessionEnded)`, as at any session end.
 
 It does nothing in these cases. Every refusal is logged, so a picker that does nothing can be explained:
 
@@ -1514,8 +1515,8 @@ Hosts can supply other positive limits. Ordinary subtitle selection behaves as b
 
 | Symbol | Notes |
 | --- | --- |
-| `$isLive` | Mirrors `LoadOptions.isLive` for the session. |
-| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared or found by the reader. Set during `load()`, cleared on stop. See [`sequentialOrigin`](#sequentialorigin). |
+| `$isLive` | Mirrors `LoadOptions.isLive` for the session, across its rebuilds too (an audio-track switch). |
+| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared or found by the reader. Set during `load()` and kept across its rebuilds (an audio-track switch), cleared on stop. See [`sequentialOrigin`](#sequentialorigin). |
 | `seekToLiveEdge(offsetSeconds:)` | `async`. Lands `offsetSeconds` behind the usable edge (default 0; negative or non-finite read as 0), clamped to retained media. The safety margin is the host's call. On a live-only session it moves the native item to its own seekable end minus the offset. |
 | `currentItemLiveEdgeTime` | The native item's usable live edge on the display axis. nil before the item has a range, and on the software route. See the note below. |
 | `liveTargetDurationSeconds` | The TARGETDURATION the engine's own live playlist is serving. nil on remote HLS live, on the software path and before the first playlist build. |
@@ -1752,7 +1753,7 @@ If you need it, say so on the tracker instead of working around it.
 | `setSoftwareVideoFrameTimeObserver(_:)`, `softwarePresentationTimebase` | The software-path equivalent: a `SoftwareVideoFrameTimeObserver` over `SoftwareVideoFrameTime` (`presentation`, `generation`), in ascending presentation order, on the same axis as the cues. `generation` moves on every renderer flush. |
 
 1. **Source size.** On `.remoteBypass` it comes from AVPlayer's item video track once that resolves, so it is the delivered size. The ratio is 1 on square pixels, and on a declared ratio the engine refuses (#290); it is never a guess. On the paths that draw, prefer what is on screen (`softwareDisplaySize`, `AVPlayerLayer.videoRect`) over recomputing it from these.
-2. **Background policy.** `backgroundPlaybackEnabled` defaults to `true` (iOS: PiP and background audio; tvOS: the PiP keepalive). The grace window (15 s default) lets a paused session survive a quick app switch. It applies on iOS only and is ignored on tvOS; 0 restores the immediate teardown.
+2. **Background policy.** `backgroundPlaybackEnabled` defaults to `true` (iOS: PiP and background audio; tvOS: the PiP keepalive). On iOS it also sets the native AVPlayer's `audiovisualBackgroundPlaybackPolicy` (`.continuesIfPossible` when on, `.automatic` when off), including on a player that already exists. Under `.automatic`, iOS pauses any item with video once the app leaves the foreground. The host still declares the `audio` background mode and a playback audio session. The grace window (15 s default) lets a paused session survive a quick app switch. It applies on iOS only and is ignored on tvOS; 0 restores the immediate teardown.
 3. **`presentationAxisMap`.** Cue times and `sourceTime` live on the source axis; `AVPlayerItem.currentTime()` lives on the item axis. They differ by the producer shift.
    - The property itself is never nil. Its three conversions return nil, not a guess, where no seam covers the position.
    - A host or test can also build its own: `init(seams:)`, `anchored(shiftSeconds:)` (one shift covering everything), `appendSeam(shiftSeconds:activatingAtItemSeconds:)`, and `maxSeams` (64; older seams are dropped beyond that).

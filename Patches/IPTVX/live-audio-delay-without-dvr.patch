@@ -1,7 +1,7 @@
-diff --git b/Sources/AetherEngine/AetherEngine+AudioDelay.swift a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
-index 6c6d993e..7d5e836e 100644
---- b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
-+++ a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
+diff --git a/Sources/AetherEngine/AetherEngine+AudioDelay.swift b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
+index 6c6d993e57d504983ff06d4d7eb23a767b24f37a..7d5e836e8cef6bacdeb16d970cb4fea09ab7401f 100644
+--- a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
++++ b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
 @@ -30,7 +30,8 @@ extension AetherEngine {
      /// rule). So a change is brought to the playhead rather than left to arrive when that media
      /// drains, and what that costs differs:
@@ -221,10 +221,10 @@ index 6c6d993e..7d5e836e 100644
      ///
      /// Neither route asks for the producer restart directly. A restart raised while no seek of the
      /// engine's own is in flight is reported as a user scrub (`setNativeScrubSeek`), which opened a
-diff --git b/Sources/AetherEngine/AetherEngine+AudioShaping.swift a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
-index 8ce0e596..5c240efa 100644
---- b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
-+++ a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+diff --git a/Sources/AetherEngine/AetherEngine+AudioShaping.swift b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+index 8ce0e59663347ec14166c141d23038571b46d64c..5c240efa163cb6440cc95905a7bbd4fb4f0cb91f 100644
+--- a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
++++ b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
 @@ -29,7 +29,9 @@ extension AetherEngine {
      /// Where AVPlayer owns the audio (`.remoteBypass`, the native audio-only host) the engine has no
      /// PCM to shape: the value is kept for a later load, logged, and `audioShapingState` reads
@@ -325,10 +325,10 @@ index 8ce0e596..5c240efa 100644
                  && Self.audioDelayRecutIsPossible(state: self.state, isLive: self.isLive, liveWindow: self.liveWindow)
          }
      }
-diff --git b/Sources/AetherEngine/AetherEngine+Live.swift a/Sources/AetherEngine/AetherEngine+Live.swift
-index ab9317d9..8c74d9b0 100644
---- b/Sources/AetherEngine/AetherEngine+Live.swift
-+++ a/Sources/AetherEngine/AetherEngine+Live.swift
+diff --git a/Sources/AetherEngine/AetherEngine+Live.swift b/Sources/AetherEngine/AetherEngine+Live.swift
+index ab9317d95cee903d7d6a00f94334bad52be499cc..8c74d9b01355215242d27faa1a9ca4837350c505 100644
+--- a/Sources/AetherEngine/AetherEngine+Live.swift
++++ b/Sources/AetherEngine/AetherEngine+Live.swift
 @@ -115,7 +115,12 @@ extension AetherEngine {
      /// After a long pause the sliding DVR window may have evicted the playhead. Clamp to the retained
      /// floor plus a margin, or for live-only (no DVR) snap to the edge when far enough behind.
@@ -354,11 +354,11 @@ index ab9317d9..8c74d9b0 100644
          let started = DispatchTime.now()
          let ready = await BlockingWork.detached(priority: .userInitiated) {
              provider.waitForFirstLiveSegment(timeout: timeout)
-diff --git b/Sources/AetherEngine/AetherEngine+Loading.swift a/Sources/AetherEngine/AetherEngine+Loading.swift
-index aa7fd807..b1023230 100644
---- b/Sources/AetherEngine/AetherEngine+Loading.swift
-+++ a/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -1952,7 +1952,8 @@ extension AetherEngine {
+diff --git a/Sources/AetherEngine/AetherEngine+Loading.swift b/Sources/AetherEngine/AetherEngine+Loading.swift
+index 1403279d10928e14399f8473aee274e51c428855..1287633c8084d016e960f6dd7219d39d230c03e5 100644
+--- a/Sources/AetherEngine/AetherEngine+Loading.swift
++++ b/Sources/AetherEngine/AetherEngine+Loading.swift
+@@ -1953,7 +1953,8 @@ extension AetherEngine {
          // could not fill in that time. The gate is the same one the request would have waited on, so
          // the request is then answered at once.
          if isLive, let provider = nativeVideoSession?.provider {
@@ -368,7 +368,7 @@ index aa7fd807..b1023230 100644
              try checkLoadCurrent(generation)
          }
          // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
-@@ -2676,6 +2677,7 @@ extension AetherEngine {
+@@ -2677,6 +2678,7 @@ extension AetherEngine {
              && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
                  outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
                  outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
@@ -376,7 +376,7 @@ index aa7fd807..b1023230 100644
          stopInternal(resetDisplayCriteria: false,
                       keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                       keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
-@@ -2688,6 +2690,13 @@ extension AetherEngine {
+@@ -2689,6 +2691,13 @@ extension AetherEngine {
          if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
          EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
          let gen = loadGeneration
@@ -390,10 +390,10 @@ index aa7fd807..b1023230 100644
          // Audit LIF-101: the same settle point as `load`, for the same readiness waypoint.
          beginLoadInFlight(gen)
          defer { endLoadInFlight(gen) }
-diff --git b/Sources/AetherEngine/AetherEngine.swift a/Sources/AetherEngine/AetherEngine.swift
-index c11ee166..57c3ab67 100644
---- b/Sources/AetherEngine/AetherEngine.swift
-+++ a/Sources/AetherEngine/AetherEngine.swift
+diff --git a/Sources/AetherEngine/AetherEngine.swift b/Sources/AetherEngine/AetherEngine.swift
+index 6babf5aaf4e5d79e3660cd60986b1333759d83e4..3965d9aeb9d3591e338f33aa938fb132c942a22b 100644
+--- a/Sources/AetherEngine/AetherEngine.swift
++++ b/Sources/AetherEngine/AetherEngine.swift
 @@ -61,6 +61,7 @@ public final class AetherEngine: ObservableObject {
              if case .error = state {} else { errorInfo = nil }
              recomputePlaybackPhase()
@@ -402,7 +402,7 @@ index c11ee166..57c3ab67 100644
              if upscaleNativeReturnOwed != nil { settleOwedUpscaleNativeReturn() }
              if Self.backgroundPolicyIsOwedOnResume(
                  isBackgrounded: isBackgrounded, retainsPausedPipeline: retainsVideoPipelineWhenBackgrounded,
-@@ -2336,6 +2337,16 @@ public final class AetherEngine: ObservableObject {
+@@ -2339,6 +2340,16 @@ public final class AetherEngine: ObservableObject {
      /// Detached source cleanup started by the most recent native-session stop.
      private var nativeSourceTeardownTask: Task<Void, Never>?
  
@@ -419,7 +419,7 @@ index c11ee166..57c3ab67 100644
      /// Fold the cache's playlist-axis spans onto the published display axis, the same way
      /// `onSeekStateChanged` folds a scrub target (#38). The two axes differ by
      /// `playlistShiftSeconds - sourcePresentationOrigin`, which is not zero on the very path this
-@@ -2836,7 +2847,12 @@ public final class AetherEngine: ObservableObject {
+@@ -2839,7 +2850,12 @@ public final class AetherEngine: ObservableObject {
      /// custom-source branch reaches `reloadWithAudioOverride`, which reads these fields one by one.
      /// Callers go through `reloadAtCurrentPosition(applying:)`, which refuses the load-identity
      /// fields first; this setter does not re-check them.
@@ -433,7 +433,7 @@ index c11ee166..57c3ab67 100644
  
      #if DEBUG
      /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
-@@ -4282,8 +4298,20 @@ public final class AetherEngine: ObservableObject {
+@@ -4285,8 +4301,20 @@ public final class AetherEngine: ObservableObject {
      /// the rebuild already in flight delivers the newest one. See `reanchorForAudioDelay`.
      var audioDelayReanchorInFlight = false
  
@@ -454,7 +454,7 @@ index c11ee166..57c3ab67 100644
  
      /// The playhead a rebuild of this session has to come back to (#464 round 2).
      var positionForSessionRebuild: Double {
-@@ -4301,7 +4329,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4304,7 +4332,7 @@ public final class AetherEngine: ObservableObject {
      /// rather than on `.loading`, because `play()` itself moves `.loading` to `.playing` and a pause
      /// after it would otherwise go unrecorded. Read back where each rebuild settles its transport.
      func recordTransportDuringRebuild(playing: Bool) {
@@ -463,7 +463,7 @@ index c11ee166..57c3ab67 100644
          transportIntentUnderReconstruction = playing
      }
  
-@@ -4862,6 +4890,8 @@ public final class AetherEngine: ObservableObject {
+@@ -4865,6 +4893,8 @@ public final class AetherEngine: ObservableObject {
          var startPosition = startPosition
          var options = options
          options = Self.applyingSharedOutputRole(options)
@@ -472,7 +472,7 @@ index c11ee166..57c3ab67 100644
          SharedOutputCoordinator.shared.join(ObjectIdentifier(self), role: options.sharedOutputRole, tag: logTag, owner: self)
          // AE#950: the panel's cadence before the criteria write, so the play gate can tell a rate the panel
          // already ran from one it had to switch to. Runs across the probe, `apply()` reads and stops it.
-@@ -4917,6 +4947,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4920,6 +4950,7 @@ public final class AetherEngine: ObservableObject {
          // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
          // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
          claimSoftwarePathTakeover()   // AE#629
@@ -480,7 +480,7 @@ index c11ee166..57c3ab67 100644
          stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
          sessionCacheStatusToken &+= 1
          diagnostics.sessionCacheStatus = .inactive
-@@ -4958,6 +4989,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4961,6 +4992,7 @@ public final class AetherEngine: ObservableObject {
          }
          loadedURL = url
          loadedOptions = options
@@ -488,15 +488,15 @@ index c11ee166..57c3ab67 100644
          // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
          // this one through a reader that outlived it.
          sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
-@@ -4981,6 +5013,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4984,6 +5016,7 @@ public final class AetherEngine: ObservableObject {
          // host-initiated reload would resurrect a stale session snapshot.
          loadedOptions.subtitleSessionCarryover = nil
-         isLive = options.isLive
+         adoptSessionLiveness(from: options)
 +        if AudioDelayPolicy.usesAlignment(options.audioDelaySeconds) { playIntentMirror.set(options.autoplay) }
-         isSequentialOrigin = !options.isLive && options.sequentialOrigin
-         // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
-         // an over-wide published bound only affects range width, not seek landing.
-@@ -4995,6 +5028,11 @@ public final class AetherEngine: ObservableObject {
+         state = .loading
+         // AE#464 round 2: park the position THIS load is rebuilding toward before the clock that held
+         // it is cleared below, so a reload raised while this one is still in flight has something
+@@ -4992,6 +5025,11 @@ public final class AetherEngine: ObservableObject {
          // Round 3: and the transport it is rebuilding toward, for the same window and the same
          // reason. The host this load replaces is the one a stacked rebuild would ask.
          transportIntentUnderReconstruction = options.autoplay
@@ -508,7 +508,7 @@ index c11ee166..57c3ab67 100644
          isBuffering = false
          residentPlaylistRanges = []
          residentRanges = []
-@@ -6711,6 +6749,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6708,6 +6746,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func play() {
@@ -516,7 +516,7 @@ index c11ee166..57c3ab67 100644
          recordTransportDuringRebuild(playing: true)
          if deferPlayForInterruption() { return }
          // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
-@@ -6742,6 +6781,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6739,6 +6778,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func pause() {
@@ -524,7 +524,7 @@ index c11ee166..57c3ab67 100644
          recordTransportDuringRebuild(playing: false)
          resumeAfterInterruption = false
          playDeferredByInterruption = false
-@@ -6801,6 +6841,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6798,6 +6838,7 @@ public final class AetherEngine: ObservableObject {
          // that path the live state every snapshot below reads is wiped long before this call. When
          // nothing was parked this is exactly the pre-#357 live read.
          let resumesTornDownSession = backgroundTeardownSelection != nil
@@ -532,7 +532,7 @@ index c11ee166..57c3ab67 100644
          let selection = consumeReloadSelection()
          // AE#464 round 2: come back in the transport state the session is IN, not the one its first
          // mount was given. Written before the branch because only the URL branch below carries a
-@@ -6808,7 +6849,15 @@ public final class AetherEngine: ObservableObject {
+@@ -6805,7 +6846,15 @@ public final class AetherEngine: ObservableObject {
          // A torn-down session (#357 background teardown) has no transport left to read and its
          // resume is the host's call, so that path keeps replaying the mount flag exactly as before.
          if !resumesTornDownSession { setLoadedAutoplay(sessionRebuildResumesPlaying) }
@@ -549,7 +549,7 @@ index c11ee166..57c3ab67 100644
              // Rebuild on retained reader (seekable only); no URL to reopen.
              //
              // AE#526: a refusal, said out loud. This used to return silently, and a host cannot tell
-@@ -6889,7 +6938,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6886,7 +6935,7 @@ public final class AetherEngine: ObservableObject {
          var options = loadedOptions
          options.isLiveRejoin = options.isLive
          options.subtitleSessionCarryover = carryover
@@ -558,7 +558,7 @@ index c11ee166..57c3ab67 100644
                         audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
          // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
          // while it ran is the newer word.
-@@ -7754,6 +7803,7 @@ public final class AetherEngine: ObservableObject {
+@@ -7751,6 +7800,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
@@ -566,7 +566,7 @@ index c11ee166..57c3ab67 100644
          cancelPendingAudioSelection()
          releaseHeldPicture(reason: "stop")
          nextLoadRequestsInPlaceItemHandover = false
-@@ -9002,15 +9052,19 @@ public final class AetherEngine: ObservableObject {
+@@ -9015,15 +9065,19 @@ public final class AetherEngine: ObservableObject {
      ///   black-screen latency per audio switch on the old fixed 5 s
      ///   poll; capped at ~2 s since #117, but still worth skipping).
      func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false,
@@ -587,7 +587,7 @@ index c11ee166..57c3ab67 100644
          clearDisplaySwitchGate()
          scrubPreviewSourceGeneration = UUID()
          resumeAfterInterruption = false
-@@ -9098,7 +9152,11 @@ public final class AetherEngine: ObservableObject {
+@@ -9111,7 +9165,11 @@ public final class AetherEngine: ObservableObject {
              diagnostics.sessionCacheStatus = .inactive
          }
          stopDualLayerOutputRoute()
@@ -600,7 +600,7 @@ index c11ee166..57c3ab67 100644
          nativeVideoSession = nil
          nativeSubtitleRenditionsServed = false
          dolbyVisionConversion = nil
-@@ -9530,6 +9588,7 @@ public final class AetherEngine: ObservableObject {
+@@ -9543,6 +9601,7 @@ public final class AetherEngine: ObservableObject {
          guard loadInFlightGeneration == generation else { return }
          loadInFlightGeneration = nil
          settleOwedBackgroundAction()
@@ -608,11 +608,11 @@ index c11ee166..57c3ab67 100644
          settleOwedUpscaleNativeReturn()
      }
  
-diff --git b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
+diff --git a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
 new file mode 100644
-index 00000000..e6cbe6e6
+index 0000000000000000000000000000000000000000..e6cbe6e61b4136334c41df6efa2680061751c067
 --- /dev/null
-+++ a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
++++ b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
 @@ -0,0 +1,98 @@
 +import Foundation
 +
@@ -712,10 +712,10 @@ index 00000000..e6cbe6e6
 +        }
 +    }
 +}
-diff --git b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
-index c813c6dd..39880ebf 100644
---- b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
-+++ a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
+diff --git a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
+index c813c6ddf70897510b0e9f5c22532f3b3e82a065..39880ebf043778b260ca3b86be22c35e057d3e89 100644
+--- a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
++++ b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
 @@ -24,14 +24,16 @@ import Foundation
  /// `currentTime`, seeking and the subtitle axis are untouched by a nudge.
  enum AudioDelayPolicy {
@@ -741,11 +741,11 @@ index c813c6dd..39880ebf 100644
  
      /// Bring a host value into range. A non-finite value (NaN from an unset stepper, an infinity out
      /// of a division) becomes 0 rather than propagating into a timestamp.
-diff --git b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
+diff --git a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
 new file mode 100644
-index 00000000..513825f5
+index 0000000000000000000000000000000000000000..513825f5fcf782efe2a5780209ab7d066f765f65
 --- /dev/null
-+++ a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
++++ b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
 @@ -0,0 +1,20 @@
 +import Foundation
 +
@@ -767,10 +767,10 @@ index 00000000..513825f5
 +        lock.withLock { if value == 0 { bytes.removeValue(forKey: owner) } else { bytes[owner] = value } }
 +    }
 +}
-diff --git b/Sources/AetherEngine/Audio/AudioOutput.swift a/Sources/AetherEngine/Audio/AudioOutput.swift
-index 9da6e890..9f5a8b01 100644
---- b/Sources/AetherEngine/Audio/AudioOutput.swift
-+++ a/Sources/AetherEngine/Audio/AudioOutput.swift
+diff --git a/Sources/AetherEngine/Audio/AudioOutput.swift b/Sources/AetherEngine/Audio/AudioOutput.swift
+index 9da6e8902cd73afe204f97c4c557f19ba3b32644..9f5a8b01ab43ac449ad753ce4da839cfa817910d 100644
+--- a/Sources/AetherEngine/Audio/AudioOutput.swift
++++ b/Sources/AetherEngine/Audio/AudioOutput.swift
 @@ -376,6 +376,12 @@ final class AudioOutput: @unchecked Sendable {
          renderer.enqueue(delivered)
          #if DEBUG
@@ -801,10 +801,10 @@ index 9da6e890..9f5a8b01 100644
      /// Holds a pending start without its timeout, so transport tests exercise cancellation
      /// independently of how long the main actor takes to run on a loaded test runner.
      func holdPrerollForTesting(rate: Float) {
-diff --git b/Sources/AetherEngine/Audio/AudioTailPadding.swift a/Sources/AetherEngine/Audio/AudioTailPadding.swift
-index ddf18161..ccf2790f 100644
---- b/Sources/AetherEngine/Audio/AudioTailPadding.swift
-+++ a/Sources/AetherEngine/Audio/AudioTailPadding.swift
+diff --git a/Sources/AetherEngine/Audio/AudioTailPadding.swift b/Sources/AetherEngine/Audio/AudioTailPadding.swift
+index ddf181614454b87889f9070929bc5b35878d26c4..ccf2790f1971daaa1915f7f966989ba9ad66bede 100644
+--- a/Sources/AetherEngine/Audio/AudioTailPadding.swift
++++ b/Sources/AetherEngine/Audio/AudioTailPadding.swift
 @@ -62,13 +62,20 @@ enum AudioTailPadding {
      ///
      /// The packets are stamped here rather than taken from the encoder: encoders with a priming
@@ -950,11 +950,11 @@ index ddf18161..ccf2790f 100644
      /// The format to feed the encoder: for the lossless codecs the one that keeps the track's bit
      /// depth (a 16-bit FLAC stream must not grow 32-bit frames under its STREAMINFO), otherwise the
      /// encoder's first.
-diff --git b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
+diff --git a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
 new file mode 100644
-index 00000000..fde7de11
+index 0000000000000000000000000000000000000000..fde7de11942b0da0455acfe7fc9ec4aae9845e67
 --- /dev/null
-+++ a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
++++ b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
 @@ -0,0 +1,293 @@
 +import Foundation
 +
@@ -1249,11 +1249,11 @@ index 00000000..fde7de11
 +        return Packet(record: try SoftwareStoredPacket.decode(Data(data.dropFirst(17))), lane: lane, origin: Int(origin), epoch: epoch)
 +    }
 +}
-diff --git b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
+diff --git a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
 new file mode 100644
-index 00000000..3e8f04c0
+index 0000000000000000000000000000000000000000..3e8f04c002e0ee2be103d42f63df2a0c18b3a013
 --- /dev/null
-+++ a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
++++ b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
 @@ -0,0 +1,294 @@
 +import Foundation
 +import AVFAudio
@@ -1549,10 +1549,10 @@ index 00000000..3e8f04c0
 +        return table.mPrimingFrames
 +    }
 +}
-diff --git b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
-index 7aad70b4..fcbaf94c 100644
---- b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
-+++ a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
+diff --git a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
+index 7aad70b4583fb504b9245ba97f5e5a0c1352a554..fcbaf94cecc36d7a51553a7487cebf218a1c5264 100644
+--- a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
++++ b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
 @@ -29,9 +29,18 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
      enum BridgeError: Error, CustomStringConvertible {
          case codecparAllocFailed
@@ -1745,10 +1745,10 @@ index 7aad70b4..fcbaf94c 100644
          // Anchor the encoder on the first block after a reset, and keep the encoder's input
          // contiguous with the source afterwards: a gap the decoder skipped (corrupt access units) is
          // filled with silence so everything after it stays on its timestamp.
-diff --git b/Sources/AetherEngine/BackgroundTeardownSelection.swift a/Sources/AetherEngine/BackgroundTeardownSelection.swift
-index b517cb79..e6a26479 100644
---- b/Sources/AetherEngine/BackgroundTeardownSelection.swift
-+++ a/Sources/AetherEngine/BackgroundTeardownSelection.swift
+diff --git a/Sources/AetherEngine/BackgroundTeardownSelection.swift b/Sources/AetherEngine/BackgroundTeardownSelection.swift
+index b517cb79d27b5b0b6be1010a1abf530de98e94fc..e6a2647995a331628a0e1281cd8b1e50efb8bbdb 100644
+--- a/Sources/AetherEngine/BackgroundTeardownSelection.swift
++++ b/Sources/AetherEngine/BackgroundTeardownSelection.swift
 @@ -29,11 +29,18 @@ extension AetherEngine {
          backgroundTeardownSelection = liveSelection(over: backgroundTeardownSelection)
      }
@@ -1769,10 +1769,10 @@ index b517cb79..e6a26479 100644
          return liveSelection(over: parked)
      }
  
-diff --git b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
-index fe7dc9f1..8b462e70 100644
---- b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
-+++ a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
+diff --git a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
+index fe7dc9f1d94defa5f708cfe2acee02e1295f97ab..8b462e700434fbf2662b43657c8491d625b97bff 100644
+--- a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
++++ b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
 @@ -233,9 +233,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
      /// engine-created ingest session (the dead reader's construction inputs are immutable, so the fresh
      /// one rejoins the same channel at its current live edge). Main-video role only: the companion
@@ -1787,11 +1787,11 @@ index fe7dc9f1..8b462e70 100644
                                          diagnosticContext: diagnosticContext)
          fresh.setJoinCushion(joinCushionSeconds)
          return fresh
-diff --git b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
+diff --git a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
 new file mode 100644
-index 00000000..5cb5a110
+index 0000000000000000000000000000000000000000..5cb5a1103b18ac94b20a925d90502bf3b2f8e372
 --- /dev/null
-+++ a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
++++ b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
 @@ -0,0 +1,12 @@
 +import Foundation
 +
@@ -1805,11 +1805,11 @@ index 00000000..5cb5a110
 +    /// Scoped to the reload call, so ordinary loads keep their existing teardown behavior.
 +    @TaskLocal static var current: LiveAudioDelayRejoinContext?
 +}
-diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
+diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
 new file mode 100644
-index 00000000..faa69f72
+index 0000000000000000000000000000000000000000..faa69f72d8b42f9e90e07a3bb994a6401546f773
 --- /dev/null
-+++ a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
++++ b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
 @@ -0,0 +1,13 @@
 +/// Commits source changes only when their compressed records leave alignment queues. Observing a
 +/// future source epoch during read-ahead must never reset the decoder serving queued older media.
@@ -1824,11 +1824,11 @@ index 00000000..faa69f72
 +        return true
 +    }
 +}
-diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
+diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
 new file mode 100644
-index 00000000..56105f2c
+index 0000000000000000000000000000000000000000..56105f2c416cc838843d98e693a20460a85a8bb8
 --- /dev/null
-+++ a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
++++ b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
 @@ -0,0 +1,71 @@
 +import Foundation
 +import AetherLibavcodec
@@ -1901,11 +1901,11 @@ index 00000000..56105f2c
 +                     lane: stream == video ? .video : (stream == audio ? .audio : .other), epoch: epoch)
 +    }
 +}
-diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
+diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
 new file mode 100644
-index 00000000..7ebcffbb
+index 0000000000000000000000000000000000000000..7ebcffbbd25c594057e0dc4140f0968879c09b67
 --- /dev/null
-+++ a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
++++ b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
 @@ -0,0 +1,70 @@
 +import Foundation
 +
@@ -1977,10 +1977,10 @@ index 00000000..7ebcffbb
 +        return presentation >= videoStart
 +    }
 +}
-diff --git b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
-index 65348713..a3448636 100644
---- b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
-+++ a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
+diff --git a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
+index 65348713340bda22461b19ae7643529943ee0b9a..a344863688227388037080021a240b3c642b821f 100644
+--- a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
++++ b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
 @@ -40,7 +40,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
          let hasFailure: Bool
      }
@@ -2059,10 +2059,10 @@ index 65348713..a3448636 100644
              while diskBytes > max(0, budget), oldestChunkID < headID, oldestChunkID < tailID {
                  let url = chunkURL(oldestChunkID)
                  var info = stat()
-diff --git b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
-index d3f92c10..f714ca01 100644
---- b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
-+++ a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
+diff --git a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
+index d3f92c1089177e4a03edc5ff6b604e45cc533e78..f714ca01ffe13666ebb831dc7859a8c6eda882ce 100644
+--- a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
++++ b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
 @@ -59,6 +59,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
      private let video: Stream
      private let audio: Stream?
@@ -2135,10 +2135,10 @@ index d3f92c10..f714ca01 100644
      /// Only bounded metadata work under condition; parser and media I/O have already finished.
      private func applyCacheTimingLocked() {
          guard !closed, !sourceRepositioning, !resetPending, let cacheTiming else { return }
-diff --git b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
-index e049cc07..7c2a0c3c 100644
---- b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
-+++ a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
+diff --git a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
+index 999f3cc0f1c7169d647881719a5c5066fff643ca..99f49ebb2cf2034f8621c50fd95248c0376f74e4 100644
+--- a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
++++ b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
 @@ -126,7 +126,7 @@ final class SoftwarePlaybackHost {
      nonisolated static func makePacketStore(
          storage: SoftwarePacketCacheStorage, forwardSegments: Int?,
@@ -2279,7 +2279,7 @@ index e049cc07..7c2a0c3c 100644
      }
  
      private var timeTimer: AnyCancellable?
-@@ -1342,14 +1394,20 @@ final class SoftwarePlaybackHost {
+@@ -1346,14 +1398,20 @@ final class SoftwarePlaybackHost {
          armReadyForDisplayObserver()
  
          dvrRingHoldsCushionOnly = false
@@ -2303,7 +2303,7 @@ index e049cc07..7c2a0c3c 100644
          }
  
          // Resolve the audio stream up front so the session-start log and the decoder agree. #133:
-@@ -1732,7 +1790,8 @@ final class SoftwarePlaybackHost {
+@@ -1736,7 +1794,8 @@ final class SoftwarePlaybackHost {
              let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
              // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
              // remote source that has to scan for its landing would otherwise block the main thread here.
@@ -2313,7 +2313,7 @@ index e049cc07..7c2a0c3c 100644
                                             { [weak self] in self?.stopRequested ?? true })
              // Like the others (the audio route choice, the cache setup, the primer wait), this
              // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
-@@ -1772,11 +1831,12 @@ final class SoftwarePlaybackHost {
+@@ -1776,11 +1835,12 @@ final class SoftwarePlaybackHost {
              let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                  let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                  guard let (fifo, bytes, claim) = try Self.makePacketStore(
@@ -2328,7 +2328,7 @@ index e049cc07..7c2a0c3c 100644
                      initialSourceClock: initialSourceClock, fifo: fifo,
                      videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming,
                      anchorsOnLastKeyframe: anchorsOnLastKeyframe
-@@ -1792,7 +1852,13 @@ final class SoftwarePlaybackHost {
+@@ -1796,7 +1856,13 @@ final class SoftwarePlaybackHost {
              switch cacheResult {
              case .success(let cache):
                  readAhead = cache?.0
@@ -2343,7 +2343,7 @@ index e049cc07..7c2a0c3c 100644
              case .failure:
                  // A cache-directory failure must not stop a source that the old direct loop can
                  // still play. Runtime spool corruption is explicit, never silently skipped.
-@@ -1804,7 +1870,23 @@ final class SoftwarePlaybackHost {
+@@ -1808,7 +1874,23 @@ final class SoftwarePlaybackHost {
              readAhead?.start()
          }
  
@@ -2368,7 +2368,7 @@ index e049cc07..7c2a0c3c 100644
              let videoIndex = videoStreamIndex
              let audioIndex = audioStreamIndex
              let result = await BlockingWork.detached(priority: .userInitiated) {
-@@ -1848,6 +1930,7 @@ final class SoftwarePlaybackHost {
+@@ -1852,6 +1934,7 @@ final class SoftwarePlaybackHost {
  
      func play() {
          guard !stopRequested, failure == nil else { return }
@@ -2376,7 +2376,7 @@ index e049cc07..7c2a0c3c 100644
          renderer.recoverAfterSuspensionIfNeeded()
          audioOutput?.setPlaybackEnabled(true)
          // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
-@@ -1997,6 +2080,7 @@ final class SoftwarePlaybackHost {
+@@ -2001,6 +2084,7 @@ final class SoftwarePlaybackHost {
      }
  
      func pause() {
@@ -2384,7 +2384,7 @@ index e049cc07..7c2a0c3c 100644
          // Latch even before arming: stale decoder and rebuffer work cannot restart the clock
          // after this pause while the host publishes its transport state.
          audioOutput?.setPlaybackEnabled(false)
-@@ -2069,7 +2153,8 @@ final class SoftwarePlaybackHost {
+@@ -2073,7 +2157,8 @@ final class SoftwarePlaybackHost {
          guard clockArmed, let aOut = audioOutput else { return }
          let tail = SoftwareEndOfMediaClock.tailPlayoutSeconds(
              clockSeconds: aOut.currentTimeSeconds,
@@ -2394,7 +2394,7 @@ index e049cc07..7c2a0c3c 100644
          )
          guard tail > 0 else { return parkClockNow() }
          // The deferral aims at the end of the queued tail; a task that runs late must not park past it.
-@@ -2341,7 +2426,13 @@ final class SoftwarePlaybackHost {
+@@ -2345,7 +2430,13 @@ final class SoftwarePlaybackHost {
      /// decoded a frame.
      var videoQueueFlushOwedForTesting: Bool { videoQueueFlushOwed }
      var audioRendererForTesting: AVSampleBufferAudioRenderer? { audioOutput?.renderer }
@@ -2408,7 +2408,7 @@ index e049cc07..7c2a0c3c 100644
      /// Exposes source ownership for bounded-buffer and DVR-routing regressions.
      var directLiveReadAheadForTesting: DirectLiveAudioReadAhead? { directLiveReadAhead }
      /// Observes successful renderer delivery; install before playback and never reenter the output.
-@@ -2550,7 +2641,8 @@ final class SoftwarePlaybackHost {
+@@ -2554,7 +2645,8 @@ final class SoftwarePlaybackHost {
              forSession: seconds,
              sessionZeroSeconds: clockSessionZero
          )
@@ -2418,7 +2418,7 @@ index e049cc07..7c2a0c3c 100644
          // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
          // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
          let wasPlaying = SeekResumeIntent.resolve(isPlaying: isPlaying,
-@@ -2604,7 +2696,7 @@ final class SoftwarePlaybackHost {
+@@ -2608,7 +2700,7 @@ final class SoftwarePlaybackHost {
          var cacheHit = false
          if let packetSource, let cacheGeneration {
              let preparation = await BlockingWork.detached(priority: .userInitiated) {
@@ -2427,7 +2427,7 @@ index e049cc07..7c2a0c3c 100644
              }.result
              guard seekGeneration == generation, !stopRequested else { return .superseded }
              switch preparation {
-@@ -2641,7 +2733,7 @@ final class SoftwarePlaybackHost {
+@@ -2645,7 +2737,7 @@ final class SoftwarePlaybackHost {
              // existing frontier; seeking it too would duplicate or skip already retained packets.
              outcome = .landed
          } else {
@@ -2436,7 +2436,7 @@ index e049cc07..7c2a0c3c 100644
                  { [weak self] in
                      self?.seekGeneration != generation || (self?.stopRequested ?? true)
                  })
-@@ -2872,7 +2964,8 @@ final class SoftwarePlaybackHost {
+@@ -2876,7 +2968,8 @@ final class SoftwarePlaybackHost {
          // Reposition cursor to the newest keyframe at or before target. If the target precedes every
          // retained keyframe, fall to the EARLIEST keyframe, not seqBounds.first, which can be a mid-GOP
          // leading entry before the ring's first eviction and would decode as garbage until the next keyframe.
@@ -2446,7 +2446,7 @@ index e049cc07..7c2a0c3c 100644
              ?? ring.firstKeyframeSeq()
              ?? ring.seqBounds.first
          setFeedCursor(seq)
-@@ -2943,6 +3036,8 @@ final class SoftwarePlaybackHost {
+@@ -2947,6 +3040,8 @@ final class SoftwarePlaybackHost {
      }
  
      func stop() {
@@ -2455,7 +2455,7 @@ index e049cc07..7c2a0c3c 100644
          stopRequested = true
          pausedBeforeFirstFrame = false
          isPlaying = false
-@@ -2970,6 +3065,10 @@ final class SoftwarePlaybackHost {
+@@ -2974,6 +3069,10 @@ final class SoftwarePlaybackHost {
          dvrRing = nil
          retentionClaims.forEach { $0.release() }
          retentionClaims.removeAll()
@@ -2466,7 +2466,7 @@ index e049cc07..7c2a0c3c 100644
          liveEdgeLock.lock()
          sessionStartPts = .nan
          liveJoinPolicy = SoftwareLiveJoinPolicy()
-@@ -3146,6 +3245,74 @@ final class SoftwarePlaybackHost {
+@@ -3150,6 +3249,86 @@ final class SoftwarePlaybackHost {
              self?.onClockSessionZero?(resolvedZero)
          }
  
@@ -2477,6 +2477,17 @@ index e049cc07..7c2a0c3c 100644
 +        let diag = demuxDiag
 +        let keyframeLedger = keyframeLedger
 +        let directLiveSource = directLiveReadAhead
++        let readGateBudget = SoftwareReadGateBudget(
++            audioReadLeadSeconds: dem.dashInterleaveLeadSeconds,
++            videoSubsegmentSeconds: dem.dashVideoSubsegmentSeconds,
++            frameRate: dem.stream(at: vIdx).flatMap { AetherEngine.detectFrameRate(stream: $0) })
++        if readGateBudget != .ordinary {
++            EngineLog.emit(
++                "[SWHost] AE#1079 read gate sized to the DASH interleave: audio lead "
++                + String(format: "%.1f", readGateBudget.audioLeadSeconds)
++                + " s, parked video cap \(readGateBudget.parkedVideoCap)",
++                category: .swPlayback)
++        }
 +        let readAhead = directLiveSource?.packets ?? vodPacketReadAhead
 +        let videoEnd: Double? = !liveSession && dem.duration > 0
 +            ? dem.resolvedSourceStartOrigin + dem.duration : nil
@@ -2520,6 +2531,7 @@ index e049cc07..7c2a0c3c 100644
 +                onError: onErrorForGeneration,
 +                onEnd: onEndForGeneration,
 +                audioTapSink: getAudioTapSink,
++                readGateBudget: readGateBudget,
 +                subtitleStreamIndices: subIndices,
 +                subtitleTimeBases: subTimeBases,
 +                splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
@@ -2541,7 +2553,7 @@ index e049cc07..7c2a0c3c 100644
          if liveSession, let ring {
              let getFeederPlaying: @Sendable () -> Bool = { [weak self] in
                  guard let self else { return false }
-@@ -3213,9 +3380,42 @@ final class SoftwarePlaybackHost {
+@@ -3217,9 +3396,42 @@ final class SoftwarePlaybackHost {
                      splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
                      subtitleTapSink: getSubtitleTapSink,
                      recordingTap: recordingTap,
@@ -2585,13 +2597,24 @@ index e049cc07..7c2a0c3c 100644
              let lookahead = audioLookahead
              feedQueue.async {
                  Self.runLiveFeederLoop(
-@@ -3255,57 +3455,7 @@ final class SoftwarePlaybackHost {
+@@ -3259,69 +3471,7 @@ final class SoftwarePlaybackHost {
              return
          }
  
 -        let diag = demuxDiag
 -        let keyframeLedger = keyframeLedger
 -        let directLiveSource = directLiveReadAhead
+-        let readGateBudget = SoftwareReadGateBudget(
+-            audioReadLeadSeconds: dem.dashInterleaveLeadSeconds,
+-            videoSubsegmentSeconds: dem.dashVideoSubsegmentSeconds,
+-            frameRate: dem.stream(at: vIdx).flatMap { AetherEngine.detectFrameRate(stream: $0) })
+-        if readGateBudget != .ordinary {
+-            EngineLog.emit(
+-                "[SWHost] AE#1079 read gate sized to the DASH interleave: audio lead "
+-                + String(format: "%.1f", readGateBudget.audioLeadSeconds)
+-                + " s, parked video cap \(readGateBudget.parkedVideoCap)",
+-                category: .swPlayback)
+-        }
 -        let readAhead = directLiveSource?.packets ?? vodPacketReadAhead
 -        demuxQueue.async {
 -            Self.runDemuxLoop(
@@ -2630,6 +2653,7 @@ index e049cc07..7c2a0c3c 100644
 -                onError: onErrorForGeneration,
 -                onEnd: onEndForGeneration,
 -                audioTapSink: getAudioTapSink,
+-                readGateBudget: readGateBudget,
 -                subtitleStreamIndices: subIndices,
 -                subtitleTimeBases: subTimeBases,
 -                splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
@@ -2644,7 +2668,7 @@ index e049cc07..7c2a0c3c 100644
      }
  
      // MARK: - Live reader loop (DVR sessions)
-@@ -3329,10 +3479,13 @@ final class SoftwarePlaybackHost {
+@@ -3345,10 +3495,13 @@ final class SoftwarePlaybackHost {
          splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
          subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
          recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
@@ -2659,7 +2683,7 @@ index e049cc07..7c2a0c3c 100644
          var lastSeenExtradata: Data? = nil
          let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
              videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
-@@ -3422,11 +3575,13 @@ final class SoftwarePlaybackHost {
+@@ -3438,11 +3591,13 @@ final class SoftwarePlaybackHost {
              if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                 packet.pointee.pts != Int64.min {
                  let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
@@ -2678,7 +2702,7 @@ index e049cc07..7c2a0c3c 100644
                  }
              }
              let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
-@@ -3455,8 +3610,22 @@ final class SoftwarePlaybackHost {
+@@ -3471,8 +3626,22 @@ final class SoftwarePlaybackHost {
                          let isKey = isVideo && (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                          // Best-effort: a write failure just shrinks the
                          // rewind window, it must not stall the reader.
@@ -2703,7 +2727,7 @@ index e049cc07..7c2a0c3c 100644
                          condition.lock()
                          condition.broadcast()
                          condition.unlock()
-@@ -3981,14 +4150,14 @@ final class SoftwarePlaybackHost {
+@@ -3997,14 +4166,14 @@ final class SoftwarePlaybackHost {
          audioTimeBaseSeconds: Double,
          isLive: Bool,
          foldTimeline: Bool,
@@ -2720,7 +2744,7 @@ index e049cc07..7c2a0c3c 100644
          seekWindowOpen: @Sendable () -> Bool,
          setDecodeGeneration: @Sendable (UInt64) -> Void,
          noteDecodeGeneration: @Sendable () -> Void,
-@@ -4003,7 +4172,14 @@ final class SoftwarePlaybackHost {
+@@ -4020,7 +4189,14 @@ final class SoftwarePlaybackHost {
          recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
          playedMedia: PlayedMediaLedger? = nil,
          keyframeLedger: SWKeyframeLedger? = nil,
@@ -2736,7 +2760,7 @@ index e049cc07..7c2a0c3c 100644
      ) {
          // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
          func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
-@@ -4047,6 +4223,97 @@ final class SoftwarePlaybackHost {
+@@ -4064,6 +4240,97 @@ final class SoftwarePlaybackHost {
              audioTimeBase: audioTimeBaseSeconds) : nil
          var replayGeneration = seekGeneration()
  
@@ -2834,7 +2858,7 @@ index e049cc07..7c2a0c3c 100644
          // Clock-arming fallback bookkeeping: a declared audio track whose
          // decoder never produces buffers (corrupt stream) must not leave
          // the session unarmed forever. See the video-branch arming below.
-@@ -4092,7 +4359,7 @@ final class SoftwarePlaybackHost {
+@@ -4110,7 +4377,7 @@ final class SoftwarePlaybackHost {
          // lead never leaves the start offset must not eat a rebuffer pause at every session start.
          var pauseArmOpen = false
          var parkedSeekGeneration = seekGeneration()
@@ -2843,7 +2867,7 @@ index e049cc07..7c2a0c3c 100644
          // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
          // is the pacing input and only exists where audio is decoupled, so a live session's line read
          // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
-@@ -4286,7 +4553,8 @@ final class SoftwarePlaybackHost {
+@@ -4306,7 +4573,8 @@ final class SoftwarePlaybackHost {
          // pauseArmOpen latch keeps that from firing on realtime-paced sources that never had
          // a lead to lose.
          func applyAudioClockAction() {
@@ -2853,7 +2877,7 @@ index e049cc07..7c2a0c3c 100644
              let lead = lastEnqueuedAudioPtsSec.isFinite
                  ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
              pauseArmOpen = AudioLookaheadPolicy.pauseArmOpens(wasOpen: pauseArmOpen, lead: lead)
-@@ -4298,7 +4566,7 @@ final class SoftwarePlaybackHost {
+@@ -4318,7 +4586,7 @@ final class SoftwarePlaybackHost {
                  atRingEnd: true,
                  // End of media releases the hold explicitly in the read path below; there is no
                  // ring here whose end this could be read from.
@@ -2862,7 +2886,7 @@ index e049cc07..7c2a0c3c 100644
              ) {
              case .pauseForRebuffer:
                  rebuffering = true
-@@ -4358,7 +4626,10 @@ final class SoftwarePlaybackHost {
+@@ -4378,7 +4646,10 @@ final class SoftwarePlaybackHost {
              audioOutput: AudioOutput,
              expectedAudioEpoch: UInt64
          ) -> UInt64 {
@@ -2873,7 +2897,7 @@ index e049cc07..7c2a0c3c 100644
                  !didEvaluateInitialAVSkew,
                  firstAudioSampleSeconds.isFinite,
                  firstVideoSampleSeconds.isFinite
-@@ -4381,7 +4652,7 @@ final class SoftwarePlaybackHost {
+@@ -4401,7 +4672,7 @@ final class SoftwarePlaybackHost {
              guard let correctedEpoch = audioOutput.flush(ifEpoch: expectedAudioEpoch) else {
                  return expectedAudioEpoch
              }
@@ -2882,7 +2906,7 @@ index e049cc07..7c2a0c3c 100644
              armClock(
                  audioOutput,
                  resolution: correction.clockResolution,
-@@ -4496,14 +4767,46 @@ final class SoftwarePlaybackHost {
+@@ -4517,14 +4788,46 @@ final class SoftwarePlaybackHost {
              var audioEpochBeforeRead = audioOutput?.epoch ?? 0
              // And the producer's own: a seek's flush that lands between the generation check below and
              // the feed would let a pre-seek packet re-anchor the APAC bridge for the whole post-seek run.
@@ -2933,7 +2957,7 @@ index e049cc07..7c2a0c3c 100644
                          diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
                                       rebuffering: false, generation: diagAudioPtsGeneration)
                      }
-@@ -4515,22 +4818,7 @@ final class SoftwarePlaybackHost {
+@@ -4536,22 +4839,7 @@ final class SoftwarePlaybackHost {
                      } else {
                          maximumWait = rebuffering ? nil : Self.parkedVideoReadWaitSeconds
                      }
@@ -2957,7 +2981,7 @@ index e049cc07..7c2a0c3c 100644
                  }
              } catch {
                  // Stop/seek cancellation is not a playback failure, including a normal .closed
-@@ -4563,7 +4851,9 @@ final class SoftwarePlaybackHost {
+@@ -4584,7 +4872,9 @@ final class SoftwarePlaybackHost {
                  // What the audio producer still holds (the APAC encoder's last packets) goes in
                  // first, so the drain below plays it too.
                  if let aDec = audioDecoder, let aOut = audioOutput {
@@ -2968,7 +2992,7 @@ index e049cc07..7c2a0c3c 100644
                          guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpochBeforeRead) else { break }
                      }
                  }
-@@ -4582,12 +4872,13 @@ final class SoftwarePlaybackHost {
+@@ -4603,12 +4893,13 @@ final class SoftwarePlaybackHost {
                  return !isLive
              }
  
@@ -2983,7 +3007,7 @@ index e049cc07..7c2a0c3c 100644
  
              // Discontinuity runs before any timestamp read. Each stream folds its own seams (AE#1053).
              let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
-@@ -4661,6 +4952,20 @@ final class SoftwarePlaybackHost {
+@@ -4682,6 +4973,20 @@ final class SoftwarePlaybackHost {
                  }
              }
  
@@ -3004,7 +3028,7 @@ index e049cc07..7c2a0c3c 100644
              if liveJoinAwaitsKeyframe {
                  if clockArmed() || backgroundAudioOnly() {
                      liveJoinAwaitsKeyframe = false
-@@ -4743,7 +5048,7 @@ final class SoftwarePlaybackHost {
+@@ -4764,7 +5069,7 @@ final class SoftwarePlaybackHost {
                      // requires a DECLARED audio track, not a producing one). The stream that
                      // produces NO packets at all is #337's case and exits at the read gate.
                      if !clockArmed(), let aOut = audioOutput,
@@ -3013,7 +3037,7 @@ index e049cc07..7c2a0c3c 100644
                          armFromVideoPacket(packet, aOut)
                      }
                      drainParkedVideoNonblocking()
-@@ -4832,7 +5137,7 @@ final class SoftwarePlaybackHost {
+@@ -4853,7 +5158,7 @@ final class SoftwarePlaybackHost {
                  reassertGateIfRefused(verdict, epoch: epochBeforeRead)
                  // Video-only / undecodable audio fallback: arm clock off first video packet (no buffer within the producer's first-buffer budget = decoder not recovering).
                  if !clockArmed(), let aOut = audioOutput,
@@ -3022,7 +3046,7 @@ index e049cc07..7c2a0c3c 100644
                      armFromVideoPacket(packet, aOut)
                  }
              } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
-@@ -4871,11 +5176,11 @@ final class SoftwarePlaybackHost {
+@@ -4892,11 +5197,11 @@ final class SoftwarePlaybackHost {
                      return true
                  }
                  audioPacketsSeen += 1
@@ -3036,7 +3060,7 @@ index e049cc07..7c2a0c3c 100644
                  }
                  audioEpochBeforeRead = applyInitialAVSkewCorrectionIfNeeded(
                      audioOutput: aOut,
-@@ -4884,7 +5189,11 @@ final class SoftwarePlaybackHost {
+@@ -4905,7 +5210,11 @@ final class SoftwarePlaybackHost {
                  // Renderer admission can clear its gate before a compressed producer decodes
                  // the tap's PCM. Both outputs must use the same packet's startup cutoff.
                  let tapStartupSnapshot = (cutoff: discardAudioBeforeSeconds, generation: startupSeekGeneration)
@@ -3049,7 +3073,7 @@ index e049cc07..7c2a0c3c 100644
                  let tapSink = audioTapSink()
                  // The flush can also land inside `decode`, so the buffers are checked out again.
                  if seekGeneration() != genBeforeRead {
-@@ -4899,6 +5208,12 @@ final class SoftwarePlaybackHost {
+@@ -4920,6 +5229,12 @@ final class SoftwarePlaybackHost {
                          return true
                      }
                  }
@@ -3062,7 +3086,7 @@ index e049cc07..7c2a0c3c 100644
                  // #95: mirrored behind the accept, so a refused buffer is not transcribed. The tap
                  // transcribes PCM, so a producer that hands the renderer compressed audio decodes it here.
                  if let tapSink {
-@@ -4913,7 +5228,7 @@ final class SoftwarePlaybackHost {
+@@ -4934,7 +5249,7 @@ final class SoftwarePlaybackHost {
                  if let last = playableBuffers.last {
                      let pts = CMSampleBufferGetPresentationTimeStamp(last)
                      if pts.isValid {
@@ -3071,7 +3095,7 @@ index e049cc07..7c2a0c3c 100644
                          diagAudioPtsSec = pts.seconds
                          diagAudioPtsGeneration = genBeforeRead
                      }
-@@ -4925,7 +5240,7 @@ final class SoftwarePlaybackHost {
+@@ -4946,7 +5261,7 @@ final class SoftwarePlaybackHost {
                      let firstPTS = CMSampleBufferGetPresentationTimeStamp(firstBuffer)
                      let resolution = SWClockAnchorPolicy.resolve(
                          initialSeconds: initialClockTime.seconds,
@@ -3080,10 +3104,10 @@ index e049cc07..7c2a0c3c 100644
                      )
                      armClock(
                          aOut,
-diff --git b/Sources/AetherEngine/PlayerState.swift a/Sources/AetherEngine/PlayerState.swift
-index af70ebde..0602bc29 100644
---- b/Sources/AetherEngine/PlayerState.swift
-+++ a/Sources/AetherEngine/PlayerState.swift
+diff --git a/Sources/AetherEngine/PlayerState.swift b/Sources/AetherEngine/PlayerState.swift
+index af70ebdeee3ddbf3c32d6fcd308bccca1084eec5..0602bc29606f50f1e7361f37b45d606b8798f100 100644
+--- a/Sources/AetherEngine/PlayerState.swift
++++ b/Sources/AetherEngine/PlayerState.swift
 @@ -1355,7 +1355,7 @@ public struct LoadOptions: Sendable, Equatable {
          self.progressiveSegmentDelivery = progressiveSegmentDelivery
          self.autoplay = autoplay
@@ -3093,10 +3117,10 @@ index af70ebde..0602bc29 100644
          self.audioShaping = audioShaping.clamped
          self.normalizationGainDB = normalizationGainDB.flatMap {
              $0.isFinite ? NormalizationGainProcessor.clampedGainDB($0) : nil }
-diff --git b/Sources/AetherEngine/Video/HLSSegmentProducer.swift a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
-index 535f1c6a..aaf4b576 100644
---- b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
-+++ a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
+diff --git a/Sources/AetherEngine/Video/HLSSegmentProducer.swift b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
+index 535f1c6aa75477f0f1047baf118803a313ffa485..aaf4b576e4fea73ad34ffec76eb039dd4196b7ee 100644
+--- a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
++++ b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
 @@ -1411,6 +1411,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
          case stopRequested
          case readError(code: Int32)
@@ -3709,10 +3733,10 @@ index 535f1c6a..aaf4b576 100644
      }
  
      // MARK: - Look-behind finalize helpers
-diff --git b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
-index 49831acf..988cd2de 100644
---- b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
-+++ a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
+diff --git a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
+index 49831acfe3065612bdd49ac125dee307c351a71a..988cd2de030b190c9ccf67f4ca82ca6ff16f9718 100644
+--- a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
++++ b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
 @@ -87,7 +87,7 @@ extension HLSVideoEngine {
              return true
          case .sourceReplay, .eof, .readError, .keyframeStarvation:
@@ -3743,10 +3767,10 @@ index 49831acf..988cd2de 100644
              // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
              return
          case .sourceReplay:
-diff --git b/Sources/AetherEngine/Video/HLSVideoEngine.swift a/Sources/AetherEngine/Video/HLSVideoEngine.swift
-index e60c1c48..55491bd4 100644
---- b/Sources/AetherEngine/Video/HLSVideoEngine.swift
-+++ a/Sources/AetherEngine/Video/HLSVideoEngine.swift
+diff --git a/Sources/AetherEngine/Video/HLSVideoEngine.swift b/Sources/AetherEngine/Video/HLSVideoEngine.swift
+index e60c1c4839b94760d723e58fc1f86c293392e951..55491bd468c0b9a06bb133e8d8fe342683dd58e6 100644
+--- a/Sources/AetherEngine/Video/HLSVideoEngine.swift
++++ b/Sources/AetherEngine/Video/HLSVideoEngine.swift
 @@ -1309,6 +1309,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
      public var onSessionCacheStatusChanged: (@Sendable (SessionCacheStatus) -> Void)?
      /// #687: this session's entry in the process-wide ledger, released on `stop()`.
@@ -3874,10 +3898,10 @@ index e60c1c48..55491bd4 100644
              let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
              dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
          }
-diff --git b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
-index a3836392..8fcaa3f2 100644
---- b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
-+++ a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
+diff --git a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
+index a38363924c89d9ea5596e926863326b6485680fe..8fcaa3f2aa4c51ec3ce88c09164e260d747abc2d 100644
+--- a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
++++ b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
 @@ -270,6 +270,8 @@ final class MP4SegmentMuxer {
      private(set) var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
      private(set) var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
@@ -3907,10 +3931,10 @@ index a3836392..8fcaa3f2 100644
                  if let path = counter.currentPath, let admit = counter.admitStagingBytes {
                      let admission = admit(path, count)
                      guard admission == .admitted else {
-diff --git b/Sources/AetherEngine/Video/PacketRingBuffer.swift a/Sources/AetherEngine/Video/PacketRingBuffer.swift
-index 54d6f833..1f6270e1 100644
---- b/Sources/AetherEngine/Video/PacketRingBuffer.swift
-+++ a/Sources/AetherEngine/Video/PacketRingBuffer.swift
+diff --git a/Sources/AetherEngine/Video/PacketRingBuffer.swift b/Sources/AetherEngine/Video/PacketRingBuffer.swift
+index 54d6f8336da550008345b612575010f27926eaf2..1f6270e132c632794351839b16a76a934d2ddd6c 100644
+--- a/Sources/AetherEngine/Video/PacketRingBuffer.swift
++++ b/Sources/AetherEngine/Video/PacketRingBuffer.swift
 @@ -21,15 +21,31 @@ final class PacketRingBuffer: @unchecked Sendable {
          let isKeyframe: Bool
          let isVideo: Bool
@@ -4019,10 +4043,10 @@ index 54d6f833..1f6270e1 100644
      func seq(forKeyframeAtOrBefore target: Double) -> Int? {
          lock.lock()
          defer { lock.unlock() }
-diff --git b/Sources/AetherEngine/Video/SegmentCache.swift a/Sources/AetherEngine/Video/SegmentCache.swift
-index d9a9e024..bd86250a 100644
---- b/Sources/AetherEngine/Video/SegmentCache.swift
-+++ a/Sources/AetherEngine/Video/SegmentCache.swift
+diff --git a/Sources/AetherEngine/Video/SegmentCache.swift b/Sources/AetherEngine/Video/SegmentCache.swift
+index d9a9e0241d52f8c533c54e0f0c7e629b69ab565a..bd86250a8c92df844cd058a6062466c777bbd93f 100644
+--- a/Sources/AetherEngine/Video/SegmentCache.swift
++++ b/Sources/AetherEngine/Video/SegmentCache.swift
 @@ -1237,6 +1237,59 @@ final class SegmentCache: @unchecked Sendable {
          return _totalBytes
      }
@@ -4083,11 +4107,11 @@ index d9a9e024..bd86250a 100644
      /// AE#443: mean on-disk size of a resident segment, which is what turns a window in seconds into a
      /// window in bytes (`LiveWindowSizing.affordableSegments`). nil while nothing is resident, so an
      /// empty cache states that it cannot answer rather than answering zero.
-diff --git b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
+diff --git a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
 new file mode 100644
-index 00000000..212cfd1a
+index 0000000000000000000000000000000000000000..212cfd1a962f6492c9e0564f524bd651ed8b7a75
 --- /dev/null
-+++ a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
++++ b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
 @@ -0,0 +1,53 @@
 +import Foundation
 +import Testing
@@ -4142,11 +4166,11 @@ index 00000000..212cfd1a
 +        }
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
+diff --git a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
 new file mode 100644
-index 00000000..94d4d61c
+index 0000000000000000000000000000000000000000..94d4d61c8a3ba46c4496d2f345583d9e888a01c0
 --- /dev/null
-+++ a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
++++ b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
 @@ -0,0 +1,88 @@
 +import Testing
 +@testable import AetherEngine
@@ -4236,10 +4260,10 @@ index 00000000..94d4d61c
 +        }
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/AudioTailPaddingTests.swift a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
-index 755074ef..0d027d28 100644
---- b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
-+++ a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
+diff --git a/Tests/AetherEngineTests/AudioTailPaddingTests.swift b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
+index 755074ef6b8c6f987bef90a69885e50b548f8ca2..0d027d288594306c2eae1518ef5d08560d4865e6 100644
+--- a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
++++ b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
 @@ -179,6 +179,56 @@ struct AudioTailPaddingTests {
          }
      }
@@ -4297,11 +4321,11 @@ index 755074ef..0d027d28 100644
      private static func installEncoderExtradata(on par: UnsafeMutablePointer<AVCodecParameters>) throws {
          let codec = try #require(avcodec_find_encoder(par.pointee.codec_id))
          var encOpt = avcodec_alloc_context3(codec)
-diff --git b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
+diff --git a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
 new file mode 100644
-index 00000000..2fef16c0
+index 0000000000000000000000000000000000000000..2fef16c08b561445ced70fbb2772aac6363b4559
 --- /dev/null
-+++ a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
++++ b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
 @@ -0,0 +1,170 @@
 +import Foundation
 +import Testing
@@ -4473,11 +4497,11 @@ index 00000000..2fef16c0
 +        try await job.outcome().get()
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
+diff --git a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
 new file mode 100644
-index 00000000..727b7571
+index 0000000000000000000000000000000000000000..727b7571176a57bceaa954a582f8c1850682c3fd
 --- /dev/null
-+++ a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
++++ b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
 @@ -0,0 +1,57 @@
 +import Foundation
 +import Testing
@@ -4536,11 +4560,11 @@ index 00000000..727b7571
 +        }
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
+diff --git a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
 new file mode 100644
-index 00000000..498d3ca3
+index 0000000000000000000000000000000000000000..498d3ca3bfeeeb666c585c0e3e5f0152ac338d77
 --- /dev/null
-+++ a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
++++ b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
 @@ -0,0 +1,443 @@
 +import Foundation
 +import AVFoundation
@@ -4985,10 +5009,10 @@ index 00000000..498d3ca3
 +    }
 +
 +}
-diff --git b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
-index cdb432bb..9815ea92 100644
---- b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
-+++ a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
+diff --git a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
+index cdb432bb898691511130e6c46c293de66306703a..9815ea9263c8323bc5182748a9aa73181f533e4c 100644
+--- a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
++++ b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
 @@ -15,8 +15,8 @@ struct Issue464AudioDelayPolicyTests {
      func clamping() {
          #expect(AudioDelayPolicy.clamp(0.15) == 0.15)
@@ -5021,11 +5045,11 @@ index cdb432bb..9815ea92 100644
      }
  
      @Test("every route says where its offset lands, and the two AVPlayer-owned ones say they cannot")
-diff --git b/Tests/AetherEngineTests/LiveAudioDelayTests.swift a/Tests/AetherEngineTests/LiveAudioDelayTests.swift
+diff --git a/Tests/AetherEngineTests/LiveAudioDelayTests.swift b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
 new file mode 100644
-index 00000000..23ecb1c1
+index 0000000000000000000000000000000000000000..23ecb1c1cfb08e6d5d3d62bc291756a150e333b9
 --- /dev/null
-+++ a/Tests/AetherEngineTests/LiveAudioDelayTests.swift
++++ b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
 @@ -0,0 +1,369 @@
 +import Foundation
 +import Testing
@@ -5396,11 +5420,11 @@ index 00000000..23ecb1c1
 +        #expect(engine.nativeHost?.transportIntentIsPlaying == false)
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
+diff --git a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
 new file mode 100644
-index 00000000..292c9ecc
+index 0000000000000000000000000000000000000000..292c9ecc61d5b91d6e7268b5f0b7f4a4ec7a87ec
 --- /dev/null
-+++ a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
++++ b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
 @@ -0,0 +1,349 @@
 +import Foundation
 +import AVFoundation
@@ -5751,11 +5775,11 @@ index 00000000..292c9ecc
 +        #expect(!AudioDelayPolicy.requiresRebuild(from: 2, to: -2))
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
+diff --git a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
 new file mode 100644
-index 00000000..286d05b3
+index 0000000000000000000000000000000000000000..286d05b34f7743d36ece48798291b801f7bafe3e
 --- /dev/null
-+++ a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
++++ b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
 @@ -0,0 +1,152 @@
 +import Foundation
 +import Testing
@@ -5909,11 +5933,11 @@ index 00000000..286d05b3
 +    }
 +
 +}
-diff --git b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
+diff --git a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
 new file mode 100644
-index 00000000..86c70bfa
+index 0000000000000000000000000000000000000000..86c70bfaf41bc451531223b48026ad644d32c38b
 --- /dev/null
-+++ a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
++++ b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
 @@ -0,0 +1,85 @@
 +import Testing
 +@testable import AetherEngine
@@ -6000,11 +6024,11 @@ index 00000000..86c70bfa
 +    }
 +
 +}
-diff --git b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
+diff --git a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
 new file mode 100644
-index 00000000..0e0319d0
+index 0000000000000000000000000000000000000000..0e0319d0def864b78b8165e64395800372c5465c
 --- /dev/null
-+++ a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
++++ b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
 @@ -0,0 +1,225 @@
 +import Foundation
 +import Testing
@@ -6231,10 +6255,10 @@ index 00000000..0e0319d0
 +        }
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
-index 79fb1595..dd8e735b 100644
---- b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
-+++ a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
+diff --git a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
+index 79fb1595588bd0b8f1e0c8559025d50eb46b4e38..dd8e735b694507ae353c224d2b9da5fd4d41ef61 100644
+--- a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
++++ b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
 @@ -194,6 +194,133 @@ struct SpatialAudioBridgeTests {
      #endif
  
@@ -6369,11 +6393,11 @@ index 79fb1595..dd8e735b 100644
      /// The output comes from `BedRegression`, whose latency the bridge has to keep off the timeline:
      /// the stand-in decoders carry a bed, and the timestamps and the tail are those of the source.
      @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024")
-diff --git b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
+diff --git a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
 new file mode 100644
-index 00000000..772b6dde
+index 0000000000000000000000000000000000000000..772b6ddea3fe4cedd7fcc91053ac58c10206da64
 --- /dev/null
-+++ a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
++++ b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
 @@ -0,0 +1,25 @@
 +import Foundation
 +@testable import AetherEngine
@@ -6400,11 +6424,11 @@ index 00000000..772b6dde
 +    /// Records ownership release without blocking teardown.
 +    func close() { closes.update { $0 += 1 } }
 +}
-diff --git b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
+diff --git a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
 new file mode 100644
-index 00000000..1683bce3
+index 0000000000000000000000000000000000000000..1683bce374d8ff578bc19822f922d90836048d33
 --- /dev/null
-+++ a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
++++ b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
 @@ -0,0 +1,85 @@
 +import Foundation
 +import AetherLibavcodec
@@ -6491,11 +6515,11 @@ index 00000000..1683bce3
 +        return Double(repetitions - 1) * stride + videoEnd
 +    }
 +}
-diff --git b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
+diff --git a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
 new file mode 100644
-index 00000000..11b0f6c0
+index 0000000000000000000000000000000000000000..11b0f6c05bf2d473b50392ec881b834d8ef1d92b
 --- /dev/null
-+++ a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
++++ b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
 @@ -0,0 +1,53 @@
 +import Foundation
 +import AetherLibavcodec
