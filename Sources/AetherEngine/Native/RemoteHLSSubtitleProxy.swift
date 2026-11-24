@@ -54,13 +54,14 @@ enum RemoteHLSSubtitleProxy {
     static func prepare(originURL: URL,
                         tracks: [RemoteHLSSubtitleProvider.Track],
                         httpHeaders: [String: String],
-                        needsRelay: Bool) async -> Prepared? {
+                        needsRelay: Bool,
+                        budgetSeconds: TimeInterval = budgetSeconds) async -> Prepared? {
         guard !tracks.isEmpty || needsRelay else { return nil }
         if !tracks.isEmpty {
             do {
                 let prepared = try await build(
                     originURL: originURL, tracks: tracks, httpHeaders: httpHeaders,
-                    needsRelay: needsRelay)
+                    needsRelay: needsRelay, budgetSeconds: budgetSeconds)
                 EngineLog.emit(
                     "[AetherEngine] #316: serving \(tracks.count) external subtitle rendition(s) over a "
                     + "rewritten master at \(prepared.masterURL.absoluteString), media "
@@ -120,8 +121,9 @@ enum RemoteHLSSubtitleProxy {
     private static func build(originURL: URL,
                               tracks: [RemoteHLSSubtitleProvider.Track],
                               httpHeaders: [String: String],
-                              needsRelay: Bool) async throws -> Prepared {
-        let session = makeSession()
+                              needsRelay: Bool,
+                              budgetSeconds: TimeInterval) async throws -> Prepared {
+        let session = makeSession(budgetSeconds: budgetSeconds)
         defer { session.finishTasksAndInvalidate() }
         // Audit NAT-105: the variant is whatever the master names, on any host or scheme, so the
         // host's credentials go only where the host sent them.
@@ -168,16 +170,17 @@ enum RemoteHLSSubtitleProxy {
                     master, relativeTo: finalURL, port: server.port, token: server.pathToken,
                     absoluteOnly: true))
         }
-        // Decode up front: the rendition is fetched the moment the host selects it, and a whole-program
-        // .vtt is fetched once and never again.
-        provider.startFill()
+        // A whole-program .vtt is fetched once and never again, so it is decoded before AVPlayer sees it.
+        // AE#984 R2: only the rendition the host picks fills right away; the rest wait until the item is
+        // ready, because each one is an extraction the server runs next to the transcode's start.
+        provider.startFill(holdingUnpicked: true)
         return Prepared(server: server, provider: provider, masterURL: masterURL,
                         renditionNames: rewritten.renditionNames)
     }
 
     // MARK: - Playlist reads
 
-    private static func makeSession() -> URLSession {
+    private static func makeSession(budgetSeconds: TimeInterval) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = budgetSeconds / 2
         config.timeoutIntervalForResource = budgetSeconds

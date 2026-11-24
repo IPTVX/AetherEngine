@@ -8,14 +8,27 @@ import Metal
 /// completed: the GPU time in milliseconds, or the command buffer's error.
 struct EncodedGPUWork: @unchecked Sendable {
     let commandBuffer: MTLCommandBuffer
-    /// The plane textures (and their Core Video wrappers) the work reads and writes, held until it is done.
-    let keepAlive: Any
+    /// The plane textures the work reads and writes and the texture cache they came from, held until it
+    /// is done: the stage may drop its own cache while the work is still on the GPU (audit GPU-201).
+    let textures: MetalTextureLease?
     let failure: (MTLCommandBufferStatus, Error?) -> Error
 
-    func finish() throws -> Double {
-        withExtendedLifetime(keepAlive) {}
+    /// `forcedError` stands in for the command buffer's own error (the stages' test seam).
+    func finish(forcedError: Error? = nil) throws -> Double {
+        withExtendedLifetime(textures) {}
+        if let forcedError { throw failure(.error, forcedError) }
         guard commandBuffer.status == .completed else { throw failure(commandBuffer.status, commandBuffer.error) }
         return max(0, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000)
+    }
+
+    /// A command buffer refused because the app is in the background (iOS), looked for through the
+    /// stages' own wrappers: not a fault of the stage, so no stage counts it as a failure (audit GPU-203).
+    static func isBackgroundRefusal(_ error: Error) -> Bool {
+        if let wrapped = error as? GPUStageFailure, let underlying = wrapped.underlying {
+            return isBackgroundRefusal(underlying)
+        }
+        let ns = error as NSError
+        return ns.domain == MTLCommandBufferErrorDomain && ns.code == Int(MTLCommandBufferError.Code.notPermitted.rawValue)
     }
 
     /// Commits and waits on the calling thread, as the stages did before the pipeline.
@@ -61,6 +74,10 @@ final class PipelinedFrameStage: @unchecked Sendable {
         /// and returns once this frame's step is under way. It calls `resume` once, from any thread, with
         /// what to do next; a `.later` there delivers the original frame.
         case later(_ start: (_ resume: @escaping @Sendable (Begun) -> Void) -> Void)
+        /// Deliver nothing: the stage could not produce the frame, and the original is no picture to show
+        /// (the software decoder's conversion target, which nothing wrote). Its slot frees as a delivery's
+        /// would. From `begin` or from a `.later` step's `resume`.
+        case drop
     }
 
     /// Two frames in flight: the A12 measurement above.
@@ -94,6 +111,8 @@ final class PipelinedFrameStage: @unchecked Sendable {
         let generation: UInt64
         var output: CVPixelBuffer?
         var done = false
+        /// Set by `.drop`: the frame frees its slot without reaching `deliver`.
+        var dropped = false
         /// When the frame let go of the submitting thread (uptime ns), under the pipeline's lock.
         var released: UInt64?
         init(original: CVPixelBuffer, pts: CMTime, hdr10Plus: Data?, generation: UInt64) {
@@ -145,6 +164,8 @@ final class PipelinedFrameStage: @unchecked Sendable {
             finish(entry, output: nil, inline: alone)
         case let .ready(output):
             finish(entry, output: output, inline: alone)
+        case .drop:
+            finish(entry, output: nil, inline: alone, dropped: true)
         case let .gpu(work, complete):
             release(entry)
             commit(entry, work, complete: complete, start: start)
@@ -153,6 +174,7 @@ final class PipelinedFrameStage: @unchecked Sendable {
                 switch next {
                 case .passThrough, .later: finish(entry, output: nil, inline: false)
                 case let .ready(output): finish(entry, output: output, inline: false)
+                case .drop: finish(entry, output: nil, inline: false, dropped: true)
                 case let .gpu(work, complete): commit(entry, work, complete: complete, start: start)
                 }
             }
@@ -188,9 +210,10 @@ final class PipelinedFrameStage: @unchecked Sendable {
     /// Frames submitted and not yet delivered.
     var inFlight: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
 
-    private func finish(_ entry: Entry, output: CVPixelBuffer?, inline: Bool) {
+    private func finish(_ entry: Entry, output: CVPixelBuffer?, inline: Bool, dropped: Bool = false) {
         lock.lock()
         entry.output = output
+        entry.dropped = dropped
         entry.done = true
         if inline, entries.first === entry, !delivering {
             entries.removeFirst()
@@ -215,13 +238,19 @@ final class PipelinedFrameStage: @unchecked Sendable {
     }
 
     private func hand(_ entry: Entry) {
-        // A seek since `submit` makes the frame stale: it frees its slot without reaching the renderer.
-        if isCurrent(entry.generation) {
+        // A seek since `submit` makes the frame stale, and a dropped frame has no picture: either frees its
+        // slot without reaching the renderer.
+        if !entry.dropped, isCurrent(entry.generation) {
             deliver(entry.output ?? entry.original, entry.pts, entry.hdr10Plus)
         }
         slots.signal()
         undelivered.leave()
     }
+}
+
+/// A stage's error that wraps the one that caused it, which `EncodedGPUWork.isBackgroundRefusal` looks at.
+protocol GPUStageFailure: Error {
+    var underlying: Error? { get }
 }
 
 /// A stage hands a `Begun` from its ML callback to the pipeline; the buffers in it belong to one frame.

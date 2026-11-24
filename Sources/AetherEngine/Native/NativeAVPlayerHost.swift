@@ -52,7 +52,7 @@ final class NativeAVPlayerHost {
     var iFramePlaylistWithheld: (@Sendable () -> Bool)?
     /// AE#561: what the session can still offer when AVPlayer refuses the media, answered by the
     /// engine because the host owns none of it. Set at mount, read only while classifying a failure.
-    var softwarePathAvailability: (@Sendable () -> SoftwarePathEscalation.Availability?)?
+    var softwarePathAvailability: (@MainActor () -> SoftwarePathEscalation.Availability?)?
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false
@@ -2071,7 +2071,9 @@ final class NativeAVPlayerHost {
     /// swap opens: `replaceCurrentItem` blanks this layer until the next item's first frame, however
     /// long the old item was kept. An output belongs to one item and is only attached for the read.
     /// nil when no frame arrives inside `timeout`, which the caller treats as "nothing to hold".
-    func captureDisplayedFrame(timeout: Duration = .milliseconds(500)) async -> CVPixelBuffer? {
+    func captureDisplayedFrame(
+        timeout: Duration = AetherEngine.heldPictureFrameWait(seconds: AetherEngine.defaultHeldPictureFrameWaitSeconds)
+    ) async -> CVPixelBuffer? {
         guard let item = playerItem else { return nil }
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
             kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
@@ -2080,6 +2082,27 @@ final class NativeAVPlayerHost {
         defer { item.remove(output) }
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
+        // AE#1113: an item that played to its end vends nothing to a new output (measured on a Mac:
+        // 40 reads over 400 ms, none). A zero-tolerance seek 1 ms back makes it render its last frame
+        // again, in 17 ms; a seek to where it stands is a no-op and renders nothing. Not awaited, so a
+        // seek that has to refetch the tail cannot outrun `timeout`; the loop below reads whatever it
+        // renders in time. The item goes back to its end afterwards, so a later play() does not run
+        // that millisecond and end a second time.
+        var endPosition: CMTime?
+        if didReachEnd, avPlayer.rate == 0 {
+            let end = item.currentTime()
+            let back = CMTimeSubtract(end, CMTime(value: 1, timescale: 1000))
+            if back.isNumeric, back > .zero {
+                endPosition = end
+                avPlayer.seek(to: back, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+            }
+        }
+        defer {
+            // A new seek replaces one still pending, so this also ends a nudge the deadline cut short.
+            if let endPosition, playerItem === item {
+                avPlayer.seek(to: endPosition, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+            }
+        }
         repeat {
             // A playing item vends at the host clock, a paused one only at the time it holds.
             let itemTime = avPlayer.rate == 0 ? item.currentTime()
@@ -2835,7 +2858,7 @@ final class NativeAVPlayerHost {
             switch evidence {
             case .settled(let verdict):
                 self.publishCarriageProbeVerdict(verdict, sid: sid, from: "playlist")
-            case .needsSegmentHead(let segmentURL):
+            case .needsSegmentHead(let segmentURL, let segmentKey):
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sid) carriage probe: the playlists cannot settle this one, "
                     + "so the segment head waits for readyToPlay rather than compete with the mount (#296)",
@@ -2858,10 +2881,11 @@ final class NativeAVPlayerHost {
                 }
                 let verdict = await SourceNetworkDiagnostics.$context.withValue(diagnosticContext) {
                     await HLSCarriageProbe.classifyDeferredSegmentHead(
-                        url: segmentURL, httpHeaders: httpHeaders, credentialOrigin: url)
+                        url: segmentURL, key: segmentKey, httpHeaders: httpHeaders, credentialOrigin: url)
                 }
                 guard !Task.isCancelled, self.sessionID == sid else { return }
-                self.publishCarriageProbeVerdict(verdict, sid: sid, from: "segment PMT")
+                self.publishCarriageProbeVerdict(
+                    verdict, sid: sid, from: segmentKey == nil ? "segment PMT" : "decrypted segment PMT (#1089)")
             }
         }
     }

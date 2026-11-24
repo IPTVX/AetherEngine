@@ -67,6 +67,12 @@ public actor FrameExtractor {
         queueJobsInFlight > 0 ? max(openDecoderPixelArea, knownDecoderPixelArea) : openDecoderPixelArea
     }
     var decoderMayBeOpen: Bool { openDecoderPixelArea > 0 || queueJobsInFlight > 0 }
+
+    /// Counts this extractor's decoder as possibly open from the moment a caller decides to decode,
+    /// before the job reaches the queue. Without it two concurrent budget passes each see the other's
+    /// incoming decoder as closed and both open it (AE#1059). Paired with `endDecodeReservation()`.
+    func reserveDecode() { queueJobsInFlight += 1 }
+    func endDecodeReservation() { queueJobsInFlight -= 1 }
     private var idleTask: Task<Void, Never>?
     private var residentApproximation: (width: Int, frame: ScrubFrame)?
     nonisolated let residentIdentity: String?
@@ -219,7 +225,7 @@ public actor FrameExtractor {
         let context = self.context
         let image = await runOnQueue { () -> CGImage? in
             do { try context.ensureOpen() } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                FrameDecodeContext.logOpenFailure(error)
                 return nil
             }
             return context.decodeFrame(at: 0, mode: .snapshot, targetWidth: 0, maxSize: maxSize,
@@ -247,7 +253,7 @@ public actor FrameExtractor {
         let result = await runOnQueue { () -> (image: CGImage, decodedSeconds: Double?)? in
             if token.isCancelled || isCancelled() { return nil }
             do { try context.ensureOpen() } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                FrameDecodeContext.logOpenFailure(error)
                 return nil
             }
             var decoded: Double?
@@ -361,7 +367,7 @@ public actor FrameExtractor {
                 do {
                     try context.ensureOpen()
                 } catch {
-                    EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                    FrameDecodeContext.logOpenFailure(error)
                     return FrameResult(image: nil)
                 }
                 let image = context.decodeFrame(

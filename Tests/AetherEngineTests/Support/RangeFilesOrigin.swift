@@ -26,6 +26,8 @@ final class RangeFilesOrigin: @unchecked Sendable {
     private var _stopped = false
     private var _ignoresRange = false
     private var _stalled: Set<String> = []
+    /// Response gates are owned by the origin and released on stop so no socket worker outlives it.
+    private var responseGates: [String: ProbeTestGate] = [:]
 
     init?() {
         guard let listener = LoopbackListener(backlog: 32) else { return nil }
@@ -50,6 +52,16 @@ final class RangeFilesOrigin: @unchecked Sendable {
         lock.withLock { _ = _stalled.insert(path) }
     }
 
+    /// Holds this path's responses until the returned gate opens; requests and headers remain observable.
+    func holdResponses(for path: String) -> ProbeTestGate {
+        lock.withLock {
+            if let gate = responseGates[path] { return gate }
+            let gate = ProbeTestGate()
+            responseGates[path] = gate
+            return gate
+        }
+    }
+
     var requests: [Request] { lock.withLock { _requests } }
 
     func requests(to path: String) -> [Request] { requests.filter { $0.path == path } }
@@ -59,7 +71,9 @@ final class RangeFilesOrigin: @unchecked Sendable {
         let alreadyStopped = _stopped
         _stopped = true
         for fd in _connections { shutdown(fd, SHUT_RDWR) }
+        let gates = Array(responseGates.values)
         lock.unlock()
+        for gate in gates { gate.open() }
         guard !alreadyStopped else { return }
         listener.stop()
     }
@@ -102,10 +116,12 @@ final class RangeFilesOrigin: @unchecked Sendable {
             headers[line[..<colon].lowercased()] =
                 line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
-        let (file, ignoresRange, stalled) = lock.withLock { () -> (File?, Bool, Bool) in
+        let (file, ignoresRange, stalled, gate) = lock.withLock { () -> (File?, Bool, Bool, ProbeTestGate?) in
             _requests.append(Request(path: path, range: headers["range"], headers: headers))
-            return (_files[path], _ignoresRange, _stalled.contains(path))
+            return (_files[path], _ignoresRange, _stalled.contains(path), responseGates[path])
         }
+        gate?.wait()
+        if lock.withLock({ _stopped }) { return }
         if stalled {
             while recv(fd, &chunk, chunk.count, 0) > 0 {}
             return

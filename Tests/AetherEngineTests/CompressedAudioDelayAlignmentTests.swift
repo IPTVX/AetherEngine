@@ -40,6 +40,45 @@ struct CompressedAudioDelayAlignmentTests {
         try await job.outcome().get()
     }
 
+    /// Consumed disk prefixes must not exhaust a bounded queue during a long delayed session.
+    @Test
+    func test_read_longSource_reclaimsConsumedChunks() async throws {
+        // Failure modes:
+        // - A replay-capable FIFO retains consumed packets until its owner explicitly evicts them.
+        // - A long source can exceed the allowance even when the required delay fits in it.
+        // Arrange — total input is larger than the session allowance, but its working span fits.
+        let job = ProbeTestJob {
+            let source = (0..<512).flatMap { time in
+                [Self.packet(Int64(time), lane: .video, payload: 64),
+                 Self.packet(Int64(time), lane: .audio, payload: 64)]
+            }
+            var cursor = 0
+            let alignment = try CompressedAudioDelayAlignment(
+                delaySeconds: 3,
+                byteBudget: 4096,
+                readSource: {
+                    if cursor == source.count { return nil }
+                    defer { cursor += 1 }
+                    return source[cursor]
+                },
+                isCurrent: { true }
+            )
+            defer { try? alignment.close() }
+
+            // Act — drain the entire stream through real disk queues.
+            var count = 0
+            while let _ = try alignment.read() {
+                count += 1
+                #expect(alignment.snapshot.residentBytes <= 4096)
+            }
+
+            // Assert — no packets were dropped and all consumed storage was reclaimed.
+            #expect(count == source.count)
+            #expect(alignment.snapshot.residentBytes == 0)
+        }
+        try await job.outcome().get()
+    }
+
     /// Source origins and independent audio/video tick scales compare on seconds, not raw ticks.
     @Test
     func mergesNonzeroOriginAndDistinctTimeBases() async throws {

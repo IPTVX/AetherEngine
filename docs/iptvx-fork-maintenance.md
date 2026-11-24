@@ -66,6 +66,267 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.74.0 integration — 7.74.0-iptvx
+
+Integrate the complete upstream lightweight `7.74.0` tag at
+`7926810699f9b66422483258e0a486902531dfbe`: all 50 commits and 86 changed paths
+since upstream 7.73.0. The source is the published release, including the final
+#984 sidecar-fill reviews, #1118/#1119 permanent-open-failure reviews, all #1109
+resident-run-park reviews and the final ASS drawing revision `c90aeaeb`.
+Post-release #1122/#1123 and main-only dependency changes are excluded.
+
+The preserved 7.73 candidate is the tree
+`d900c3e78a55c388f9deed9f192de2cf6a883319`, retained independently before the
+upgrade. The complete binary-safe 7.73-to-7.74 delta was applied through the
+pending index with three-way application, without resetting the candidate or
+creating an intermediate commit. The `7.74.0-iptvx` release retains the two-parent
+merge: published fork base `dbef286284ac27a3c8eda435d40145e9bc7c60bc` first,
+complete upstream `7926810699f9b66422483258e0a486902531dfbe` second. Publication
+uses the dedicated `ibo/codex/aether-7-74-0` branch and a new annotated fork tag;
+it does not update `main`.
+
+Canonical FFmpeg dependency: exact `3.19.1-iptvx`, with its own isolated source,
+binary and provenance checks. Do not substitute the old 3.19.0 tag for a main
+branch carrying 3.19.1. The published annotated FFmpeg tag resolves to
+`bb4b01912dfe72d0e4d8f6d647fc86d5c66f14a7` (tag object
+`29a26172172f931006f94ca7283c46cdba269b64`). FlowDeck resolves the actual remote
+URL to that clean checkout; all 63 distributed framework binary SHA-256 values
+match the validated build. Only the FFmpeg pin changes in `Package.resolved`;
+LibDovi 2.2.0-iptvx, LibTrueHD 3.2.0-iptvx and SMBClient 0.3.1 remain unchanged.
+Keep iOS/tvOS 16, macOS 14, weak MetalFX linkage and the existing availability
+fallbacks. Lanczos and FrameUpscaler remain OS26-only and excluded on Simulator;
+older systems retain ordinary playback without enabling an unsupported stage.
+
+Source port decisions:
+
+- Keep #1121's complete direct-Live dry-queue clock policy. It is a ringless route,
+  distinct from the fork's compressed large-delay alignment. In the other branch,
+  retain the alignment EOF snapshot so a matched Live tail releases its rebuffer
+  hold correctly. Preserve the signed 180-second storage partitions, FIFO trim,
+  source teardown, generation/transport intent and bounded video preroll.
+- Keep the new held-picture subview/compositor mount and cleanup. Only enqueue
+  and flush use the existing pre-OS18 fallback. Do not reintroduce the old bare
+  sublayer mount or an early return when the sample layer is absent: the new
+  compositor can still own a temporary file that must be released.
+- Keep the full native activation, outgoing-picture and bitmap-text APIs with
+  upstream defaults. Host adoption is a separate application decision; no new
+  preference, reader or automatic activation is introduced by this fork port.
+- Preserve host-owned Now Playing and display cadence, including the session's
+  inverse-telecine presentation rate. No active correction is retired.
+
+Reconstruction uses the preserved 7.73 pure tree, reverses its three active
+snapshots and merges every source/test path against upstream 7.73 and 7.74 with
+`merge-file`. The only baseline conflict is independent held-still availability,
+resolved with the OS16 fallback above. The two ordinary Live audio-switch test
+files remain independent of the delay correction. Fresh contexts for all three
+snapshots are authored against that baseline in order, with no scratch commits.
+The independent baseline also carries the test-only six-second Live source outage
+assertions; these strengthen upstream #1121 coverage and are not an audio-delay
+correction. The fourth snapshot adds the native-bypass initial-sidecar fix, its
+real sixty-second HTTP integration test and the cancellable response gate.
+
+The independent baseline reports all four corrections missing. Full ordered
+apply, check and repeated apply reproduce all 1,547 tracked source/test files byte
+for byte with no extra paths. The current candidate's four-snapshot check passes,
+as do all 12 Git/Python maintenance regressions.
+
+- Delay: 47 paths; SHA-256
+  `f87b41647f9140cd1970dc683c694b3f08ce9823070c3c4e144aac8c43534315`.
+- Audio Now Playing ownership: 5 paths; SHA-256
+  `012b71754fc9d328e5f7beac34f187d5fd180aa1fdf05fdf77fff2c818f0e65d`.
+- Host display cadence: 2 paths; SHA-256
+  `e3c1902bc4db5e262eafbe720051f76b004a869c86916a443cf98ae352636c38`.
+
+- Initial native remote-HLS sidecar selection: 3 paths; SHA-256
+  `b267356608e15459a94337f0ad07c4fe456fae8fea8b8bcb55e558e41eee1c65`.
+
+Fresh 7.74 Mac stage A: 106 tests across 11 suites, zero failures and zero skips,
+using FFmpegBuild 3.19.1 and the macOS14 deployment floor. This covers the complete
+ResidentRunPark cohort, final ASS drawing, FrameExtractor open failures, native
+audio activation ordering, FLAC layouts, Lanczos route policy, deinterlace timing,
+frame-chain behavior, bitmap text, picked-rendition fill and OCR. It precedes the
+initial-sidecar correction; stage B validates that corrected load path separately.
+
+Fresh 7.74 Mac stage B on the corrected source: 128 selected tests in 15 suites,
+125 passed, zero failed and three fixture-dependent #1095 skips. The full software
+large-delay suite passes all seven methods / seventeen cases, including signed
+180-second startup, shaping, EOF, DVR landing, new-frame delivery and pause/stop.
+The real ring-backed Live audio switch preserves position and seekability. All
+18 load-cancellation tests pass, including the native audio-switch caller-cancel
+case that the old tvOS17 simulator cannot mount.
+
+Both real #984 slow-response cases pass: load-time and mid-play picks stay
+published while AVPlayer remains unselected for sixty seconds, then select the
+completed rendition (diagnostic wait approximately 61.1 seconds). Native main-item
+readiness, more than forty seconds of main playback progress and header checks
+pass. The software direct-Live source outage remains held for six actual seconds;
+the clock stays paused throughout and playback resumes after release. Lanczos
+and line-art GPU, audio-lookahead policy/state, OCR executor/pending-state,
+outgoing-picture, upstream sidecar network and cache public-contract tests pass.
+Stage B logs and result bundles are retained in `scratchpad/iptvx-7.74.0/`.
+
+Fresh 7.74 Mac stage C: all 33 selected tests in five suites pass with zero
+failures and zero skips. NativeLargeAudioDelay uses the documented public SMBClient
+H.264/AAC fixture (SHA-256 `d6617a009c0c6c9aebf7398d43cad6d1985ddc1b9ab0479e2ea977362b8af5b0`).
+The native cases observe decoded frames, preserve finite video positions and
+exercise both signed 180-second overlaps, Live without DVR, shaping, seeking,
+negative EOF and pause/stop. The compressed alignment, consumed-chunk reclamation,
+epoch admission, timeline and direct-Live routing regressions also pass. The
+complete stage C log and result bundle are retained beside stage B.
+
+These source and Mac results are not physical playback or old-OS runtime proof.
+Prior 7.73 results do not validate this 7.74 candidate. A genuinely paced 80%-of-
+real-time source has not been exercised.
+
+The final #1095 cache rerun passes all 12 tests with zero failures and zero skips,
+closing the three stage B fixture skips without changing assertions or production.
+The 24-second synthetic witness is Apple AVAssetWriter H.264 320x180/24fps (576
+samples), AAC mono 44.1kHz, 732,821 bytes, SHA-256
+`12315247aa5e3cb209e8e50021359129cac4a13ea2e1a434f820d357ad9975a0`.
+AVAssetReader and H.264 parsing verify its actual duration, 282 B-frames, maximum
+B-run three and thirteen keyframes with at most two seconds between them. It is
+not claimed byte-for-byte or GOP-equivalent to the script's libx264 witness.
+The first 12-second witness produced only two segments and failed the test's
+three-segment precondition before cache adoption; its red log/result and metadata
+are retained. Extending only the fixture to 24 seconds satisfies the unchanged
+precondition and exercises real source demux/mux, stopped-segment reuse, internal-
+stop non-parking and different-options invalidation. Logs/result are in
+`scratchpad/iptvx-7.74.0/mac-parked-cache*`; fixture metadata and generator evidence
+are under the separate 7.74 validation directory. This does not reproduce #1109's
+multi-gigabyte HTTP rewind case or establish disk-versus-memory performance.
+
+### 7.73.0 integration — uncommitted local candidate
+
+Integrate the complete upstream annotated `7.73.0` tag
+`25d44becd2cbd58c33f01bb153c48cfebec4af8a`, peeled commit
+`bbcf3b8359252b361258dc79817c4f81683df7b8`, on published
+`7.69.1-iptvx` at `dbef286284ac27a3c8eda435d40145e9bc7c60bc`.
+The candidate is an uncommitted merge; no fork tag or remote publication is
+implied by this record. FFmpegBuild 3.19.0 is required and its isolated fork
+port, binary provenance and platform audits are a separate delivery gate.
+Preserve iOS/tvOS 16, LibDovi 2.2.0-iptvx and LibTrueHD 3.2.0-iptvx.
+
+The upstream release extracts lifecycle into `AetherEngine+Background` and
+moov-prime searching into `HLSSegmentProducer+MoovPrime`; retain those
+extractions and restore the fork's settled-load shaping reconciliation at its
+new boundary. Preserve inverse-telecine session carryover and the fresh-load
+software audio activation after the display play gate (#1099). The fork's
+native teardown task remains owned across delay rebuilds and preserves the
+upstream stopped-session parking policy.
+
+Keep the complete multitrack software Live ring implementation. A ring packet
+carries both its source stream index and the fork's optional original packet
+envelope/epoch. The ordinary feeder switches audio in place; the separate
+large-delay alignment feeder captures its decoder and timing partition together,
+so that path explicitly requests an owned rebuild rather than swapping only the
+ordinary feeder's decoder. Its reader skips alternate audio tracks while keeping
+them separate in the ring. Normal ring seeks, position and source-connection
+reuse retain the upstream behavior.
+
+Keep the upstream streaming encoder for ordinary finite audio tails and its
+maximum span. The alignment-specific collector layers its cancellation and
+compressed-byte ceiling over the same encoder, retains HE-AAC support and frees
+partial output on refusal. Stream-copy audio routing uses the shared upstream
+segment-index helper with the delay applied once. The deferred initial producer
+seek includes the earlier source audio needed for a positive delay.
+
+The upstream FIFO now always retains consumed history. The alignment queue is a
+forward-only consumer, so after moving a record into a lane head it explicitly
+calls `trimConsumed(toByteBudget: 0)`. Each lane also sets the FIFO's
+`maximumResidentBytes` to the shared queue allowance: this enables rollover of an
+empty consumed active chunk before retirement, while alignment accounting still
+enforces the single aggregate allowance across lanes and staged heads. The new
+`test_read_longSource_reclaimsConsumedChunks` first failed on macOS with
+`capacityExceeded(requiredBytes: 4125, availableBytes: 4096)` before this fix;
+its total compressed input exceeds the allowance while its working delay fits.
+Final runtime validation remains a separate gate.
+
+Reconstruct the delay baseline without creating commits: archive the old fork,
+reverse ownership then delay, and three-way merge each source/test path with
+upstream 7.69.1 and 7.73.0. Resolve independent OS16, accessibility and source
+teardown policy into that baseline. The mobile test compilation caught a renamed
+GPU conversion counter hidden by the macOS build's inactive Simulator branch:
+retain the Simulator staging assertion using upstream's `converter.counts.copied`
+API. This test-only compatibility resolution belongs in the independent baseline,
+not in the delay correction; it changes no production behavior. Keep host display
+cadence in its own third snapshot below; it must not be hidden inside the
+audio-delay correction.
+The independently merged uncorrected baseline reports all three corrections
+missing. Applying the complete ordered stack, checking it, and applying again
+reproduces all 1,530 tracked source/test paths byte for byte with no extra paths.
+The two new ordinary Live audio-switch integration files are independent of the
+maintenance corrections and are copied explicitly to both sides before replay;
+they are not embedded in the audio-delay snapshot.
+The candidate's check passes all three snapshots. All 11 Git/Python maintenance
+regressions pass, including the new three-overlapping-correction case. No scratch
+commit is created by this reconstruction.
+
+- Delay snapshot: 47 paths; SHA-256
+  `904e365ab6c7cc2e9499cd43444dc994cbc9916029c323c01daa7913ab415c5b`.
+- Audio Now Playing ownership: unchanged; SHA-256
+  `cdc05fb05a1b86a4a7a908abe67662b3988443e8fd177c323d7aa26ca611d42c`.
+- Host display cadence: 2 paths; SHA-256
+  `955005b4dc855c19d1101fc05e267b82a6ae015ab99ae5addb08adfbf1e2431e`.
+
+Independent integration test hashes:
+
+- `Tests/AetherEngineTests/Issue1100LiveAudioDVRIntegrationTests.swift`:
+  `b5251fb6b31d9b13e07388d0f0bfbf290778a5d0347a017f2539723ebfb6c544`.
+- `Tests/AetherEngineTests/Support/ProbeLiveTailReader.swift`:
+  `f718013dd58fcd519d4c66511e0f24d06f83b6e2f54d031b9eb146fef9616c40`.
+
+The complete `SoftwareLargeAudioDelayTests` suite on the final FFmpeg candidate
+passes seven methods and 17 signed cases on macOS, with zero failures or skips.
+It covers startup and shaping at both +/-180 limits for Live and VOD, silent
+whole-title/tail playback, DVR seeks, matched Live EOF and reset-to-zero/stop.
+The DVR regression previously exposed a clock that ran while compressed history
+was reconstructed after seeking, spending the target interval before a frame
+arrived. Ordinary Live's preroll exemption does not apply to the alignment
+pipeline: reuse the existing bounded video preroll, with no new latch or timeout.
+The regression now also checks that the clock is stopped while the first new
+frame is still outstanding; both signed seeks then deliver video within the
+unchanged three-second limit and retain their positions. Recorded preroll waits
+were 1,533 ms and 994 ms, starting from the same requested source targets. The
+ring track filter reads its compact in-memory index rather than decoding the same
+lossless envelope twice during that reconstruction.
+
+The tvOS 17 Simulator supported-capability batch passes 59 methods, with zero
+failures and two explicit opt-in media skips (`AV1FilmGrainGPUTests.gpuMatchesDav1d`
+and `.benchmark`, requiring `AV1_FILM_GRAIN_CLIP` and the benchmark selector).
+It includes the synthetic `AV1FilmGrainGPUReferenceTests` alongside ownership,
+cancellation, preview consent, inverse-telecine decisions, #1099 activation, host
+display cadence, delay epochs and untagged-color contracts.
+
+One native-only cancellation fixture case is explicitly excluded in this
+simulator invocation through `-skip-testing`, not disabled in the source:
+`CancellableLoadTests.cancelledCallerAudioSwitchFinishes`. Its initial H.264
+128x72 probe returns `canHardwareDecode=false` with VideoToolbox status `-12906`.
+The engine correctly reaches `.playing` on the software route with no error,
+no native host/session, and a live software host. The native-item requirement
+fails before the cancellation action is reached, so this is unavailable native
+fixture coverage on that simulator, not evidence of a cancellation regression.
+The same native cancellation scenario passed separately on macOS. The other 17
+cancellation methods run successfully on tvOS 17. The original assertion and all
+production cancellation code remain unchanged; no general Simulator exclusion
+or deployment-target change is introduced.
+
+Source reconstruction, maintenance checks and runtime results are recorded
+separately; these checks do not establish physical-device HDMI or lip-sync
+behavior.
+
+### 7.73.0 additional host-contract validation
+
+The final FFmpeg rebuild passes the release/preview/lifecycle/cache selection on
+macOS: 150 checks pass, none fail. Three optional parked-session resume checks
+are skipped because the generated `restart-witness-av.mp4` fixture is absent;
+this is not evidence for opting into `retainsSessionCacheAfterStop`. IPTVX leaves
+that option disabled. The software delay suite separately passes seven methods
+with 17 signed cases, and the open-source Live DVR audio-switch integration
+passes against the actual ring/decoders without reopening its custom reader.
+Its probe stops before EOF; the fixture holds only playback EOF, rather than
+mistaking a finite title's exhausted producer for a persistent Live connection.
+Consumer adapter, platform builds and physical playback are recorded separately.
+
 ### 7.69.1 integration
 
 Merge the complete upstream 7.69.1 tag
@@ -898,6 +1159,68 @@ or equivalent behavior coverage.
 A changed file, passing merge, renamed API or silently accepted delay value is not
 an equivalence proof.
 
+
+## IPTVX-HOST-DISPLAY-CADENCE — active
+
+Introduced on the uncommitted complete 7.73.0 integration. Upstream decides inverse
+telecine before playback routing and computes a film presentation cadence, while
+`sourceVideoFrameRate` deliberately remains source metadata. A host that owns
+HDMI criteria otherwise sees only the telecined source rate and can write 29.97
+instead of the decided 23.976.
+
+`AetherEngine.onDisplayCriteria` reports the decided presentation rate only when
+`LoadOptions.effectiveDisplayCriteriaOwner` is `.host`. The synchronous main-actor
+callback runs after stale engine criteria are cleared and switch observation is
+armed, before playback routing begins. The host must return promptly. A
+subsequent `checkLoadCurrent` rejects a callback that synchronously stops or
+replaces playback, so a retired load cannot construct a new pipeline. Engine and
+AVKit owners never invoke the host writer. Source frame-rate metadata is unchanged.
+
+Patch snapshot:
+[`Patches/IPTVX/host-display-cadence.patch`](../Patches/IPTVX/host-display-cadence.patch).
+It follows the delay and audio Now Playing corrections in the ordered stack.
+`Issue842DisplayCriteriaOwnerTests` covers the film cadence and source metadata,
+owner filtering, and synchronous Stop cancellation. The host adapter separately
+owns display policy, callback installation and session-scoped cadence retention.
+These unit contracts do not establish an actual HDMI handshake or display rate.
+
+Retire only when an upstream release provides the same host-owned cadence seam
+with cancellation protection and the same regressions pass without this snapshot.
+
+## IPTVX-INITIAL-REMOTE-HLS-SIDECAR — active
+
+`LoadOptions.initialSubtitleTrackID` must select a declared external track on the
+native remote-HLS bypass, just as it does on the ordinary load path. Upstream
+7.74 mounts and publishes the bypass item but returns before the common preferred
+subtitle application. The initial ID therefore remains unselected; this is not a
+later reset or an AVPlayer timeout. The same explicit mid-play pick already works.
+
+Apply preferred selection after the proxy, injected names and item are installed,
+after starting native track discovery and before native activation/autoplay.
+`selectInjectedSubtitleRendition` remains the single owner of the immediate UI
+pick and deferred AVPlayer handoff. Preserve upstream generation cancellation,
+priority/preemption, failed-fill retry, headers and the pending rendition refusal;
+do not select an unfinished rendition to make initial selection appear active.
+
+Snapshot: `Patches/IPTVX/initial-remote-hls-sidecar-selection.patch`, ordered after
+host cadence. Its three paths are `AetherEngine+Loading.swift`, the shared
+`RangeFilesOrigin` cancellable response gate, and
+`Issue984SlowSidecarIntegrationTests.swift`. This is a fork correction tested on
+the complete release, not a post-tag #1122/#1123 cherry-pick.
+
+Regression: `Issue984SlowSidecarIntegrationTests` runs real loopback HLS for both
+load-time and mid-play selection while an authenticated same-origin sidecar response
+is held for sixty actual seconds. It checks native main-item readiness, immediate
+published selection, pending AVPlayer legible selection, more than forty seconds
+of main-item progress, preserved auth/User-Agent on the sidecar and auth on media,
+and rendition selection only after completion. The uncorrected diagnostic run
+fails the initial pick and passes the full mid-play case. The earlier first run
+also times out awaiting that never-selected initial rendition; neither run is a
+release pass. Network preemption/retry and parser contracts remain covered by the
+separate upstream #984 suites.
+
+Retire only after a complete upstream release applies the initial preference on
+this bypass and both real long-response entry points pass unchanged.
 
 ## IPTVX-DIRECT-LIVE-AUDIO-READ-AHEAD — withdrawn by user decision
 

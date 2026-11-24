@@ -19,11 +19,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         let payloadPrefix: Int
     }
 
-    struct StaleSweepResult: Sendable {
-        let inspectedCount: Int
-        let removedCount: Int
-        let failureCount: Int
-    }
+    typealias StaleSweepResult = SessionDirectoryLiveness.SweepResult
 
     struct Snapshot: Sendable {
         let count: Int
@@ -46,7 +42,6 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         case corruptRecord
         case capacityExceeded
         case sessionLeaseLost
-        case retentionDisabled
         case invalidCursor
         /// An opt-in shared-session partition would be exceeded by the next complete record.
         case residentCapacityExceeded(requiredBytes: Int, maximumBytes: Int)
@@ -61,7 +56,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     }
 
     static let directoryPrefix = "aether-software-packets-"
-    private static let liveMarkerName = "session.lock"
+    private static let liveMarkerName = SessionDirectoryLiveness.markerName
 
     /// Always an explicitly created, unique child, never the caller's parent directory.
     let storageDirectory: URL
@@ -69,8 +64,8 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     private let chunkTargetBytes: Int
     /// Optional hard disk residency cap, including headers and protected consumed chunk prefixes.
     private let maximumResidentBytes: Int?
-    private let retainConsumed: Bool
-    var retainsConsumedPackets: Bool { retainConsumed }
+    /// The spool always keeps what the consumer has read, so a seek back and a still can land in it.
+    var retainsConsumedPackets: Bool { true }
     private let lock = NSLock()
     private var writer: FileHandle?
     private var reader: FileHandle?
@@ -99,14 +94,12 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     /// Creates a unique session spool. The optional residency ceiling includes complete records
     /// and consumed prefixes; callers must provide backpressure before appending beyond it.
     init(chunkTargetBytes: Int = 4 * 1024 * 1024,
-         retainConsumed: Bool = false,
          maximumResidentBytes: Int? = nil,
          parentDirectory: URL = FileManager.default.temporaryDirectory,
          now: Date = Date(),
          leaseAcquisition: ((URL) throws -> Int32)? = nil) throws {
         guard chunkTargetBytes >= 8 else { throw Failure.invalidChunkTarget }
         self.chunkTargetBytes = chunkTargetBytes
-        self.retainConsumed = retainConsumed
         self.maximumResidentBytes = maximumResidentBytes
         storageDirectory = parentDirectory.appendingPathComponent(
             "\(Self.directoryPrefix)\(UUID().uuidString)", isDirectory: true)
@@ -186,7 +179,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
             var limit = try currentReadLimit()
             // A retained reader can be at the old tail's EOF when the producer rolls to a new
             // chunk. Crossing that boundary must neither return false EOF nor remove history.
-            if retainConsumed, headOffset == limit, headID < tailID {
+            if headOffset == limit, headID < tailID {
                 try advanceRetainedHead()
                 limit = try currentReadLimit()
             }
@@ -199,12 +192,8 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
             let data = try readExactly(Int(length), from: reader)
             let nextOffset = headOffset + 8 + length
             if nextOffset == limit {
-                if retainConsumed {
-                    headOffset = nextOffset
-                    if headID < tailID { try advanceRetainedHead() }
-                } else {
-                    try reclaimHead(byteCount: limit)
-                }
+                headOffset = nextOffset
+                if headID < tailID { try advanceRetainedHead() }
             } else {
                 headOffset = nextOffset
             }
@@ -224,7 +213,6 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try requireUsable()
-        guard retainConsumed else { throw Failure.retentionDisabled }
         guard cursor.generation == generation, chunks > 0,
               cursor.chunkID >= oldestChunkID, cursor.chunkID <= tailID,
               cursor.recordIndex >= 0, cursor.recordIndex < writtenRecordCount,
@@ -273,7 +261,6 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     func readHistory(from cursor: Cursor, visit: (Data) throws -> Bool) throws {
         lock.lock()
         do { try requireUsable() } catch { lock.unlock(); throw error }
-        guard retainConsumed else { lock.unlock(); throw Failure.retentionDisabled }
         guard cursor.generation == generation, chunks > 0,
               cursor.chunkID >= oldestChunkID, cursor.chunkID <= tailID,
               cursor.recordIndex >= 0, cursor.recordIndex < writtenRecordCount else {
@@ -319,7 +306,6 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try requireUsable()
-        guard retainConsumed else { return }
         do {
             // A hard partition can fill entirely with its consumed active chunk. Roll an empty
             // writer before retirement so making room never depends on appending over the cap.
@@ -522,31 +508,6 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
         sealedHeadBytes = nil
     }
 
-    private func reclaimHead(byteCount: UInt64) throws {
-        let previousReader = reader
-        reader = nil
-        try previousReader?.close()
-        if headID == tailID {
-            let previousWriter = writer
-            writer = nil
-            try previousWriter?.close()
-        }
-        try FileManager.default.removeItem(at: chunkURL(headID))
-        diskBytes -= Int(byteCount)
-        chunks -= 1
-        headOffset = 0
-        sealedHeadBytes = nil
-        if chunks == 0 {
-            headID = 0
-            oldestChunkID = 0
-            tailID = 0
-            tailBytes = 0
-        } else {
-            headID += 1
-            oldestChunkID = headID
-        }
-    }
-
     private func closePacketHandles() throws {
         var firstError: (any Error)?
         let handles = [reader, writer]
@@ -619,70 +580,23 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     }
 
     private static func acquireNewLease(_ directory: URL) throws -> Int32 {
-        let path = directory.appendingPathComponent(liveMarkerName).path
-        let fd = open(path, O_CREAT | O_EXCL | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw posixError() }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            let error = posixError()
-            Darwin.close(fd)
-            throw error
-        }
-        return fd
+        try SessionDirectoryLiveness.acquireExclusive(sessionDir: directory)
     }
 
-    /// Bounded crash-remnant cleanup, never a recursive search of the caller's temporary root.
-    /// Only our UUID-named direct-child directories older than one day are candidates. Keep the
-    /// candidate's advisory lease held until removal finishes; age alone never proves abandonment.
+    /// Bounded crash-remnant cleanup through the sweep the segment cache shares (audit NAT-201): only
+    /// our UUID-named direct-child directories count and qualify, after the shared age, with the lease
+    /// held through the removal.
     static func sweepStaleSessionDirs(parentDirectory: URL, currentSession: String? = nil,
                                      now: Date = Date(), maxEntries: Int = 64,
                                      maxRemovals: Int = 8) -> StaleSweepResult {
-        guard maxEntries > 0, maxRemovals > 0,
-              let entries = FileManager.default.enumerator(at: parentDirectory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else {
-            return StaleSweepResult(inspectedCount: 0, removedCount: 0, failureCount: 0)
-        }
-        var inspected = 0
-        var removed = 0
-        var failures = 0
-        while inspected < maxEntries, removed < maxRemovals,
-              let entry = entries.nextObject() as? URL {
-            inspected += 1
-            let name = entry.lastPathComponent
-            guard name != currentSession, name.hasPrefix(directoryPrefix),
-                  UUID(uuidString: String(name.dropFirst(directoryPrefix.count))) != nil else { continue }
-            var info = stat()
-            guard lstat(entry.path, &info) == 0 else { failures += 1; continue }
-            let modified = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
-            guard info.st_mode & S_IFMT == S_IFDIR,
-                  now.timeIntervalSince1970 - modified >= 86_400 else { continue }
-            let dirFD = open(entry.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard dirFD >= 0 else { failures += 1; continue }
-            defer { Darwin.close(dirFD) }
-            // O_CREAT also lets us lease a root abandoned between mkdir and marker creation.
-            let markerFD = openat(dirFD, liveMarkerName,
-                                  O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard markerFD >= 0 else { failures += 1; continue }
-            defer { Darwin.close(markerFD) }
-            guard flock(markerFD, LOCK_EX | LOCK_NB) == 0 else {
-                if errno != EWOULDBLOCK && errno != EAGAIN { failures += 1 }
-                continue
-            }
-            // Recheck identity rather than following a replaced directory or marker symlink.
-            var held = stat()
-            var named = stat()
-            guard fstat(dirFD, &held) == 0, lstat(entry.path, &named) == 0,
-                  named.st_mode & S_IFMT == S_IFDIR,
-                  held.st_dev == named.st_dev, held.st_ino == named.st_ino else {
-                failures += 1
-                continue
-            }
-            do {
-                try FileManager.default.removeItem(at: entry)
-                removed += 1
-            } catch { failures += 1 }
-        }
-        return StaleSweepResult(inspectedCount: inspected, removedCount: removed, failureCount: failures)
+        SessionDirectoryLiveness.sweepStale(
+            base: parentDirectory, currentSession: currentSession, now: now,
+            maxEntries: maxEntries, maxRemovals: maxRemovals,
+            isCandidate: { name in
+                name.hasPrefix(directoryPrefix)
+                    && UUID(uuidString: String(name.dropFirst(directoryPrefix.count))) != nil
+            },
+            logPrefix: "[SoftwarePacketDiskFIFO]")
     }
 
     private func clearCounters() {

@@ -12,6 +12,8 @@ from pathlib import Path
 PATCHES = [
     ("IPTVX-LIVE-AUDIO-DELAY", "Patches/IPTVX/live-audio-delay-without-dvr.patch"),
     ("IPTVX-AUDIO-NOW-PLAYING-OWNERSHIP", "Patches/IPTVX/audio-now-playing-ownership.patch"),
+    ("IPTVX-HOST-DISPLAY-CADENCE", "Patches/IPTVX/host-display-cadence.patch"),
+    ("IPTVX-INITIAL-REMOTE-HLS-SIDECAR", "Patches/IPTVX/initial-remote-hls-sidecar-selection.patch"),
 ]
 
 

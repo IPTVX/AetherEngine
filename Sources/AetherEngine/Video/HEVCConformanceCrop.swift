@@ -10,25 +10,51 @@ import Foundation
 /// gone the decoder hands out all 2176 lines, so the muxer crops the 16 padding lines in the container
 /// instead (a `clap` box, which the same device also played).
 ///
-/// Only that one geometry is rewritten. Every other SPS passes through byte for byte.
+/// Only that one geometry is rewritten, and only on the Apple TV generation that restarts on it
+/// (`modelNeedsCropFreeSPS`). Every other SPS passes through byte for byte.
 enum HEVCConformanceCrop {
+
+    /// The first Apple TV generation whose hardware decoder restarts the device on the window. Only
+    /// AppleTV18,1 was seen doing it; an AppleTV14,1 plays the window and crops it correctly.
+    static let firstRestartingAppleTVGeneration = 18
+
+    /// Whether a device of this hardware model (`uname`'s machine, e.g. "AppleTV18,1") gets the
+    /// crop-free SPS. The `clap` that replaces the window is not a full substitute. For PQ HDR, tvOS
+    /// shows all 2176 lines squeezed into the 2160-line aperture instead of cropping (AE#1094,
+    /// measured on an AppleTV14,1 with tvOS 27.2 over HLS, either offset sign). So a model that plays
+    /// the window keeps it, and only the restarting generation and later ones get the rewrite. A
+    /// simulator or anything that is not an Apple TV keeps the window too.
+    static func modelNeedsCropFreeSPS(_ machine: String) -> Bool {
+        guard machine.hasPrefix("AppleTV"),
+              let generation = Int(machine.dropFirst("AppleTV".count).prefix(while: \.isNumber)) else { return false }
+        return generation >= firstRestartingAppleTVGeneration
+    }
+
+    /// `uname`'s hardware model of this device.
+    static func hardwareModel() -> String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
 
     /// The SPS with its conformance window offsets set to zero, or nil when the NAL is not a base-layer
     /// SPS of exactly this geometry. `nal` is the raw NAL unit: header first, emulation prevention in
     /// place, no start code and no length prefix.
     static func removingUHDPaddingCrop(fromSPS nal: [UInt8]) -> [UInt8]? {
         guard nal.count > 16, nal[0] == 0x42, nal[1] & 0xF8 == 0, nal[1] & 7 != 0 else { return nil }
-        let rbsp = unescaped(nal[2...])
-        var reader = BitReader(rbsp)
+        let rbsp = A53SEIParser.unescapeRBSP(Array(nal[2...]))
+        var reader = H264SPS.BitReader(rbsp)
 
-        guard reader.skip(4), let maxSubLayersMinus1 = reader.bits(3), reader.skip(1) else { return nil }
+        guard reader.skip(4), let maxSubLayersMinus1 = reader.u(3), reader.skip(1) else { return nil }
         // general profile_tier_level: 88 bits of profile, 8 of level.
         guard reader.skip(96) else { return nil }
         if maxSubLayersMinus1 > 0 {
             var profilePresent: [Bool] = []
             var levelPresent: [Bool] = []
             for _ in 0..<maxSubLayersMinus1 {
-                guard let profile = reader.bits(1), let level = reader.bits(1) else { return nil }
+                guard let profile = reader.u(1), let level = reader.u(1) else { return nil }
                 profilePresent.append(profile == 1)
                 levelPresent.append(level == 1)
             }
@@ -38,15 +64,15 @@ enum HEVCConformanceCrop {
                 if levelPresent[index], !reader.skip(8) { return nil }
             }
         }
-        guard reader.exponentialGolomb() != nil, let chromaFormat = reader.exponentialGolomb() else { return nil }
+        guard reader.ue() != nil, let chromaFormat = reader.ue() else { return nil }
         // 4:2:0 only: the window's vertical unit is two luma lines there.
         guard chromaFormat == 1 else { return nil }
-        guard let width = reader.exponentialGolomb(), let height = reader.exponentialGolomb(),
+        guard let width = reader.ue(), let height = reader.ue(),
               width == 3840, height == 2176 else { return nil }
-        guard reader.bits(1) == 1 else { return nil }
+        guard reader.u(1) == 1 else { return nil }
         let offsetsStart = reader.position
-        guard let left = reader.exponentialGolomb(), let right = reader.exponentialGolomb(),
-              let top = reader.exponentialGolomb(), let bottom = reader.exponentialGolomb(),
+        guard let left = reader.ue(), let right = reader.ue(),
+              let top = reader.ue(), let bottom = reader.ue(),
               left == 0, right == 0, top == 0, bottom == 8 else { return nil }
         let offsetsEnd = reader.position
 
@@ -70,7 +96,7 @@ enum HEVCConformanceCrop {
     /// An Annex-B buffer with the padding crop removed from every SPS it holds, or nil when it holds
     /// none of that geometry. Start codes come out four bytes long.
     static func removingUHDPaddingCrop(fromAnnexB bytes: UnsafeRawBufferPointer) -> [UInt8]? {
-        let ranges = AnnexBSampleConverter.nalRanges(bytes)
+        let ranges = AnnexB.nalRanges(bytes)
         return removingUHDPaddingCrop(fromAnnexB: bytes, ranges: ranges)
     }
 
@@ -131,49 +157,26 @@ enum HEVCConformanceCrop {
     }
 
     private static func rewritingRecord(_ record: [UInt8]) -> [UInt8]? {
-        guard record.count > 23 else { return nil }
+        let walk = record.withUnsafeBufferPointer { VideoConfigRecord.hvccArrays($0) }
+        guard walk.isComplete, walk.end == record.count else { return nil }
         var out = [UInt8](record[0..<23])
         var changed = false
-        var cursor = 23
-        for _ in 0..<Int(record[22]) {
-            guard cursor + 3 <= record.count else { return nil }
-            let type = record[cursor] & 0x3F
-            let count = Int(record[cursor + 1]) << 8 | Int(record[cursor + 2])
-            out.append(contentsOf: record[cursor..<cursor + 3])
-            cursor += 3
-            for _ in 0..<count {
-                guard cursor + 2 <= record.count else { return nil }
-                let length = Int(record[cursor]) << 8 | Int(record[cursor + 1])
-                cursor += 2
-                guard length > 0, cursor + length <= record.count else { return nil }
-                var nal = [UInt8](record[cursor..<cursor + length])
-                cursor += length
-                if type == 33, let sps = removingUHDPaddingCrop(fromSPS: nal) {
+        for array in walk.arrays {
+            out.append(contentsOf: record[array.header])
+            for range in array.nals {
+                var nal = [UInt8](record[range])
+                if array.type == 33, let sps = removingUHDPaddingCrop(fromSPS: nal) {
                     nal = sps
                     changed = true
                 }
+                // The rewrite re-escapes and can grow the NAL past the 16-bit record field (audit BIT-202).
+                guard nal.count <= 0xFFFF else { return nil }
                 out.append(UInt8(nal.count >> 8))
                 out.append(UInt8(nal.count & 0xFF))
                 out.append(contentsOf: nal)
             }
         }
-        guard changed, cursor == record.count else { return nil }
-        return out
-    }
-
-    private static func unescaped(_ bytes: ArraySlice<UInt8>) -> [UInt8] {
-        var out: [UInt8] = []
-        out.reserveCapacity(bytes.count)
-        var zeros = 0
-        for byte in bytes {
-            if zeros >= 2, byte == 3 {
-                zeros = 0
-                continue
-            }
-            out.append(byte)
-            zeros = byte == 0 ? zeros + 1 : 0
-        }
-        return out
+        return changed ? out : nil
     }
 
     private static func escaped(_ bytes: [UInt8]) -> [UInt8] {
@@ -189,49 +192,6 @@ enum HEVCConformanceCrop {
             zeros = byte == 0 ? zeros + 1 : 0
         }
         return out
-    }
-
-    private struct BitReader {
-        private let bytes: [UInt8]
-        private(set) var position = 0
-
-        init(_ bytes: [UInt8]) { self.bytes = bytes }
-
-        private var bitCount: Int { bytes.count * 8 }
-
-        mutating func skip(_ count: Int) -> Bool {
-            guard position + count <= bitCount else { return false }
-            position += count
-            return true
-        }
-
-        mutating func bits(_ count: Int) -> Int? {
-            guard count <= 32, position + count <= bitCount else { return nil }
-            var value = 0
-            for _ in 0..<count {
-                value = value << 1 | Int(bytes[position >> 3] >> (7 - UInt8(position & 7)) & 1)
-                position += 1
-            }
-            return value
-        }
-
-        mutating func exponentialGolomb() -> Int? {
-            var leadingZeros = 0
-            while true {
-                guard let bit = bits(1) else { return nil }
-                if bit == 1 { break }
-                leadingZeros += 1
-                guard leadingZeros <= 31 else { return nil }
-            }
-            guard let suffix = bits(leadingZeros) else { return nil }
-            return (1 << leadingZeros) - 1 + suffix
-        }
-
-        /// The RBSP stop bit: the last bit set in the payload.
-        var lastSetBit: Int? {
-            guard let index = bytes.lastIndex(where: { $0 != 0 }) else { return nil }
-            return index * 8 + 7 - bytes[index].trailingZeroBitCount
-        }
     }
 
     private struct BitWriter {

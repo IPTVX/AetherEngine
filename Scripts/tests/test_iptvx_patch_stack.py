@@ -100,6 +100,35 @@ class PatchStackTests(unittest.TestCase):
         self.assertNotEqual(direct.returncode, 0)
         self.run_stack()
 
+    def test_three_overlapping_corrections_replay_in_order_and_remain_idempotent(self):
+        self.patches.append(("HOST-DISPLAY", "display.patch"))
+        self.write_patch("display.patch", "source.txt", "delay + read-ahead\n", "delay + read-ahead + host cadence\n")
+        with self.assertRaisesRegex(stack.PatchFailure, "Missing correction: OLD, NEW, HOST-DISPLAY"):
+            self.run_stack()
+        self.run_stack(apply=True)
+        self.assertEqual(self.source.read_text(), "delay + read-ahead + host cadence\n")
+        corrected = self.snapshot()
+
+        self.run_stack()
+        self.run_stack(apply=True)
+
+        self.assert_unchanged(corrected)
+
+    def test_four_overlapping_corrections_replay_and_preserve_new_test_file(self):
+        self.patches.extend([("HOST-DISPLAY", "display.patch"), ("INITIAL-SIDECAR", "sidecar.patch")])
+        self.write_patch("display.patch", "source.txt", "delay + read-ahead\n", "delay + read-ahead + host cadence\n")
+        self.write_patch("sidecar.patch", "source.txt", "delay + read-ahead + host cadence\n", "delay + read-ahead + host cadence + initial sidecar\n")
+        with (self.root / "sidecar.patch").open("a") as patch:
+            patch.write("diff --git a/sidecar-test.txt b/sidecar-test.txt\nnew file mode 100644\n--- /dev/null\n+++ b/sidecar-test.txt\n@@ -0,0 +1 @@\n+real pending sidecar regression\n")
+        with self.assertRaisesRegex(stack.PatchFailure, "Missing correction: OLD, NEW, HOST-DISPLAY, INITIAL-SIDECAR"):
+            self.run_stack()
+        self.run_stack(apply=True)
+        self.assertEqual((self.root / "sidecar-test.txt").read_text(), "real pending sidecar regression\n")
+        corrected = self.snapshot()
+        self.run_stack()
+        self.run_stack(apply=True)
+        self.assert_unchanged(corrected)
+
     def test_partial_successor_fails_without_mutation(self):
         self.source.write_text("delay + read-ahead\n")
         before = self.snapshot()

@@ -14,7 +14,7 @@ How to add AetherEngine to an app, what it needs, and how to turn on the optiona
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.69.1-iptvx")
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.74.0-iptvx")
 ```
 
 Then link the `AetherEngine` product. Add `AetherEngineSMB` too if you want to play from SMB shares ([guide.md › SMB shares](guide.md#smb-shares)).
@@ -65,7 +65,7 @@ by default. Object-audio rendering still requires a playback opt-in and an eligi
 | `TrueHDObjectAudio` | [LibTrueHD](https://github.com/IPTVX/LibTrueHD) and the bed regression | TrueHD Atmos keeps the channel bridge whatever `objectAudioRendering` asks |
 | `DTSXObjectAudio` | the DTS:X decoder (FFmpeg's `dca` with FFmpegBuild's height patch, no extra library) and the bed regression that builds the layout from its 7.1 bed | DTS:X keeps the channel bridge whatever `objectAudioRendering` asks |
 | `DualLayerDolbyVision` | the Profile 7 FEL dual-layer composer (`DualLayerVideoDecoder`, its Metal composer and the per-frame display metadata); not recommended for distributed apps, see below | a Profile 7 source keeps the native route whatever `preferDualLayerDolbyVision` asks |
-| `DolbyVisionStillReshaping` | the reshaping that turns a Dolby Vision Profile 5, 2D Profile 20 base view or AV1 Profile 10.0 frame into a still | such a source has no scrub stills, I-frame stills or held picture (`supportsCacheBackedStills` is false); playback is unaffected |
+| `DolbyVisionStillReshaping` | the reshaping that turns a Dolby Vision Profile 5, 2D Profile 20 base view or AV1 Profile 10.0 frame into a still | such a source has no scrub stills or I-frame stills (`supportsCacheBackedStills` is false), and a held picture comes through the compositor instead of a reshaped still; playback is unaffected |
 | `DolbyVisionFelCurves` | the fold of a Profile 7 FEL enhancement layer into the Profile 8.1 RPU on the native route (the stream's mapping kept, the luma residual added to its luma curve per scene) ([Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)) | the native route's Profile 8.1 conversion drops the enhancement layer |
 
 In the table, the channel bridge is the default audio handling (decode, then re-encode as plain channels without heights). The bed regression builds the height layout from the stream's own lossless 7.1, steered by its objects or heights.
@@ -74,6 +74,8 @@ In the table, the channel bridge is the default audio handling (decode, then re-
 
 - `TrueHD Atmos rendering requested but not built in (TrueHDObjectAudio trait off)`
 - `DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait)`
+
+One part of `DTSXObjectAudio` does not depend on the trait. The height decoder is FFmpegBuild's patch to libavcodec, which every build links. With the trait off the engine never turns it on, but the code still ships. To leave it out of the binary too, build FFmpegBuild with `--without-dtsx-heights` and point SwiftPM at that build ([FFmpegBuild README](https://github.com/superuser404notfound/FFmpegBuild#building-without-the-dtsx-height-patch)). With the trait on against such a build, the session log says `no x_heights option` and DTS:X keeps the channel bridge.
 
 To hide a setting your build cannot honour, ask `AetherEngine.OptionalComponent`, for example `AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn`.
 
@@ -98,7 +100,7 @@ How each works and how close the fold gets to the composed picture: [Dolby Visio
 List the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.69.1-iptvx",
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.74.0-iptvx",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DolbyVisionFelCurves", "DolbyVisionStillReshaping"])
 ```
 

@@ -1,8 +1,8 @@
-diff --git a/Sources/AetherEngine/AetherEngine+Loading.swift b/Sources/AetherEngine/AetherEngine+Loading.swift
-index deea1418..173e7e40 100644
---- a/Sources/AetherEngine/AetherEngine+Loading.swift
-+++ b/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -2427,9 +2427,12 @@ extension AetherEngine {
+diff --git b/Sources/AetherEngine/AetherEngine+Loading.swift a/Sources/AetherEngine/AetherEngine+Loading.swift
+index 6bcf177ff532223b29f676dbc7e79dbe1310f23e..e0b10dd0c1a2e3d9a98e1e7c33649cacc288509d 100644
+--- b/Sources/AetherEngine/AetherEngine+Loading.swift
++++ a/Sources/AetherEngine/AetherEngine+Loading.swift
+@@ -2499,9 +2499,12 @@ extension AetherEngine {
          // Reuse the persistent host (MPNowPlayingSession survives across tracks). host.load() swaps the item via replaceCurrentItem.
          await activateRendererAudioSession()
          try checkLoadCurrent(generation)
@@ -17,7 +17,7 @@ index deea1418..173e7e40 100644
          self.audioAVPlayerHost = host
          applyDesiredVolume(to: host)
          self.audioAVPlayerActive = true
-@@ -2444,7 +2447,7 @@ extension AetherEngine {
+@@ -2516,7 +2519,7 @@ extension AetherEngine {
          host.setExternalMetadata(pendingExternalMetadata)
          #if os(iOS) || os(tvOS) || os(visionOS)
          host.setNowPlayingInfo(pendingAudioNowPlayingInfo)
@@ -26,11 +26,11 @@ index deea1418..173e7e40 100644
          #else
          startNowPlayingPublisher(.audioAVPlayer, sessionCenter: nil)
          #endif
-diff --git a/Sources/AetherEngine/AetherEngine.swift b/Sources/AetherEngine/AetherEngine.swift
-index 9fb91307..7ac27af9 100644
---- a/Sources/AetherEngine/AetherEngine.swift
-+++ b/Sources/AetherEngine/AetherEngine.swift
-@@ -8448,8 +8448,9 @@ public final class AetherEngine: ObservableObject {
+diff --git b/Sources/AetherEngine/AetherEngine.swift a/Sources/AetherEngine/AetherEngine.swift
+index e3b9c4ada9868a6749fd284e3f1d07e6c797c2cd..c7e6a00bd411e493164da042571274c32785e4b6 100644
+--- b/Sources/AetherEngine/AetherEngine.swift
++++ a/Sources/AetherEngine/AetherEngine.swift
+@@ -8579,8 +8579,9 @@ public final class AetherEngine: ObservableObject {
      /// MPNowPlayingSession for the active AVPlayer audio path, or nil. It publishes the card from the
      /// player and keeps the app the active Now-Playing app across a background pause (tvOS drops a paused
      /// bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost. Nil on the
@@ -42,7 +42,7 @@ index 9fb91307..7ac27af9 100644
      public var audioNowPlayingSession: MPNowPlayingSession? {
          audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
      }
-@@ -8487,6 +8488,14 @@ public final class AetherEngine: ObservableObject {
+@@ -8618,6 +8619,14 @@ public final class AetherEngine: ObservableObject {
      /// an audio host loads, so set it before `load()`. A secondary `sharedOutputRole` never takes it.
      public var ownsAudioNowPlaying: Bool = false
  
@@ -57,10 +57,10 @@ index 9fb91307..7ac27af9 100644
      /// Opt in to owning system Now-Playing on the native VIDEO path.
      ///
      /// Off by default, and that default is load-bearing. The native path is consumed both by hosts
-diff --git a/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift b/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
-index 259e3fca..3d6e659e 100644
---- a/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
-+++ b/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
+diff --git b/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift a/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
+index 7a85536f472ae54909396b974bbb7ee14f0853fb..0734ec5d07ce7ce1c823c210f1efca038140c45c 100644
+--- b/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
++++ a/Sources/AetherEngine/Audio/AudioAVPlayerHost.swift
 @@ -41,11 +41,11 @@ final class AudioAVPlayerHost {
      /// ownership across pause. WWDC22 guidance is "don't use MPNowPlayingSession on tvOS WHEN USING AVKit" (AVKit
      /// owns its own); for a bare AVPlayer with custom UI, owning the session explicitly is sanctioned. Mixing in the
@@ -75,7 +75,7 @@ index 259e3fca..3d6e659e 100644
  
      // MARK: - Private state
  
-@@ -93,11 +93,27 @@ final class AudioAVPlayerHost {
+@@ -110,11 +110,27 @@ final class AudioAVPlayerHost {
      init(ownsNowPlaying: Bool = true,
           diagnosticPool: ItemDiagnosticReadPool = .shared,
           diagnosticRead: @escaping AVPlayerItemDiagnostics.Read = ItemDiagnosticSnapshot.read) {
@@ -105,7 +105,7 @@ index 259e3fca..3d6e659e 100644
          // Apple's documented path for a bare AVPlayer (WWDC22 110338, MPNowPlayingSession.h): the session
          // auto-publishes Now-Playing from the player (elapsed/rate/state/duration) merged with the per-item
          // AVPlayerItem.nowPlayingInfo we stamp. With YES, nowPlayingInfoCenter must NOT be written (we never do).
-@@ -105,8 +121,10 @@ final class AudioAVPlayerHost {
+@@ -122,8 +138,10 @@ final class AudioAVPlayerHost {
          // fall back to (and decode) the asset's own embedded cover, which crashes on a corrupt one. This replaced a
          // manual-publish design whose MPMediaItemArtwork closure was non-@Sendable and tripped
          // dispatch_assert_queue_fail when MediaPlayer requested the bitmap off-actor.
@@ -118,7 +118,7 @@ index 259e3fca..3d6e659e 100644
          #endif
      }
  
-@@ -114,8 +132,7 @@ final class AudioAVPlayerHost {
+@@ -131,8 +149,7 @@ final class AudioAVPlayerHost {
      /// Home overlay + remote commands alive across a background pause).
      func becomeActiveNowPlaying() {
          #if os(iOS) || os(tvOS) || os(visionOS)
@@ -128,7 +128,7 @@ index 259e3fca..3d6e659e 100644
          #endif
      }
  
-@@ -139,7 +156,9 @@ final class AudioAVPlayerHost {
+@@ -166,7 +183,9 @@ final class AudioAVPlayerHost {
          #endif
          // Stamp the per-item Now-Playing dict the auto-publishing session reads (iOS/tvOS 16+). Replays across swaps.
          #if os(iOS) || os(tvOS) || os(visionOS)
@@ -139,7 +139,7 @@ index 259e3fca..3d6e659e 100644
          #endif
          playerItem = item
          let diagnostics = AVPlayerItemDiagnostics(item: item, pool: diagnosticPool, read: diagnosticRead)
-@@ -356,7 +375,9 @@ final class AudioAVPlayerHost {
+@@ -383,7 +402,9 @@ final class AudioAVPlayerHost {
      #if os(iOS) || os(tvOS) || os(visionOS)
      func setNowPlayingInfo(_ info: [String: Any]) {
          pendingNowPlayingInfo = info
@@ -150,11 +150,11 @@ index 259e3fca..3d6e659e 100644
      }
      #endif
  
-diff --git a/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift b/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift
+diff --git b/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift a/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift
 new file mode 100644
-index 00000000..889efa07
+index 0000000000000000000000000000000000000000..889efa07a9cbb92ccd5330fab9d6442239fac97c
 --- /dev/null
-+++ b/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift
++++ a/Tests/AetherEngineTests/AudioNowPlayingOwnershipTests.swift
 @@ -0,0 +1,52 @@
 +#if os(iOS) || os(tvOS) || os(visionOS)
 +import AVFoundation
@@ -208,10 +208,10 @@ index 00000000..889efa07
 +    }
 +}
 +#endif
-diff --git a/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift b/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
-index 8d00bb50..7b00b7c2 100644
---- a/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
-+++ b/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
+diff --git b/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift a/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
+index 8d00bb50a3d64e9a11c3dcb5dd4852a9548942b0..7b00b7c2f2050ddfb5cd691563e367a3091d8c63 100644
+--- b/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
++++ a/Tests/AetherEngineTests/VideoNowPlayingOptInTests.swift
 @@ -3,7 +3,7 @@ import Testing
  
  /// #180: the native video path can own an `MPNowPlayingSession`, but only when the host asks for it.

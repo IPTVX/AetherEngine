@@ -112,10 +112,11 @@ The plan needs the source's keyframe positions, read from the container's keyfra
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
 
-**Declared boundaries come first.** Two sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
+**Declared boundaries come first.** Three sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
 
 - **HLS VOD ingest:** the playlist's segment starts, summed from `EXTINF` (#268).
 - **MPEG-DASH:** the video `sidx`, which marks each subsegment that starts with a SAP (a random-access point) and gives its time (AE#1075). Only SAP types 1 and 2 count (closed GOP). If one subsegment lacks such a SAP, the source declares nothing and the plan falls back as above.
+- **Fragmented MP4 with a lazy index:** the `mfra`'s video random-access points, when they do not agree with the fragments the demuxer has read. When they agree, they stand in for the full index and the keyframe-aligned plan is built from them ([Fragmented MP4 over HTTP](formats.md#fragmented-mp4-over-http)).
 
 Each boundary is pulled up to 0.5 s below its declared time. The declared time and the container timestamp can differ by rounding, and a boundary that lands past its keyframe would open the segment one GOP late.
 
@@ -230,9 +231,38 @@ A restart is the expensive path: it re-seeks the demuxer, which is slow on remot
 - A seek back into the retained span, and the forward march after it, is a pure cache hit with zero producer restarts. Only a seek into never-produced content restarts.
 - Live sessions keep a newest-first suffix up to the native DVR retention budget, so the whole advertised DVR window stays resident. Live has no restart handler that could re-produce a deleted segment.
 
+**A cache that outlives its session (opt-in, AE#1095).** With `retainsSessionCacheAfterStop`, the host's `stop()` moves the sealed segments into a parked directory (`ParkedSegmentSession`, one per process in `ParkedSegmentSessionStore`) instead of deleting them. The next session for the same source adopts the ones below the first gap at its start position and starts its producer at that gap. That is the state a session is in after a restart ahead of a playhead that still plays from the cache, so the provider needs no new rule. Three things travel with the files, because the bytes alone do not describe the segments:
+
+- the `EpochAxisTable` below the gap, plus an opening at the start segment, so the fresh item's first placement publishes the axis the bytes carry (without it a source with a 600 s origin reopened at -557 s);
+- each segment's `VideoReach` and the fold counts;
+- the `SubtitlePacketStore` with its coverage, because the new pump never reads the adopted span.
+
+The key that decides reuse is the URL, the options without the diagnostics label, the session's own derived output configuration (`ParkingOutputConfiguration`) and the segment plan.
+
+Two things keep a Resume of a file without a keyframe index from paying the index work again:
+
+- The candidate is taken before the cue prewarm. When the parked session's prewarm hit its cap and its plan fell back to the uniform stride (`ParkedSegmentSession.UnindexedSource`, the file's byte size and duration), a load of the same file skips the prewarm. On a remote MKV without Cues that was the whole 10 s cap before every Resume.
+- A session that adopted segments seeks its first producer on the pump thread (`HLSSegmentProducer.positionBeforeFirstRead`) instead of in `prepare()`. Without an index that seek is a linear read up to the frontier, and the playhead has the adopted span to play meanwhile. A restart that meets the pump still in it takes the wedged-read path (fresh demuxer after 5 s).
+
 **Whole-source prefetch (opt-in).** A forward window larger than that is an explicit host opt-in through `LoadOptions.forwardBufferSegments` (up to 2700 segments, ~3 h, #207). It drops the budget's 2 GiB default cap but keeps the quarter-of-free-space clamp.
 
 The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
+
+**A restart below a resident band stops at the band (AE#1109).** A backward seek past the first resident segment restarts the producer there. Once it reaches a resident run it could only reproduce, it parks instead of cutting the run again (`awaitResidentRunHandover`). Without this the forward park never held a whole-source prefetch, because its target sits thousands of segments below the head, and one rewind before a resume point fetched the rest of the title a second time (4.8 GB of a 6.7 GB film in the report).
+
+A segment counts toward such a run only when all of this holds:
+
+- An earlier producer wrote it with the same video shift, audio shift and audio delay as this one. The cache records that per segment at adoption (`SegmentLineage`), and a parked session (AE#1095) hands it on with the segments.
+- It is not the first segment of its epoch. That one may open below its boundary and has its leading pictures before the keyframe dropped, so the producer cuts it again and parks after it.
+- Its lineage is known. A plain `store` carries none.
+
+The run ends at the first hole or at the first segment that does not count. That segment is evicted while the consumer has not asked for it yet, so the consumer misses there and the provider restarts a producer at it, instead of serving it as the continuation of the kept run.
+
+The pump parks only when the run reaches at least 8 segments past its head, or the last plan index. That is the depth the provider uses to keep a producer for a resident backward target. When the consumer plays past the run's end, the provider restarts a producer there.
+
+The park lets go only for a gap in those 8 segments that the consumer has not reached yet. The provider waits on the active producer for an index that close to its restart point instead of restarting, so nobody else would fill it. A gap behind the consumer is an eviction behind the playhead, and cutting there would pull the band through a second time.
+
+The reader's open window still drains after the pump parks, a few MB in the measurements. On a 597 MB file resumed at 300 s and rewound to 0, the source traffic after the seek fell from 569 MB to 301 MB, and the 0 to 300 s stretch that had never been fetched is about 298 MB of that.
 
 **Where a restart seeks.** A non-disc VOD restart seeks to the exact IRAP stored in the segment plan, on the video stream's own timestamp axis, with that timestamp as the lower bound. A seek on the global time axis can land a whole GOP earlier on multi-stream MP4, and the producer then has to read forward to the IRAP, which is a long remote read (#191). Disc plans use folded multi-clip timestamps (one timeline across several clip files) and keep the global-time seek.
 
@@ -241,6 +271,7 @@ The producer parks once the segments it has written ahead of the consumer target
 - A fetch waiting on an in-flight restart follows that restart's progress instead of burning a fixed retry budget into a 503. It never re-fires a restart at its own stale index.
 - The fresh reopen after a wedged restart skips `find_stream_info`, because the session already holds saved codec configs and the segment plan.
 - Lazy native subtitle readers wait while a restart runs.
+- A native subtitle reader that fails mid-read (a transport error, not EOF) restarts under the same budget as the forward prefetcher (#231). Only a real EOF marks a whole-program store finished. When the budget runs out the store is marked failed and serves what it has, so a truncated file is never taken for a complete one.
 - The first producer of a resumed session anchors directly at the resume segment, instead of producing seg0 into an immediate teardown.
 
 **Holes in the cache.** Scrubbing leaves retained bands of segments with gaps between them, inside the cache's stored min/max index range. So an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).
@@ -275,10 +306,11 @@ Every accepted seek emits `.began` and then exactly one of `.landed(renderedTime
 
 One asymmetry is deliberate: a `.stalled` seek stays alive as recovery intent, so its `.landed` can still arrive minutes later on a source that finally serves the target. No level signal can express that.
 
-Three paths feed the stream:
+Four paths feed the stream:
 
 - **Programmatic seeks** report from their finalize step, so the clock is already at the target when the event fires.
 - **Seeks stashed before the session can take them** (#127/#178) hold the level for the whole stash window. The engine publishes their target on `currentTime` optimistically, and a consumer that broadcasts it needs to know nothing has reached it yet.
+- **Remote command and PiP skips** (AE#1088) go through the programmatic path, with origin `.remoteCommand` or `.pictureInPicture`. `SoftwareNowPlayingPolicy.perform` hands the engine the position it computed the target from, and that becomes the event's `departure`.
 - **Native AVKit scrubs** end their window when the picture reaches the restarted region, watched on `$renderedTime` and capped at 8 s.
 
   They do not end when the coalesced producer restart drains. Draining only means the producer is producing at the new index; the picture arrives a fetch and a decode later ([measured](measurements.md#native-scrub-picture-latency)).
@@ -537,7 +569,7 @@ Some HLS sources AVPlayer cannot play directly, so the engine reads them itself 
 
 | Reader | What it does | When the engine routes onto it |
 | --- | --- | --- |
-| `HLSLiveIngestReader` | Picks the highest-bandwidth variant, polls the media playlist, prefetches segments and commits them in playlist order. A demuxed audio rendition gets a companion reader. AES-128 clear-key segments are decrypted on the way (`HLSSegmentDecryptor`); fMP4 segments (`EXT-X-MAP`) end the session with an `HLSIngestError`. | A known HLS playlist URL on the live path with `nativeRemoteHLS` off (AE#678). A bypass that built no video track for a master that advertises one, typically HEVC in MPEG-TS (#168); the verdict is remembered per master (#199), and `HLSCarriageProbe` can settle it early from the playlist and the first segment's PMT (AE#293). |
+| `HLSLiveIngestReader` | Picks the highest-bandwidth variant, polls the media playlist, prefetches segments and commits them in playlist order. A demuxed audio rendition gets a companion reader. AES-128 clear-key segments are decrypted on the way (`HLSSegmentDecryptor`); fMP4 segments (`EXT-X-MAP`) end the session with an `HLSIngestError`. | A known HLS playlist URL on the live path with `nativeRemoteHLS` off (AE#678). A bypass that built no video track for a master that advertises one, typically HEVC in MPEG-TS (#168); the verdict is remembered per master (#199), and `HLSCarriageProbe` can settle it early from the playlist and the first segment's PMT (AE#293), decrypting the head of an AES-128 segment first (AE#1089). |
 | `HLSVODIngestReader` | One finite playlist. A seek restarts at the segment before the target, on an elapsed-time axis, and the demuxer's packet gate drops frames before the exact target. With `heldSourceConnection`, every request goes over one persistent HTTP/1.1 connection per origin (`PersistentHTTP1Transport`, AE#732). | A finite HEVC-in-MPEG-TS VOD, at load (AE#268). Any finite MPEG-TS playlist with `preferredDecodePath = .software`, which then decodes on the software host (AE#990). |
 
 ### MPEG-DASH
@@ -551,9 +583,10 @@ Scrub images (the thumbnails shown while the viewer drags the timeline) come fro
 - **Cache-backed stills.** `scrubThumbnail` decodes what the session holds: the loopback segment cache on the native route (`AetherEngine+ScrubThumbnail.swift`), and the DVR packet ring (the buffer of recent live packets) or the packet cache on the software host (`SoftwareStillExtractor`). The software extractor drives a real `SoftwareVideoDecoder`, so deinterlacing and pixel aspect match the picture on screen.
 - **Sparse still ladder.** For VOD stretches nothing resident covers, `KeyframeStillLadder` reads one keyframe per rung (one evenly spaced position) off the source while the link is idle. It uses a slot of the pump's per-origin request budget (`generatesBackgroundScrubPreviews`). A one-request origin gets no ladder (AE#937).
 - **I-frame rendition.** With `serveIFramePlaylist` (AE#682), the master lists an I-frame playlist (a playlist of keyframes only), so a stock `AVPlayerViewController` shows scrub thumbnails with no host code. The local server answers `iframe_init.mp4` and `iframe{N}.mp4` through `IFrameRendition`:
-  - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk.
+  - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk. Its Range follows the largest keyframe it has read so far (`IFrameSideReader.rangeCap`, at least the 256 KB AVIO buffer), instead of the 1 MB chunk a 30 KB keyframe used to cost.
+  - `IFrameRequestGate` decides which request reads next. The newest request goes first, because when a scrub moves on, the frame under the finger matters and the ones it passed do not. The ladder's prefetch goes only when no request waits. A request whose client closed the connection while it waited reads nothing (`HLSLocalServer.peerHasClosed`).
   - `IFrameFragmentBuilder` wraps it in one fMP4 fragment on the main rendition's timeline. Each fragment gets a fresh muxer, because AVKit asks for I-frames in any order.
-  - The still ladder fills the rendition ahead of AVKit (`IFrameRendition.prefetch`). While the rendition is served, the ladder reads through it instead of opening a reader of its own: first every segment within `KeyframeStillLadder.iFrameWindowSegments` (30) of the playhead's, then its coarse rungs. For a JPEG rendition it builds the fragment inside that window too. Without this, every thumbnail waited on its read (and for HDR on decode, tone map and encode), and AVKit showed its grey placeholder in the meantime.
+  - The still ladder fills the rendition ahead of AVKit (`IFrameRendition.prefetch`). While the rendition is served, the ladder reads through it instead of opening a reader of its own: first every segment within `KeyframeStillLadder.iFrameWindowSegments` (30) of the playhead's, then its coarse rungs. The window reads back to back while the link stays idle: each read that lands starts the next one instead of waiting for the 1 Hz tick and the ladder's 2 s gap (`fineWindowSpacingSeconds`). The coarse rungs keep that gap. For a JPEG rendition it builds the fragment inside that window too. Without this, every thumbnail waited on its read (and for HDR on decode, tone map and encode), and AVKit showed its grey placeholder in the meantime.
   - HDR and Dolby Vision sources get one SDR Motion JPEG per keyframe instead (`IFrameJPEGBuilder`), because the tvOS scrubber gives up on PQ I-frames.
   - The rendition is all or nothing (`IFrameRenditionEligibility`). Live sessions, sequential and held origins, serial origins, disc sources and plans whose boundaries are not keyframes list none.
 
@@ -680,6 +713,16 @@ The coverage ledger ([below](#the-landing-after-a-seek)) knows both cases. `harv
 
 So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait. A pair whose span some run read is decoded through; one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
 
+**The ground in front of the first packet (AE#1104).** A reset after a seek has no packet in front of its first entry, so no pair covers that stretch. A backward seek past the session's earliest reading shows why it matters:
+
+- A file opened at 46.2 s holds only what the load read, from 27.5 s on.
+- After a seek to 0 that island is the first entry in the window, and the stretch from 0 to 27.5 s is unread.
+- Decoding the island first put the cursor past it, so the cues the readers then found from 0 s on were stored behind the cursor and never shown.
+
+So a reset also asks the ledger about the stretch from its window start (clamped at 0, like every reader's read start) to the first entry. Unread means the tick decodes nothing, leaves the cursor at the window start and waits there, under the same rules as any other wait. Without a ledger the reset decodes as before, since order has nothing to compare at a window boundary.
+
+One case is still open. A first entry that is already due (within the release lead of the playhead) decodes at once, so the landing line is never held back. If the ground in front of it is unread, a cue that starts there and is still on screen at the landing arrives behind the cursor and is not shown. That takes a short backward seek into a stretch the session never read. A cursor that steps back for packets stored behind it would close it.
+
 On a link near the media bitrate, two more rules make this work:
 
 - **No reach claim during a seek.** The pump's reach claim ("it rendered the playhead, so it read up to there") is not made while a seek is in flight. `sourceTime` still reports the frame the seek is leaving while the producer is already re-anchored behind it, so the claim would stretch the fresh run across exactly the skipped ground.
@@ -733,7 +776,12 @@ See [TrueHD Atmos with heights](formats.md#truehd-atmos-with-heights) and [DTS:X
 
 When the app goes to the background while playing, the engine keeps audio going instead of tearing the pipeline down.
 
-**The decision.** It is a pure, unit-tested policy, `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:retainPausedVideoPipeline:)`, driven from the `UIApplication` lifecycle observers.
+**The decision.** Every entry point asks one pure, unit-tested function, `backgroundDecision(_:trigger:)` in `AetherEngine+Background.swift` (audit LIF-R201). The entry points are `didEnterBackground`, a pause (from `pause()` or from the player itself), a load or seek that settles, a PiP window closing, and the grace window's expiry.
+
+- It first owes the decision while a load or seek is in flight. The load's own exit settles it.
+- An interruption gets no hold of its own (review R-P5-1). A session a call paused gets the grace window like any other paused one. Only that window's background-task assertion keeps the app running, so a hold past it would let the app suspend with the whole pipeline, which is the `mediaserverd` wedge the teardown exists for. iOS does not promise an interruption ENDED at all.
+- It does nothing for a session the background teardown already released.
+- Otherwise it applies `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:retainPausedVideoPipeline:)` and, for the step, `backgroundStep(action:state:supportsGraceWindow:graceSeconds:)`.
 
 - `keepVideoAlive` comes from `shouldKeepVideoAlive(enabled:pipActive:state:)` on iOS.
 - tvOS tears down unless a PiP window is active (`shouldKeepVideoAliveTV`), for safety: a frozen decode session crossing a multi-hour suspension can wedge `mediaserverd`.
@@ -764,6 +812,7 @@ A paused session waits a short grace window before it tears down in the backgrou
 - The teardown is deferred by `backgroundTeardownGraceSeconds` (default 15 s; 0 restores the immediate teardown), held under a `UIBackgroundTask` assertion.
 - `didBecomeActive` cancels the window, so a quick switch resumes on the live pipeline.
 - At expiry the action is evaluated again (PiP can start, and lock-screen play can resume, during the window). The teardown runs while the app is still really running, never across an idle suspension. The assertion's expiration handler is a synchronous backstop.
+- Each window ends only its own assertion. A window that expired is still draining its teardown (3.5 s) when the app can come back and leave again, and the new window's assertion must outlive that drain.
 - The step decision is the pure `backgroundStep(action:state:supportsGraceWindow:graceSeconds:)`.
 - A playing teardown (background playback disabled) stays immediate, because its audio would keep sounding through the window. tvOS keeps the teardown, with the same PiP and `retainsVideoPipelineWhenBackgrounded` exceptions.
 

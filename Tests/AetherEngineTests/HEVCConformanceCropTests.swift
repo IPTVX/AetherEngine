@@ -1,6 +1,6 @@
 // Apple TV (AppleTV18,1, tvOS 27.2.1) restarts on hardware-decoded HEVC coded 3840x2176 and cropped to
-// 2160 by a conformance window. The native tvOS remux clears that window and crops with a clap box
-// instead; everything else passes.
+// 2160 by a conformance window. On that generation the native tvOS remux clears the window and crops
+// with a clap box instead; everything else passes. Older models keep the window (AE#1094).
 //
 // The SPS bytes are from the recording that reproduced the restart. `cropFree` is what FFmpeg's
 // hevc_metadata filter writes for the same SPS with crop_bottom=0, which played on the device.
@@ -49,6 +49,19 @@ struct HEVCConformanceCropTests {
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: cropFree) == nil)
     }
 
+    @Test("AE#1094: only the restarting Apple TV generation and later ones clear the window")
+    func modelGate() {
+        #expect(HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV18,1"))
+        #expect(HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV19,2"))
+        // Plays the window, and the clap would squeeze PQ HDR instead of cropping it.
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV14,1"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV11,1"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV6,2"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("arm64"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("iPhone19,7"))
+        #expect(!HEVCConformanceCrop.modelNeedsCropFreeSPS("AppleTV"))
+    }
+
     @Test("Other geometries, other NAL types and damaged headers pass untouched")
     func leavesOthersAlone() {
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: uncropped2160) == nil)
@@ -63,6 +76,37 @@ struct HEVCConformanceCropTests {
         let annexB: [UInt8] = [0, 0, 0, 1] + vps + [0, 0, 1] + cropped + [0, 0, 0, 1] + pps
         let expected: [UInt8] = [0, 0, 0, 1] + vps + [0, 0, 0, 1] + cropFree + [0, 0, 0, 1] + pps
         #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: annexB) == expected)
+    }
+
+    /// The audit BIT-202 geometry: a 3840x2176 SPS with the crop window and 16400 units of `00 00 40` padding
+    /// that become `00 00 01` (and gain an emulation byte each) once the offsets shrink by 6 bits.
+    private func growingSPS(offsets: [Int]) -> [UInt8] {
+        func ue(_ v: Int) -> String { let b = String(v + 1, radix: 2); return String(repeating: "0", count: b.count - 1) + b }
+        let head = "0000" + "000" + "1" + String(repeating: "0", count: 96) + ue(0) + ue(1) + ue(3840) + ue(2176) + "1"
+        let window = offsets.map(ue).joined()
+        var bits = head + window + String(repeating: "1", count: 6)
+            + String(repeating: "000000000000000001000000", count: 16400) + "1"
+        bits += String(repeating: "0", count: (8 - bits.count % 8) % 8)
+        let raw = stride(from: 0, to: bits.count, by: 8).map { i -> UInt8 in
+            let start = bits.index(bits.startIndex, offsetBy: i)
+            return UInt8(bits[start..<bits.index(start, offsetBy: 8)], radix: 2)!
+        }
+        var out: [UInt8] = [0x42, 0x01]
+        var zeros = 0
+        for byte in raw {
+            if zeros >= 2, byte <= 3 { out.append(3); zeros = 0 }
+            out.append(byte)
+            zeros = byte == 0 ? zeros + 1 : 0
+        }
+        return out
+    }
+
+    @Test("BIT-202: a record whose rewritten SPS would pass 65535 bytes is left alone instead of trapping")
+    func recordRewriteThatDoesNotFit() {
+        let sps = growingSPS(offsets: [0, 0, 0, 8])
+        #expect(sps.count <= 0xFFFF)
+        #expect((HEVCConformanceCrop.removingUHDPaddingCrop(fromSPS: sps)?.count ?? 0) > 0xFFFF)
+        #expect(HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: record(sps)) == nil)
     }
 
     @Test("An in-band cropped SPS is replaced and every other NAL is kept")
@@ -184,6 +228,7 @@ struct HEVCConformanceCropTests {
             Issue.record("No fragment was written")
             return
         }
+        #expect(muxer.ownedStagingPathCount == 1, "audit SEG-204: only the next staging file is still owned")
         let fragment = try Data(contentsOf: path)
         let initSegment = initial.get()
         // 3840x2160 with a vertical offset of +8: the sign tvOS needs, the opposite of the spec's.

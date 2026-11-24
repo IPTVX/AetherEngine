@@ -140,6 +140,10 @@ struct SoftwareLargeAudioDelayTests {
             await engine.seek(to: target)
             #expect(abs(engine.currentTime - target) < 0.1)
             engine.play()
+            // Source-history warmup must not spend the seek's video interval before any frame arrives.
+            if host.videoRendererForTesting.takeCadence().handedOver == framesBefore {
+                #expect(host.clockRateForTesting == 0)
+            }
             let deliveredNearTarget = try await waitFor(upTo: .seconds(3)) {
                 engine.currentTime > target + 0.25
                     && host.videoRendererForTesting.takeCadence().handedOver > framesBefore

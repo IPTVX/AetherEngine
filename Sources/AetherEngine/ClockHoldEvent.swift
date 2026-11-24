@@ -13,7 +13,8 @@ import Foundation
 /// - `.ready` and `.timedOut` carry how long the clock stood. The clock starts `0.25` s after either,
 ///   at the position it was held on.
 /// - Only the software host holds. The AVPlayer paths, the audio-only host and live streams off the
-///   Dolby Vision FEL route never emit; neither does a start whose frames are already in the layer.
+///   Dolby Vision FEL and compressed audio-delay alignment routes never emit; neither does a start
+///   whose frames are already in the layer.
 ///
 /// Events are published on the main actor, in emission order. `AetherEngine.isClockHeld` is the level.
 public enum ClockHoldEvent: Sendable, Equatable {

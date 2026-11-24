@@ -40,8 +40,9 @@ The engine sends a format to hardware when the platform can decode it, and to it
 - Software is the default route. Only HEVC, H.264 and hardware-decodable AV1 go native.
 - H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext go to software where VideoToolbox has no hardware decoder for them (Intel Macs, older chips).
 - **Interlaced H.264** goes to software, because AVPlayer does not deinterlace. On VOD (on-demand files, not live) the engine checks the declared field order against decoded frames. Progressive video that is only packed as interlaced therefore keeps hardware decode. While the host reports an AirPlay receiver that shows video, it plays natively instead, so the TV gets the picture (AE#1070).
-- **Deinterlacing** runs on the GPU (yadif_videotoolbox, Metal, field rate by default), with a CPU bwdif fallback.
-- **Upscaling (opt-in):** `LoadOptions.upscalesLowResolutionVideo` scales SDR video below 1080p up to the display. It uses VideoToolbox super resolution, then MetalFX, and needs OS 26. HDR, Dolby Vision and AirPlay keep their usual route, and the upscaling stage never stops playback. For animation, `upscaleScaler = .lineArt` runs a line-art network instead, which also takes 1080p. See [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo).
+- **Deinterlacing** runs on the GPU (bwdif_videotoolbox, Metal, field rate by default; yadif_videotoolbox on older FFmpegBuilds), with a CPU bwdif fallback that runs the same algorithm.
+- **Inverse telecine** for hard-telecined NTSC film (the usual DVD of a film-shot series): a load-time sample finds the 3:2 pulldown, the fields are matched back into 23.976 fps film frames and the display is asked for 23.976 Hz, instead of deinterlacing (#853). See [formats › Inverse telecine](formats.md#inverse-telecine).
+- **Upscaling (opt-in):** `LoadOptions.upscalesLowResolutionVideo` scales SDR video below 1080p up to the display. It uses VideoToolbox super resolution, then MetalFX, and needs OS 26. HDR, Dolby Vision and AirPlay keep their usual route, and the upscaling stage never stops playback. For animation, `upscaleScaler = .lineArt` runs a line-art network instead, which also takes 1080p. `LoadOptions.upscalesFullHDVideo` scales SDR 1080p with Lanczos-3, where an Apple TV would scale bilinearly. See [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscalesFullHDVideo](api.md#upscalesfullhdvideo).
 - **Tone mapping (opt-in):** `LoadOptions.videoProcessing` maps an HDR10 title whose declared peak is above `targetPeakNits` down to that peak (BT.2390), and the frame tells the display the target, so it does not map a second time. It plays the title on the software path and needs OS 26. Dolby Vision, HDR10+, HLG and SDR keep their usual route. See [api.md › videoProcessing](api.md#videoprocessing).
 - **3D on visionOS:** an MV-HEVC second view and side-by-side or over-under frame packing (HEVC) play in stereo (`LoadOptions.stereoPresentation`). Other platforms play 2D. See [api.md › stereoPresentation](api.md#stereopresentation).
 - **Dolby Vision Profile 20** (Dolby Vision on MV-HEVC, Apple's 3D format) is offered in stereo on visionOS, which is not yet confirmed on a Vision Pro. Every other system plays its base view in 2D as Profile 5, with correct colour.
@@ -74,7 +75,7 @@ Stream-copied audio is passed on untouched. Bridged audio is decoded and re-enco
 | Handling | Codecs |
 | --- | --- |
 | Stream-copied, lossless | AAC, AC3, EAC3, FLAC, ALAC |
-| Bridged (decoded, then re-encoded: by default surround to EAC3 5.1 and stereo to lossless FLAC; with `audioBridgeMode = .lossless`, FLAC up to 7.1) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
+| Bridged (decoded, then re-encoded: by default surround to EAC3 5.1 and stereo to lossless FLAC; with `audioBridgeMode = .lossless`, FLAC up to 7.1, or 24-bit PCM for a layout FLAC cannot label) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
 
 - **Surround:** 5.1 and 7.1 with the correct `AudioChannelLayout`.
 - **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery.
@@ -126,6 +127,7 @@ More:
 - **Native WebVTT renditions** (opt-in, `LoadOptions.prepareNativeSubtitles`): the engine hands AVPlayer one language-tagged rendition per text track, including external files declared at load. Subtitles then survive PiP, AirPlay and an external display.
 - **Two tracks at once:** `selectSecondarySubtitleTrack(index:)` adds an independent second track (embedded or external) for bilingual viewing. Its cues arrive in `secondarySubtitleCues`. See [guide.md › A second subtitle track](guide.md#a-second-subtitle-track-at-the-same-time).
 - **Subtitle offset reach:** `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` (or `maximumSubtitleOffsetSeconds` for both) keep enough bitmap history and lead for the offset range a host offers.
+- **Bitmap cues as text** (opt-in, `LoadOptions.recognizesBitmapSubtitleText`): each PGS / DVB / DVD cue comes back with the text Vision read in it, line by line with confidence and position, so a host can draw picture subtitles in its own caption style.
 - **Bitmap tracks in PiP / AirPlay.** Bitmap tracks (PGS, DVB, DVD, embedded and external .sup) join as OCR-fed renditions. OCR here is on-device Vision text recognition: it runs while the track is selected and fills a language-tagged text rendition. This is lossy by design; fullscreen keeps the pixel-accurate overlay.
 
 The host draws the overlay itself. See [formats.md › Subtitles](formats.md#subtitles).
@@ -154,6 +156,7 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 **Streaming.**
 
 - One long-lived forward-streaming connection, reconnected when it drops. It rides out CDN stutter.
+- A reconnect that brings back only a few bytes is not counted as progress. A live source that answers every request with a short notice ("Channel starting.") gets five requests over about 15 s, then the open fails, instead of being asked again hundreds of times a second.
 - Optional open-time probe budget (`LoadOptions.probesize` / `maxAnalyzeDuration`): how much the engine reads to analyse a file before playing. A smaller budget cuts first-frame latency on sparse remote remuxes.
 - Configurable forward buffer (`LoadOptions.forwardBufferSegments`): from the 40 s default up to an opt-in whole-source pre-buffer. That pre-buffer is bounded in bytes by the session's disk budget, not in segments.
 
@@ -162,6 +165,8 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 - The next `load()` of that URL reads its parse bytes from RAM, gets the size with the bytes instead of probing for it, and opens its data connection where the warm bytes end instead of at byte zero. Nothing waits on a first byte.
 - Static and off the main actor: no engine instance, no audio session, no layer.
 - It never queues for the origin. The bytes live only in memory until they are adopted and are dropped under memory pressure. The HTTP headers are part of the cache key.
+
+**Resume after a stop.** With `LoadOptions.retainsSessionCacheAfterStop` a stopped session's segments stay on disk, and the next load of the same source plays them from there instead of fetching them again. One kept session per process, deleted by any other load. See [api.md › Keeping the segment cache across a stop](api.md#keeping-the-segment-cache-across-a-stop).
 
 ## Picture in Picture
 

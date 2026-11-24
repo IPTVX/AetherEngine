@@ -1,0 +1,100 @@
+diff --git b/Sources/AetherEngine/AetherEngine.swift a/Sources/AetherEngine/AetherEngine.swift
+index c7e6a00bd411e493164da042571274c32785e4b6..97cef57e915917567b355c4c2cc07308aa6b3780 100644
+--- b/Sources/AetherEngine/AetherEngine.swift
++++ a/Sources/AetherEngine/AetherEngine.swift
+@@ -2370,6 +2370,22 @@ public final class AetherEngine: ObservableObject {
+ 
+     // MARK: - Display + native state
+ 
++    /// Receives the session's presentation cadence when the host owns display criteria, before
++    /// playback routing starts and after display-switch observation is armed. This synchronous
++    /// main-actor callback must return promptly; the host may write its criteria here. The source
++    /// frame-rate publication remains unchanged, including when inverse telecine presents at 24/30
++    /// of that rate. Engine- and AVKit-owned loads do not invoke it.
++    public var onDisplayCriteria: (@MainActor (Double?) -> Void)?
++
++    /// Delivers only a host-owned load's cadence and rejects a synchronous Stop or replacement
++    /// before the caller can construct a pipeline for the retired generation.
++    func notifyHostDisplayCriteria(frameRate: Double?, options: LoadOptions, generation: UInt64) throws {
++        if options.effectiveDisplayCriteriaOwner == .host {
++            onDisplayCriteria?(frameRate)
++            try checkLoadCurrent(generation)
++        }
++    }
++
+     /// Programs AVDisplayManager.preferredDisplayCriteria from probed format + frame rate. No-op on iOS/macOS.
+     let displayCriteria = DisplayCriteriaController()
+ 
+@@ -5896,6 +5912,7 @@ public final class AetherEngine: ObservableObject {
+             // mode is not recorded as this session's. Audio-only loads reach clearStale too and have no
+             // panel handshake to observe.
+             if !options.engineWritesDisplayCriteria { displayCriteria.armSwitchObservation() }
++            try notifyHostDisplayCriteria(frameRate: snappedRate, options: options, generation: gen)
+         }
+ 
+         // 2.5. Post-handshake panel-mode snapshot.
+diff --git b/Tests/AetherEngineTests/Issue842DisplayCriteriaOwnerTests.swift a/Tests/AetherEngineTests/Issue842DisplayCriteriaOwnerTests.swift
+index dc3f338d21e0c1f3775573a3163714f1096854a3..4b47cd2c87ffdc1dd2dd34d5addc470756f52df6 100644
+--- b/Tests/AetherEngineTests/Issue842DisplayCriteriaOwnerTests.swift
++++ a/Tests/AetherEngineTests/Issue842DisplayCriteriaOwnerTests.swift
+@@ -1,3 +1,4 @@
++import Foundation
+ import Testing
+ @testable import AetherEngine
+ 
+@@ -66,4 +67,55 @@ struct Issue842DisplayCriteriaOwnerTests {
+         #expect(adjusted.effectiveDisplayCriteriaOwner == .avKit)
+         #expect(!adjusted.engineWritesDisplayCriteria)
+     }
++    /// The source probe's 29.97 rate stays metadata while the host receives the decided film cadence.
++    @Test("the host receives the inverse-telecine presentation rate before routing")
++    @MainActor
++    func hostReceivesFilmCadence() throws {
++        let engine = try AetherEngine()
++        defer { engine.stop() }
++        var received: [Double?] = []
++        engine.onDisplayCriteria = { received.append($0) }
++        let sourceRate = 30_000.0 / 1_001
++        engine.sourceVideoFrameRate = sourceRate
++        let presentationRate = AetherEngine.presentationFrameRate(source: sourceRate, inverseTelecine: true)
++
++        try engine.notifyHostDisplayCriteria(frameRate: presentationRate, options: options(owner: .host),
++                                             generation: engine.loadGeneration)
++
++        #expect(received.count == 1)
++        #expect(abs(try #require(received.first ?? nil) - 24_000.0 / 1_001) < 0.001)
++        #expect(engine.sourceVideoFrameRate == sourceRate)
++    }
++
++    /// Other owners keep their existing criteria path and cannot trigger a second host writer.
++    @Test("engine and AVKit owners never call the host display writer")
++    @MainActor
++    func otherOwnersDoNotNotifyHost() throws {
++        let engine = try AetherEngine()
++        defer { engine.stop() }
++        var callbacks = 0
++        engine.onDisplayCriteria = { _ in callbacks += 1 }
++
++        for owner: DisplayCriteriaOwner in [.engine, .avKit] {
++            try engine.notifyHostDisplayCriteria(frameRate: 24, options: options(owner: owner),
++                                                 generation: engine.loadGeneration)
++        }
++
++        #expect(callbacks == 0)
++    }
++
++    /// A callback that synchronously leaves playback cannot let this load open a retired source.
++    @Test("a synchronous host Stop cancels the load before routing")
++    @MainActor
++    func hostStopCancelsRouting() throws {
++        let engine = try AetherEngine()
++        engine.onDisplayCriteria = { [weak engine] _ in engine?.stop() }
++        let generation = engine.loadGeneration
++
++        #expect(throws: CancellationError.self) {
++            try engine.notifyHostDisplayCriteria(frameRate: 24, options: options(owner: .host),
++                                                 generation: generation)
++        }
++    }
++
+ }

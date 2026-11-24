@@ -118,7 +118,10 @@ final class CompressedAudioDelayAlignment: @unchecked Sendable {
         self.isCurrent = isCurrent
         do {
             for lane in Lane.allCases {
-                stores[lane] = try SoftwarePacketDiskFIFO(chunkTargetBytes: min(4 << 20, max(64, byteBudget / 8)))
+                stores[lane] = try SoftwarePacketDiskFIFO(
+                    chunkTargetBytes: min(4 << 20, max(64, byteBudget / 8)),
+                    maximumResidentBytes: byteBudget
+                )
             }
         } catch {
             for store in stores.values { try? store.close() }
@@ -143,6 +146,9 @@ final class CompressedAudioDelayAlignment: @unchecked Sendable {
                     if let data = try stores[lane]?.pop() {
                         heads[lane] = try Self.decode(data)
                         headResidentBytes[lane] = data.count + 8
+                        // Alignment never replays consumed records. Reclaim their chunks explicitly
+                        // now that upstream's FIFO retains history for cache-backed playback.
+                        try stores[lane]?.trimConsumed(toByteBudget: 0)
                     }
                 } catch { throw Failure.storageFailure(message: error.localizedDescription) }
             }

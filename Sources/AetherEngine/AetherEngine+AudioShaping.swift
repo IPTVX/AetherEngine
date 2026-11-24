@@ -76,7 +76,7 @@ extension AetherEngine {
                            + "being rebuilt; its settled pipeline reconciles the latest graph", category: .engine)
             return
         }
-        if videoRoute == .remoteBypass || audioAVPlayerHost != nil || playbackBackend == .none {
+        if videoRoute == .remoteBypass || audioAVPlayerActive || playbackBackend == .none {
             EngineLog.emit("[AetherEngine] AE#923: audio shaping = \(next.summary), kept for the next load: "
                            + "this session's audio is not decoded by the engine (route=\(videoRoute.rawValue))",
                            category: .engine)

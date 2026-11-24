@@ -139,6 +139,8 @@ Use `seekEvents` (`AnyPublisher<SeekEvent, Never>`) wherever the end of a seek m
 
 `$isSeeking` alone cannot tell you whether a seek landed, gave up or was replaced. And on a stalled source, a seek that gave up can still land minutes later.
 
+Each event also says who asked (`origin`) and where the playhead stood when it was asked (`departure`). A skip from Control Center or the iPhone Remote that the engine handled has origin `.remoteCommand`, so you can react to every skip back without intercepting commands. See [Seek events](api.md#seek-events).
+
 ### videoRoute
 
 `videoRoute` says which pipeline plays the session:
@@ -258,6 +260,26 @@ Styled subtitles arrive as `.richText`. Each run carries colour, bold, italic, u
 - A host that renders ASS itself (with libass) sets `LoadOptions(preserveASSMarkup: true)`. ASS and SSA tracks then arrive as raw event lines, and `TrackInfo.assHeader` carries the script header the styles refer to.
 
 Cues are stamped in raw source PTS. Draw your overlay against `player.sourceTime` ([formats.md › Subtitles](formats.md#subtitles)).
+
+### Picture subtitles in your caption style
+
+PGS, DVB and DVD subtitles are pictures, so they keep the disc's look. To draw them in the viewer's caption style instead, load with `recognizesBitmapSubtitleText`:
+
+```swift
+var options = LoadOptions()
+options.recognizesBitmapSubtitleText = true
+
+if case .image(let image) = cue.body {
+    if let read = image.recognizedText, let text = read.text,
+       read.lines.allSatisfy({ $0.confidence >= 0.5 }) {
+        drawStyled(text)
+    } else {
+        draw(image)   // not read yet, nothing readable, or not sure enough
+    }
+}
+```
+
+The engine reads each picture on-device and republishes the cue with the text, usually well before it is due. Details: [formats.md › Bitmap cues as text](formats.md#bitmap-cues-as-text-ae1114).
 
 ### External subtitle files
 
@@ -395,6 +417,7 @@ An assertion only ever adds a capability, so neither flag can hide one the syste
 - What it does: it serves a Profile 8.1 (or converted Profile 7) source as Profile 5. AVPlayer then composes the Dolby Vision picture itself, instead of handing the TV only the HDR10 base layer ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455)).
 - The risk: a tvOS build that reads the base layer's colours from the profile field would show a green / violet cast.
 - Asserting `panelPresentsDolbyVision` turns it off.
+- A file that also carries HDR10+ loses that HDR10+ on this route. On an HDR10+ TV, also set `preferHDR10PlusOverForcedDolbyVision`, and such a file keeps its HDR10+ (Sodalite#245).
 
 Details in [api.md › forceDolbyVisionOnNonDVDisplay](api.md#forcedolbyvisiononnondvdisplay).
 
@@ -410,7 +433,9 @@ Audio-only sessions and hosts that turned the engine's criteria off clear leftov
 
 **If your app plays no audio of its own, set `engine.deactivatesAudioSessionOnStop = true`.**
 
-The background: the engine sets the audio session category at the first load, but never activates the session on the native path. AVKit activates it for each playback, and that is what lets tvOS negotiate the HDMI audio route ([#24](https://github.com/superuser404notfound/AetherEngine/issues/24)). So by default the engine never releases it either.
+The background: the engine sets the audio session category at the first load, but by default never activates the session on the native path. AVKit activates it for each playback, and that is what lets tvOS negotiate the HDMI audio route ([#24](https://github.com/superuser404notfound/AetherEngine/issues/24)). So by default the engine never releases it either.
+
+**If you show the native path through `AetherPlayerSurface` (the bare player layer), set `engine.nativeAudioSessionActivationEnabled = true`.** Without an `AVPlayerViewController` nobody activates the session at `play()`, and your app has no good moment of its own. Before `load()` is too early, the TV has not switched modes yet. With the flag on, the engine activates after that switch and right before `play()`, the same point the software path uses. Details in [the API reference](api.md#native-activation-for-hosts-on-the-bare-player-layer-ae1110).
 
 On a route that passes E-AC-3 / Atmos through to a receiver, the receiver can then keep looping the last MAT frame (the packet format Atmos travels in over HDMI) after the player is gone.
 
@@ -495,7 +520,7 @@ What `.fastZap` changes:
 
 - **Shorter segments.** Live segments are cut at every keyframe after 0.5 s instead of the standard ~4 s. The served `TARGETDURATION` drops to 1.5 x the source GOP length: 1 s GOPs serve 2, and so do segments up to 1.666 s. The headroom covers a broadcast's irregular GOPs (#670).
 - **Smaller holdback.** The live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis minimum, #189) shrinks with it.
-- **A bounded start.** The first manifest still prefers the full holdback. After two finished segments, a source that delivers strictly in real time gets one grace period of one observed segment, clamped to 0.5...2.0 s. After that, a shallow first window may be served so startup stays bounded. This can cause one early `-16832` error or a short rebuffer.
+- **A bounded start.** The first manifest goes out once the window holds the full holdback or two finished segments, whichever comes first. A shallow first window is normal, and on a source that delivers strictly in real time it can cause one early `-16832` warning or a short rebuffer. `liveStartupGraceSeconds` adds a wait for a deeper window if a host prefers that.
 - **Less patience.** A smaller `TARGETDURATION` also makes AVPlayer less patient with an unchanged playlist, and keeps a smaller buffer at the live edge. Origins that stall or deliver in bursts mid-stream rebuffer more easily.
 
 ### The retune request: `liveSourceReset`
@@ -839,6 +864,7 @@ Everything here is off (or keeps its old behaviour) until you set it. The option
 ```swift
 LoadOptions(upscalesLowResolutionVideo: true)                        // SDR below 1080p, to the display's size
 LoadOptions(upscalesLowResolutionVideo: true, upscaleScaler: .lineArt) // animation only, also takes 1080p and 10-bit SDR
+LoadOptions(upscalesFullHDVideo: true)                               // SDR 1080p, Lanczos-3 to the display's size
 player.$activeUpscale   // UpscaleStatus?: what the stage is doing, nil while none runs
 ```
 
@@ -846,12 +872,14 @@ SDR video below 1080p is scaled up to the display's native size, with VideoToolb
 
 `.lineArt` runs a network made for drawn content instead (AE#1039). Set it per title, from the genre or a per-show switch: on live action it looks wrong.
 
+`upscalesFullHDVideo` covers 1080p, which an Apple TV otherwise scales to a 4K display bilinearly. It runs Lanczos-3, which is cheap and keeps visibly more detail. It is a separate switch because it puts most of a library on the software path.
+
 - **It moves the title onto the software path,** so that path's rules apply: PiP through `softwarePiPSource`, no native subtitle renditions.
 - **Some titles keep their usual route:** HDR, Dolby Vision, a display no larger than the source, and any AirPlay route. The load logs one `[Upscale]` line saying why.
 - **It never stops playback.** A stage that falls behind degrades, then switches itself off. `$activeUpscale` then carries `degraded` or `disabledReason`.
 - **A failing VideoToolbox pass is dropped, not the stage.** Some devices (an A12 Apple TV on tvOS 27.2) report VideoToolbox super resolution and then refuse every frame. MetalFX alone then scales to the same size, and `$activeUpscale` shows `degraded` with `mlScale` nil.
 
-Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
+Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo), [upscalesFullHDVideo](api.md#upscalesfullhdvideo) and [upscaleScaler](api.md#upscalescaler).
 
 ### Tone mapping HDR10 to the display's peak
 
@@ -935,7 +963,7 @@ Details in [formats.md › Audio shaping](formats.md#audio-shaping).
 | Option | What it gives you | Default |
 | --- | --- | --- |
 | `skipsContainerAttachments` | Opens a Matroska file without reading its attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
-| `audioBridgeMode` | `.lossless` sends FLAC up to 7.1 for a sink that takes multichannel PCM, instead of E-AC-3 | `.surroundCompat` |
+| `audioBridgeMode` | `.lossless` sends FLAC up to 7.1 (PCM for a layout FLAC cannot label) for a sink that takes multichannel PCM, instead of E-AC-3 | `.surroundCompat` |
 | `objectAudioRendering` | Keeps the heights of TrueHD Atmos and DTS:X. Needs the package traits ([installation.md](installation.md#optional-components)) | `.off` |
 | `rendersDTSXObjectAudio` | `false` keeps DTS:X on the channel bridge while TrueHD Atmos still renders | true |
 | `audioDelaySeconds` | Starts the session with a lip-sync offset; `setAudioDelay(_:)` changes it later | 0 |

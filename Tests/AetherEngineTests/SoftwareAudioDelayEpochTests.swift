@@ -93,7 +93,7 @@ struct SoftwareAudioDelayEpochTests {
     /// Headers and protected consumed prefixes are part of the aligned cache's single partition.
     @Test
     func alignedCacheCannotBorrowItsOtherQueuePartition() throws {
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 32, retainConsumed: true,
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 32,
                                               maximumResidentBytes: 32)
         defer { try? fifo.close() }
         try fifo.append(Data(repeating: 1, count: 8))
@@ -108,7 +108,7 @@ struct SoftwareAudioDelayEpochTests {
     /// A full cache parks with one pending compressed record and resumes after consumer eviction.
     @Test(.offCooperativePool, .timeLimit(.minutes(3)))
     func alignedCacheSaturationContinuesWithoutExceedingItsPartition() throws {
-        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 128, retainConsumed: true,
+        let fifo = try SoftwarePacketDiskFIFO(chunkTargetBytes: 128,
                                               maximumResidentBytes: 256)
         let produced = ProbeTestBox(0)
         let source = SoftwarePacketReadAhead(

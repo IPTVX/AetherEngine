@@ -151,9 +151,18 @@ struct ItemSwapStillTests {
         // rebuild pauses first for that reason, but the playing read still has to work. The timeout
         // only has to catch an output that never vends: 2 s ran out once in a starved CI run (this
         // test took 22.7 s) with the item still playing.
+        let before = Self.playerReading(host)
         let frame = await host.captureDisplayedFrame(timeout: .seconds(15))
-        #expect(frame != nil, "no frame while \(engine.state)")
+        #expect(frame != nil, "no frame while \(engine.state); before \(before), after \(Self.playerReading(host))")
         #expect(engine.state == .playing)
+    }
+
+    static func playerReading(_ host: NativeAVPlayerHost) -> String {
+        let player = host.avPlayer
+        let item = player.currentItem
+        return "t=\(String(format: "%.3f", player.currentTime().seconds)) rate=\(player.rate) "
+            + "tcs=\(player.timeControlStatus.rawValue) item=\(item?.status.rawValue ?? -1) "
+            + "dur=\(String(format: "%.3f", item?.duration.seconds ?? -1))"
     }
 
     @Test("a paused native item still hands over the frame on screen", .enabled(if: ItemSwapStillTests.vendsPausedFrames))
@@ -292,6 +301,63 @@ struct ItemSwapStillTests {
         engine.unbindStillView(still)
         #expect(!still.isHoldingStill)
         #expect(engine.heldPictureLastRelease == "still view unbound")
+    }
+
+    @Test("the native read waits as long as the host says, and never on a bad value")
+    func frameWaitFollowsTheSetting() throws {
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.5) == .milliseconds(500))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.12) == .milliseconds(120))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: -1) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: .nan) == .zero)
+        #expect(AetherEngine.heldPictureFrameWait(seconds: .infinity) == .zero)
+        #expect(try AetherEngine().heldPictureFrameWaitSeconds == 0.5)
+    }
+
+    @Test("a huge wait is capped, and after an empty read the next one only probes")
+    func frameWaitCapAndProbe() {
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 3600) == .seconds(3))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 1e300) == .seconds(3))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.5, afterMiss: true) == .milliseconds(150))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0.1, afterMiss: true) == .milliseconds(100))
+        #expect(AetherEngine.heldPictureFrameWait(seconds: 0, afterMiss: true) == .zero)
+    }
+
+    @Test("a read that finds a frame clears an earlier miss", .enabled(if: ItemSwapStillTests.vendsPausedFrames))
+    func hitClearsTheMiss() async throws {
+        let file = try await Self.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        engine.bind(view: view)
+        _ = try await engine.load(url: file)
+        let host = try #require(engine.nativeHost)
+        try await waitFor { host.isVideoReadyForDisplay }
+        engine.heldPictureNativeReadMissed = true
+        engine.pause()
+        await engine.holdPictureAcrossItemSwap()
+        #expect(engine.heldPictureLastSkip == nil)
+        #expect(engine.heldPictureNativeReadMissed == false)
+    }
+
+    @Test("a wait of zero swaps with nothing held and says so")
+    func zeroWaitHoldsNothing() async throws {
+        let file = try await Self.fixtureURL()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let view = AetherPlayerView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        engine.bind(view: view)
+        _ = try await engine.load(url: file)
+        let host = try #require(engine.nativeHost)
+        try await waitFor { host.isVideoReadyForDisplay }
+        engine.heldPictureFrameWaitSeconds = 0
+        engine.pause()
+        await engine.holdPictureAcrossItemSwap()
+        #expect(engine.heldPictureLastSkip == "no frame from the outgoing picture")
+        // Holding nothing on purpose says nothing about the output.
+        #expect(engine.heldPictureNativeReadMissed == false)
     }
 
     @Test("PiP and external playback hold nothing")

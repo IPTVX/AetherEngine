@@ -81,8 +81,9 @@ final class MP4SegmentMuxer {
         /// A stereo source's signalling (`StereoVideoSignal`); nil leaves the track as the source has it.
         let stereo: StereoVideoSignal?
         /// Clear the conformance window of HEVC coded 3840x2176 and cropped to 2160, and crop with a
-        /// `clap` box instead (`HEVCConformanceCrop`). On by default on tvOS, where the window restarts
-        /// an Apple TV; tests turn it on elsewhere.
+        /// `clap` box instead (`HEVCConformanceCrop`). On by default on the Apple TV models whose
+        /// decoder restarts on the window (`HEVCConformanceCrop.modelNeedsCropFreeSPS`); tests turn it
+        /// on elsewhere.
         let clearsUHDPaddingCrop: Bool
 
         init(
@@ -110,7 +111,8 @@ final class MP4SegmentMuxer {
         }
 
         #if os(tvOS)
-        static let clearsUHDPaddingCropByDefault = true
+        static let clearsUHDPaddingCropByDefault =
+            HEVCConformanceCrop.modelNeedsCropFreeSPS(HEVCConformanceCrop.hardwareModel())
         #else
         static let clearsUHDPaddingCropByDefault = false
         #endif
@@ -340,6 +342,7 @@ final class MP4SegmentMuxer {
         fragmentBytesAdmission: ((Int) -> Bool)? = nil,
         admitStagingBytes: (@Sendable (URL, Int) -> SegmentWriteAdmission)? = nil,
         discardStaging: (@Sendable (URL) -> Void)? = nil,
+        isOneShot: Bool = false,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
         self.currentSegmentIndex = initialSegmentIndex
@@ -353,7 +356,8 @@ final class MP4SegmentMuxer {
         self.isHEVCVideo = video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
         removesUHDPaddingCrop = Self.cropFreeConfiguration(for: video) != nil
         if removesUHDPaddingCrop {
-            EngineLog.emit("[MP4SegmentMuxer] 3840x2176 HEVC cropped to 2160: conformance window cleared in the init segment and in-band SPS, clap crops to 2160 (Apple TV hardware decode)", category: .session)
+            // A one-shot builder (I-frame, JPEG, preview) makes a muxer per keyframe: one line per session is enough.
+            EngineLog.emit("[MP4SegmentMuxer] 3840x2176 HEVC cropped to 2160: conformance window cleared in the init segment and in-band SPS, clap crops to 2160 (Apple TV hardware decode)", category: .session, level: isOneShot ? .verbose : .info)
         }
         // AE#561: the override, when there is one, is the record that reaches the sample entry. Both
         // carry the same width (the #19 rebuild keeps the source header's first 22 bytes), so this
@@ -1092,6 +1096,8 @@ final class MP4SegmentMuxer {
         }
 
         byteCounter.noteFragmentCut()
+        // The caller owns the finished file from here (adopt or delete); the set only tracks what is still ours.
+        byteCounter.ownedPaths.remove(completedPath)
 
         let nextPath = Self.stagingPath(forSegmentIndex: nextIdx, in: sessionDir)
         do {
@@ -1152,8 +1158,12 @@ final class MP4SegmentMuxer {
             try? FileManager.default.removeItem(at: finalPath)
             return nil
         }
+        byteCounter.ownedPaths.remove(finalPath)
         return (path: finalPath, bytesWritten: finalBytes)
     }
+
+    /// Staging files this muxer would still delete on deinit; one while a session runs (audit SEG-204).
+    var ownedStagingPathCount: Int { byteCounter.ownedPaths.count }
 
     // MARK: - Path helpers
 
@@ -1432,6 +1442,8 @@ final class MP4SegmentMuxer {
     /// pattern over HLS and MP4) shows as lines 16 to 2175: 16 lines of picture lost at the top, 16 of
     /// padding at the bottom. +8 shows lines 0 to 2159 there, so the side data states a TOP crop, which
     /// movenc writes as +8. macOS would show this file 16 lines low, which is why it is tvOS only.
+    /// For PQ HDR tvOS ignores the crop and squeezes all 2176 lines into the aperture, whatever the
+    /// sign (AE#1094), which is why only the models that restart on the window get this.
     private static func setTVOSPaddingClap(_ codecpar: UnsafeMutablePointer<AVCodecParameters>, lines: Int) {
         av_packet_side_data_remove(codecpar.pointee.coded_side_data, &codecpar.pointee.nb_coded_side_data,
                                    AV_PKT_DATA_FRAME_CROPPING)
