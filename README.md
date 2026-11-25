@@ -51,7 +51,7 @@ AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionO
 Add the package:
 
 ```swift
-.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.74.0-iptvx")
+.package(url: "https://github.com/IPTVX/AetherEngine", exact: "7.75.0-iptvx")
 ```
 
 Play a video:

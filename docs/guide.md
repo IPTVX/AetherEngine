@@ -625,6 +625,8 @@ For most remote HLS you do not choose the route; the engine does. This table sho
 
 `LoadOptions.nativeRemoteHLSIngestFallback = false` turns off two of these recoveries: the HEVC-in-MPEG-TS reroute (#168) and the hand-over of a refused bypass (#363).
 
+A bypass session that shows nothing at all for 45 s (no readiness, no failure, no reroute) ends with `.noPlayableTrackWithinBudget` (#334). For a server transcode that is slow to start, `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds` gives it longer (AE#1123). It never goes below 45 s.
+
 How each reroute works is in [formats.md › Remote HLS](formats.md#remote-hls). Sidecar subtitles on the bypass become renditions there too: [formats.md › Renditions on the nativeRemoteHLS bypass](formats.md#renditions-on-the-nativeremotehls-bypass-316).
 
 ## IPTV timeshift and catch-up archives
@@ -962,7 +964,8 @@ Details in [formats.md › Audio shaping](formats.md#audio-shaping).
 
 | Option | What it gives you | Default |
 | --- | --- | --- |
-| `skipsContainerAttachments` | Opens a Matroska file without reading its attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
+| `skipsContainerAttachments` | Never reads a Matroska file's attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
+| `readsContainerAttachmentsAtOpen` | Reads those fonts before the first frame, as before AE#1129. By default they arrive after it, so observe `$fontAttachments` | false |
 | `audioBridgeMode` | `.lossless` sends FLAC up to 7.1 (PCM for a layout FLAC cannot label) for a sink that takes multichannel PCM, instead of E-AC-3 | `.surroundCompat` |
 | `objectAudioRendering` | Keeps the heights of TrueHD Atmos and DTS:X. Needs the package traits ([installation.md](installation.md#optional-components)) | `.off` |
 | `rendersDTSXObjectAudio` | `false` keeps DTS:X on the channel bridge while TrueHD Atmos still renders | true |

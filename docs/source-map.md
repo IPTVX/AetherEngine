@@ -15,6 +15,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+ClosedCaptions.swift` | In-band CEA-608 closed captions and A53/SEI extraction: `ClosedCaptionTap` (read-only producer observer) plus cue mirroring (#77, #131). |
 | `AetherEngine+Live.swift` | Live window publishing, edge snap, resume clamp, scrub thumbnails. |
 | `AetherEngine+Diagnostics.swift` | Memory probe and live-telemetry bridge. |
+| `AetherEngine+DeferredAttachments.swift` | AE#1129: `AttachmentReadPlan` (read a Matroska source's attachments at open, after the first frame, or never) and the side read that fetches them after the first frame and publishes `fontAttachments` and a cover. |
 | `AetherEngine+SubtitleDelivery.swift` | Emits the #357 subtitle-delivery line. See note. |
 | `AetherEngine+SubtitleResolution.swift` | Emits the #250 subtitle-resolution line. See note. |
 | `AetherEngine+AudioTap.swift` | Opt-in decoded PCM audio tap (#95): `installAudioTap()` returns the `AsyncStream` and picks native loopback, remote HLS or software mirror. |
@@ -426,8 +427,9 @@ On-demand MPEG-DASH (AE#859): one static Period, each representation a single `S
 | `RemoteHLSIngestFallback.swift` | Moves a bypass session onto the live-ingest loopback when the master advertises HEVC / DV / AV1 but delivers MPEG-TS, a carriage AVFoundation builds no video track for (#168). |
 | `RemoteHLSMasterRewrite.swift` | Declares host-supplied sidecar subtitles as legible renditions on the bypass by rewriting the origin master, since media selection on an HLS asset comes only from the playlist (#316). |
 | `RemoteHLSSubtitleProxy.swift` | Puts a loopback origin in front of that remote master: two playlist GETs, a rewrite and a socket. Anything that does not line up keeps the plain origin URL (#316). |
-| `RemoteHLSSubtitleProvider.swift` | Serves only what the proxy injected (`/master.m3u8`, `/subs_N.m3u8`, `/subs_N_0.vtt`). The A/V variants still point at the origin, so no media byte moves off it (#316). |
-| `RemoteHLSReadinessDeadline.swift` | The terminal state the bypass never had: an origin that answers everything while AVFoundation can build no track from it, which no failure signal reports (#334). |
+| `RemoteHLSSubtitleProvider.swift` | Serves only what the proxy wrote (`/master.m3u8`, `/subs_N.m3u8`, `/subs_N_0.vtt`, and `/origin_variant.m3u8`, the variant the proxy already fetched, AE#1122). Segments and init still come from the origin, so no media byte moves off it (#316). |
+| `RemoteHLSResumeWarm.swift` | On a resume, asks the origin for the resume segment before the served variant goes out, with the requester's User-Agent, so a transcoding server starts its job once, at the resume point (AE#1122). |
+| `RemoteHLSReadinessDeadline.swift` | The terminal state the bypass never had: an origin that answers everything while AVFoundation can build no track from it, which no failure signal reports (#334). Its budget comes from `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds` (AE#1123). |
 | `RerouteVerdictMemory.swift` | Bounded, expiring memory of master URLs whose carriage watchdog fired, so a retune after an ingest death lands on the working path instead of paying for a full mount plus grace again (#199). |
 | `SWClockAnchorPolicy.swift` | Where the software demux loop anchors the synchronizer clock on the first decoded sample: as-is for files and resumes (the intrinsic A/V lead-in survives), at the sample for a source joined mid-stream (#107). A sample behind the anchor is resume preroll and never moves it (AE#724). |
 | `SWKeyframeSnap.swift` | Where a seek on the software host's AV1 through dav1d lands: the keyframe nearest its target, within 10 s and never across the playhead, from the packet cache's retained keyframes and the container's index. Exact when neither reaches the target (Matroska Cues arrive only with a demuxer reposition). `AetherEngine.snapsAV1SeeksToKeyframes` turns it off for comparisons. |

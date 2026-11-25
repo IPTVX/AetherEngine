@@ -1,8 +1,8 @@
 diff --git b/Sources/AetherEngine/AetherEngine+Loading.swift a/Sources/AetherEngine/AetherEngine+Loading.swift
-index 6bcf177ff532223b29f676dbc7e79dbe1310f23e..e0b10dd0c1a2e3d9a98e1e7c33649cacc288509d 100644
+index d24e716e126640e4f83d3683bb375f57cd6ebd60..2e15004516e170d8e2f5f8f1ffd23c4fa8edb4a9 100644
 --- b/Sources/AetherEngine/AetherEngine+Loading.swift
 +++ a/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -2499,9 +2499,12 @@ extension AetherEngine {
+@@ -2509,9 +2509,12 @@ extension AetherEngine {
          // Reuse the persistent host (MPNowPlayingSession survives across tracks). host.load() swaps the item via replaceCurrentItem.
          await activateRendererAudioSession()
          try checkLoadCurrent(generation)
@@ -17,7 +17,7 @@ index 6bcf177ff532223b29f676dbc7e79dbe1310f23e..e0b10dd0c1a2e3d9a98e1e7c33649cac
          self.audioAVPlayerHost = host
          applyDesiredVolume(to: host)
          self.audioAVPlayerActive = true
-@@ -2516,7 +2519,7 @@ extension AetherEngine {
+@@ -2526,7 +2529,7 @@ extension AetherEngine {
          host.setExternalMetadata(pendingExternalMetadata)
          #if os(iOS) || os(tvOS) || os(visionOS)
          host.setNowPlayingInfo(pendingAudioNowPlayingInfo)
@@ -27,10 +27,10 @@ index 6bcf177ff532223b29f676dbc7e79dbe1310f23e..e0b10dd0c1a2e3d9a98e1e7c33649cac
          startNowPlayingPublisher(.audioAVPlayer, sessionCenter: nil)
          #endif
 diff --git b/Sources/AetherEngine/AetherEngine.swift a/Sources/AetherEngine/AetherEngine.swift
-index e3b9c4ada9868a6749fd284e3f1d07e6c797c2cd..c7e6a00bd411e493164da042571274c32785e4b6 100644
+index ddf9182ff2107cc108e3a9edbfdf250e5d602f26..411f8a447a7d1be1c7d0bd93d908722e0eb4847d 100644
 --- b/Sources/AetherEngine/AetherEngine.swift
 +++ a/Sources/AetherEngine/AetherEngine.swift
-@@ -8579,8 +8579,9 @@ public final class AetherEngine: ObservableObject {
+@@ -8615,8 +8615,9 @@ public final class AetherEngine: ObservableObject {
      /// MPNowPlayingSession for the active AVPlayer audio path, or nil. It publishes the card from the
      /// player and keeps the app the active Now-Playing app across a background pause (tvOS drops a paused
      /// bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost. Nil on the
@@ -42,7 +42,7 @@ index e3b9c4ada9868a6749fd284e3f1d07e6c797c2cd..c7e6a00bd411e493164da042571274c3
      public var audioNowPlayingSession: MPNowPlayingSession? {
          audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
      }
-@@ -8618,6 +8619,14 @@ public final class AetherEngine: ObservableObject {
+@@ -8654,6 +8655,14 @@ public final class AetherEngine: ObservableObject {
      /// an audio host loads, so set it before `load()`. A secondary `sharedOutputRole` never takes it.
      public var ownsAudioNowPlaying: Bool = false
  

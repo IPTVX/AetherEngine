@@ -1,7 +1,7 @@
-diff --git a/Sources/AetherEngine/AetherEngine+AudioDelay.swift b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
+diff --git b/Sources/AetherEngine/AetherEngine+AudioDelay.swift a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
 index 6c6d993e57d504983ff06d4d7eb23a767b24f37a..7d5e836e8cef6bacdeb16d970cb4fea09ab7401f 100644
---- a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
-+++ b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
+--- b/Sources/AetherEngine/AetherEngine+AudioDelay.swift
++++ a/Sources/AetherEngine/AetherEngine+AudioDelay.swift
 @@ -30,7 +30,8 @@ extension AetherEngine {
      /// rule). So a change is brought to the playhead rather than left to arrive when that media
      /// drains, and what that costs differs:
@@ -221,10 +221,10 @@ index 6c6d993e57d504983ff06d4d7eb23a767b24f37a..7d5e836e8cef6bacdeb16d970cb4fea0
      ///
      /// Neither route asks for the producer restart directly. A restart raised while no seek of the
      /// engine's own is in flight is reported as a user scrub (`setNativeScrubSeek`), which opened a
-diff --git a/Sources/AetherEngine/AetherEngine+AudioShaping.swift b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+diff --git b/Sources/AetherEngine/AetherEngine+AudioShaping.swift a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
 index f68838df2af5a1c9538797dd35790665575f1671..5518af5c09fb6a9fe647e1e41dc16debef6baa01 100644
---- a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
-+++ b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
+--- b/Sources/AetherEngine/AetherEngine+AudioShaping.swift
++++ a/Sources/AetherEngine/AetherEngine+AudioShaping.swift
 @@ -29,7 +29,9 @@ extension AetherEngine {
      /// Where AVPlayer owns the audio (`.remoteBypass`, the native audio-only host) the engine has no
      /// PCM to shape: the value is kept for a later load, logged, and `audioShapingState` reads
@@ -325,10 +325,10 @@ index f68838df2af5a1c9538797dd35790665575f1671..5518af5c09fb6a9fe647e1e41dc16deb
                  && Self.audioDelayRecutIsPossible(state: self.state, isLive: self.isLive, liveWindow: self.liveWindow)
          }
      }
-diff --git a/Sources/AetherEngine/AetherEngine+Background.swift b/Sources/AetherEngine/AetherEngine+Background.swift
+diff --git b/Sources/AetherEngine/AetherEngine+Background.swift a/Sources/AetherEngine/AetherEngine+Background.swift
 index bfc848505a81658bec8ea652bb92771468eb0fb1..acb5d633f4d28b86bbcfae48d32682481cac5b0d 100644
---- a/Sources/AetherEngine/AetherEngine+Background.swift
-+++ b/Sources/AetherEngine/AetherEngine+Background.swift
+--- b/Sources/AetherEngine/AetherEngine+Background.swift
++++ a/Sources/AetherEngine/AetherEngine+Background.swift
 @@ -236,6 +236,7 @@ extension AetherEngine {
          guard loadInFlightGeneration == generation else { return }
          loadInFlightGeneration = nil
@@ -337,10 +337,10 @@ index bfc848505a81658bec8ea652bb92771468eb0fb1..acb5d633f4d28b86bbcfae48d3268248
          settleOwedUpscaleNativeReturn()
      }
  
-diff --git a/Sources/AetherEngine/AetherEngine+Live.swift b/Sources/AetherEngine/AetherEngine+Live.swift
+diff --git b/Sources/AetherEngine/AetherEngine+Live.swift a/Sources/AetherEngine/AetherEngine+Live.swift
 index fb8e63d1d972722e3ddfa0189039dc2da50fe7d9..51fdd63608dc7a83484af2d1fee102c4d5fcb8ae 100644
---- a/Sources/AetherEngine/AetherEngine+Live.swift
-+++ b/Sources/AetherEngine/AetherEngine+Live.swift
+--- b/Sources/AetherEngine/AetherEngine+Live.swift
++++ a/Sources/AetherEngine/AetherEngine+Live.swift
 @@ -106,7 +106,12 @@ extension AetherEngine {
      /// After a long pause the sliding DVR window may have evicted the playhead. Clamp to the retained
      /// floor plus a margin, or for live-only (no DVR) snap to the edge when far enough behind.
@@ -366,11 +366,11 @@ index fb8e63d1d972722e3ddfa0189039dc2da50fe7d9..51fdd63608dc7a83484af2d1fee102c4
          let started = DispatchTime.now()
          let ready = await BlockingWork.detached(priority: .userInitiated) {
              provider.waitForFirstLiveSegment(timeout: timeout)
-diff --git a/Sources/AetherEngine/AetherEngine+Loading.swift b/Sources/AetherEngine/AetherEngine+Loading.swift
-index 7ebef851ad197a2416e8519ab8325a658f8165f5..6bcf177ff532223b29f676dbc7e79dbe1310f23e 100644
---- a/Sources/AetherEngine/AetherEngine+Loading.swift
-+++ b/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -1979,7 +1979,8 @@ extension AetherEngine {
+diff --git b/Sources/AetherEngine/AetherEngine+Loading.swift a/Sources/AetherEngine/AetherEngine+Loading.swift
+index fe7f867b14b807ad6f50e1abcdc961bdb8e99b25..d24e716e126640e4f83d3683bb375f57cd6ebd60 100644
+--- b/Sources/AetherEngine/AetherEngine+Loading.swift
++++ a/Sources/AetherEngine/AetherEngine+Loading.swift
+@@ -1989,7 +1989,8 @@ extension AetherEngine {
          // could not fill in that time. The gate is the same one the request would have waited on, so
          // the request is then answered at once.
          if isLive, let provider = nativeVideoSession?.provider {
@@ -380,7 +380,7 @@ index 7ebef851ad197a2416e8519ab8325a658f8165f5..6bcf177ff532223b29f676dbc7e79dbe
              try checkLoadCurrent(generation)
          }
          // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
-@@ -2761,6 +2762,7 @@ extension AetherEngine {
+@@ -2771,6 +2772,7 @@ extension AetherEngine {
              && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
                  outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
                  outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
@@ -388,7 +388,7 @@ index 7ebef851ad197a2416e8519ab8325a658f8165f5..6bcf177ff532223b29f676dbc7e79dbe
          stopInternal(resetDisplayCriteria: false,
                       keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                       keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
-@@ -2773,6 +2775,13 @@ extension AetherEngine {
+@@ -2783,6 +2785,13 @@ extension AetherEngine {
          if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
          EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
          let gen = loadGeneration
@@ -402,10 +402,10 @@ index 7ebef851ad197a2416e8519ab8325a658f8165f5..6bcf177ff532223b29f676dbc7e79dbe
          // Audit LIF-101: the same settle point as `load`, for the same readiness waypoint.
          beginLoadInFlight(gen)
          defer { endLoadInFlight(gen) }
-diff --git a/Sources/AetherEngine/AetherEngine.swift b/Sources/AetherEngine/AetherEngine.swift
-index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6c797c2cd 100644
---- a/Sources/AetherEngine/AetherEngine.swift
-+++ b/Sources/AetherEngine/AetherEngine.swift
+diff --git b/Sources/AetherEngine/AetherEngine.swift a/Sources/AetherEngine/AetherEngine.swift
+index 734ada93ae3f1317670e029f333d7e116002c0b7..ddf9182ff2107cc108e3a9edbfdf250e5d602f26 100644
+--- b/Sources/AetherEngine/AetherEngine.swift
++++ a/Sources/AetherEngine/AetherEngine.swift
 @@ -61,6 +61,7 @@ public final class AetherEngine: ObservableObject {
              if case .error = state {} else { errorInfo = nil }
              recomputePlaybackPhase()
@@ -445,7 +445,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
  
      #if DEBUG
      /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
-@@ -4391,8 +4407,20 @@ public final class AetherEngine: ObservableObject {
+@@ -4420,8 +4436,20 @@ public final class AetherEngine: ObservableObject {
      /// the rebuild already in flight delivers the newest one. See `reanchorForAudioDelay`.
      var audioDelayReanchorInFlight = false
  
@@ -466,7 +466,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
  
      /// The playhead a rebuild of this session has to come back to (#464 round 2).
      var positionForSessionRebuild: Double {
-@@ -4410,7 +4438,7 @@ public final class AetherEngine: ObservableObject {
+@@ -4439,7 +4467,7 @@ public final class AetherEngine: ObservableObject {
      /// rather than on `.loading`, because `play()` itself moves `.loading` to `.playing` and a pause
      /// after it would otherwise go unrecorded. Read back where each rebuild settles its transport.
      func recordTransportDuringRebuild(playing: Bool) {
@@ -475,7 +475,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          transportIntentUnderReconstruction = playing
      }
  
-@@ -4970,6 +4998,8 @@ public final class AetherEngine: ObservableObject {
+@@ -4999,6 +5027,8 @@ public final class AetherEngine: ObservableObject {
          var startPosition = startPosition
          var options = options
          options = Self.applyingSharedOutputRole(options)
@@ -484,7 +484,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          SharedOutputCoordinator.shared.join(ObjectIdentifier(self), role: options.sharedOutputRole, tag: logTag, owner: self)
          // AE#950: the panel's cadence before the criteria write, so the play gate can tell a rate the panel
          // already ran from one it had to switch to. Runs across the probe, `apply()` reads and stops it.
-@@ -5025,6 +5055,7 @@ public final class AetherEngine: ObservableObject {
+@@ -5054,6 +5084,7 @@ public final class AetherEngine: ObservableObject {
          // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
          // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
          claimSoftwarePathTakeover()   // AE#629
@@ -492,7 +492,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          stopInternal(resetDisplayCriteria: false, keepNativeHost: preserveNativeHost, keepCurrentItem: handOverInPlace)
          // AE#1095: a load ends a parked session unless it is one that may adopt it; that load's
          // native session matches the rest of the key itself.
-@@ -5074,6 +5105,7 @@ public final class AetherEngine: ObservableObject {
+@@ -5103,6 +5134,7 @@ public final class AetherEngine: ObservableObject {
          }
          loadedURL = url
          loadedOptions = options
@@ -500,7 +500,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          // AE#792: a fresh store per load, so a header rotated on the previous session can never reach
          // this one through a reader that outlived it.
          sessionRequestHeaders = RequestHeaderStore(options.httpHeaders)
-@@ -5102,6 +5134,7 @@ public final class AetherEngine: ObservableObject {
+@@ -5133,6 +5165,7 @@ public final class AetherEngine: ObservableObject {
          // plays another stream and decides inverse telecine for itself.
          loadedOptions.inverseTelecineCarryover = nil
          adoptSessionLiveness(from: options)
@@ -508,7 +508,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          state = .loading
          // AE#464 round 2: park the position THIS load is rebuilding toward before the clock that held
          // it is cleared below, so a reload raised while this one is still in flight has something
-@@ -5110,6 +5143,11 @@ public final class AetherEngine: ObservableObject {
+@@ -5141,6 +5174,11 @@ public final class AetherEngine: ObservableObject {
          // Round 3: and the transport it is rebuilding toward, for the same window and the same
          // reason. The host this load replaces is the one a stacked rebuild would ask.
          transportIntentUnderReconstruction = options.autoplay
@@ -520,7 +520,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          isBuffering = false
          residentPlaylistRanges = []
          residentRanges = []
-@@ -6821,6 +6859,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6855,6 +6893,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func play() {
@@ -528,7 +528,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          recordTransportDuringRebuild(playing: true)
          if deferPlayForInterruption() { return }
          // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
-@@ -6852,6 +6891,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6886,6 +6925,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func pause() {
@@ -536,7 +536,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          recordTransportDuringRebuild(playing: false)
          resumeAfterInterruption = false
          playDeferredByInterruption = false
-@@ -6897,6 +6937,7 @@ public final class AetherEngine: ObservableObject {
+@@ -6931,6 +6971,7 @@ public final class AetherEngine: ObservableObject {
          // that path the live state every snapshot below reads is wiped long before this call. When
          // nothing was parked this is exactly the pre-#357 live read.
          let resumesTornDownSession = backgroundTeardownSelection != nil
@@ -544,7 +544,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          let selection = consumeReloadSelection()
          // AE#464 round 2: come back in the transport state the session is IN, not the one its first
          // mount was given. Written before the branch because only the URL branch below carries a
-@@ -6904,7 +6945,15 @@ public final class AetherEngine: ObservableObject {
+@@ -6938,7 +6979,15 @@ public final class AetherEngine: ObservableObject {
          // A torn-down session (#357 background teardown) has no transport left to read and its
          // resume is the host's call, so that path keeps replaying the mount flag exactly as before.
          if !resumesTornDownSession { setLoadedAutoplay(sessionRebuildResumesPlaying) }
@@ -561,7 +561,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
              // Rebuild on retained reader (seekable only); no URL to reopen.
              //
              // AE#526: a refusal, said out loud. This used to return silently, and a host cannot tell
-@@ -6989,7 +7038,7 @@ public final class AetherEngine: ObservableObject {
+@@ -7023,7 +7072,7 @@ public final class AetherEngine: ObservableObject {
          // #853: the rebuilt session keeps the inverse telecine decision (and with it the display rate)
          // instead of sampling again.
          options.inverseTelecineCarryover = selection.inverseTelecine
@@ -570,7 +570,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
                         startPosition: resume, options: options,
                         audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
          // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
-@@ -7944,6 +7993,7 @@ public final class AetherEngine: ObservableObject {
+@@ -7980,6 +8029,7 @@ public final class AetherEngine: ObservableObject {
      }
  
      public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
@@ -578,7 +578,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          cancelPendingAudioSelection()
          releaseHeldPicture(reason: "stop")
          releaseOutgoingPicture(reason: "stop")
-@@ -9196,15 +9246,19 @@ public final class AetherEngine: ObservableObject {
+@@ -9232,15 +9282,19 @@ public final class AetherEngine: ObservableObject {
      ///   black-screen latency per audio switch on the old fixed 5 s
      ///   poll; capped at ~2 s since #117, but still worth skipping).
      func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false,
@@ -599,7 +599,7 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          clearDisplaySwitchGate()
          scrubPreviewSourceGeneration = UUID()
          resumeAfterInterruption = false
-@@ -9299,7 +9353,11 @@ public final class AetherEngine: ObservableObject {
+@@ -9335,7 +9389,11 @@ public final class AetherEngine: ObservableObject {
          } else {
              nativeVideoSession?.parksSegmentsAtStop = cacheCleanupReason == .sessionStopped
          }
@@ -612,11 +612,11 @@ index b6eff510bcc719dda3bd021b2241b542b71e748d..e3b9c4ada9868a6749fd284e3f1d07e6
          nativeVideoSession = nil
          nativeSubtitleRenditionsServed = false
          dolbyVisionConversion = nil
-diff --git a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
+diff --git b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..e6cbe6e61b4136334c41df6efa2680061751c067
 --- /dev/null
-+++ b/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
++++ a/Sources/AetherEngine/Audio/AudioDelayDiscontinuityBudget.swift
 @@ -0,0 +1,98 @@
 +import Foundation
 +
@@ -716,10 +716,10 @@ index 0000000000000000000000000000000000000000..e6cbe6e61b4136334c41df6efa268006
 +        }
 +    }
 +}
-diff --git a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
+diff --git b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
 index c813c6ddf70897510b0e9f5c22532f3b3e82a065..39880ebf043778b260ca3b86be22c35e057d3e89 100644
---- a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
-+++ b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
+--- b/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
++++ a/Sources/AetherEngine/Audio/AudioDelayPolicy.swift
 @@ -24,14 +24,16 @@ import Foundation
  /// `currentTime`, seeking and the subtitle axis are untouched by a nudge.
  enum AudioDelayPolicy {
@@ -745,11 +745,11 @@ index c813c6ddf70897510b0e9f5c22532f3b3e82a065..39880ebf043778b260ca3b86be22c35e
  
      /// Bring a host value into range. A non-finite value (NaN from an unset stepper, an infinity out
      /// of a division) becomes 0 rather than propagating into a timestamp.
-diff --git a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
+diff --git b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..513825f5fcf782efe2a5780209ab7d066f765f65
 --- /dev/null
-+++ b/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
++++ a/Sources/AetherEngine/Audio/AudioDelaySpoolUsage.swift
 @@ -0,0 +1,20 @@
 +import Foundation
 +
@@ -771,10 +771,10 @@ index 0000000000000000000000000000000000000000..513825f5fcf782efe2a5780209ab7d06
 +        lock.withLock { if value == 0 { bytes.removeValue(forKey: owner) } else { bytes[owner] = value } }
 +    }
 +}
-diff --git a/Sources/AetherEngine/Audio/AudioOutput.swift b/Sources/AetherEngine/Audio/AudioOutput.swift
+diff --git b/Sources/AetherEngine/Audio/AudioOutput.swift a/Sources/AetherEngine/Audio/AudioOutput.swift
 index 9da6e8902cd73afe204f97c4c557f19ba3b32644..9f5a8b01ab43ac449ad753ce4da839cfa817910d 100644
---- a/Sources/AetherEngine/Audio/AudioOutput.swift
-+++ b/Sources/AetherEngine/Audio/AudioOutput.swift
+--- b/Sources/AetherEngine/Audio/AudioOutput.swift
++++ a/Sources/AetherEngine/Audio/AudioOutput.swift
 @@ -376,6 +376,12 @@ final class AudioOutput: @unchecked Sendable {
          renderer.enqueue(delivered)
          #if DEBUG
@@ -805,10 +805,10 @@ index 9da6e8902cd73afe204f97c4c557f19ba3b32644..9f5a8b01ab43ac449ad753ce4da839cf
      /// Holds a pending start without its timeout, so transport tests exercise cancellation
      /// independently of how long the main actor takes to run on a loaded test runner.
      func holdPrerollForTesting(rate: Float) {
-diff --git a/Sources/AetherEngine/Audio/AudioTailPadding.swift b/Sources/AetherEngine/Audio/AudioTailPadding.swift
+diff --git b/Sources/AetherEngine/Audio/AudioTailPadding.swift a/Sources/AetherEngine/Audio/AudioTailPadding.swift
 index 51fa8e45600f8661cee216e25004f24675fc26dc..80c08fe1d8171beb38d5917f1719b964fdcb60eb 100644
---- a/Sources/AetherEngine/Audio/AudioTailPadding.swift
-+++ b/Sources/AetherEngine/Audio/AudioTailPadding.swift
+--- b/Sources/AetherEngine/Audio/AudioTailPadding.swift
++++ a/Sources/AetherEngine/Audio/AudioTailPadding.swift
 @@ -79,10 +79,13 @@ enum AudioTailPadding {
          codecpar: UnsafePointer<AVCodecParameters>,
          startTicks: Int64,
@@ -953,11 +953,11 @@ index 51fa8e45600f8661cee216e25004f24675fc26dc..80c08fe1d8171beb38d5917f1719b964
      /// The format to feed the encoder: for the lossless codecs the one that keeps the track's bit
      /// depth (a 16-bit FLAC stream must not grow 32-bit frames under its STREAMINFO), otherwise the
      /// encoder's first.
-diff --git a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
+diff --git b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..a4ef0bd20f34a4a981fe9c33203915b676885f97
 --- /dev/null
-+++ b/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
++++ a/Sources/AetherEngine/Audio/CompressedAudioDelayAlignment.swift
 @@ -0,0 +1,299 @@
 +import Foundation
 +
@@ -1258,11 +1258,11 @@ index 0000000000000000000000000000000000000000..a4ef0bd20f34a4a981fe9c33203915b6
 +        return Packet(record: try SoftwareStoredPacket.decode(Data(data.dropFirst(17))), lane: lane, origin: Int(origin), epoch: epoch)
 +    }
 +}
-diff --git a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
+diff --git b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..3e8f04c002e0ee2be103d42f63df2a0c18b3a013
 --- /dev/null
-+++ b/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
++++ a/Sources/AetherEngine/Audio/HEAACSilenceEncoder.swift
 @@ -0,0 +1,294 @@
 +import Foundation
 +import AVFAudio
@@ -1558,10 +1558,10 @@ index 0000000000000000000000000000000000000000..3e8f04c002e0ee2be103d42f63df2a0c
 +        return table.mPrimingFrames
 +    }
 +}
-diff --git a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
+diff --git b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
 index 8ede104140841241807c427eeb711610981a521e..eea27ae713b49eb45b905a026bdc10b9aed1142e 100644
---- a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
-+++ b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
+--- b/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
++++ a/Sources/AetherEngine/Audio/Spatial/SpatialAudioBridge.swift
 @@ -29,9 +29,18 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
      enum BridgeError: Error, CustomStringConvertible {
          case codecparAllocFailed
@@ -1754,10 +1754,10 @@ index 8ede104140841241807c427eeb711610981a521e..eea27ae713b49eb45b905a026bdc10b9
          // Anchor the encoder on the first block after a reset, and keep the encoder's input
          // contiguous with the source afterwards: a gap the decoder skipped (corrupt access units) is
          // filled with silence so everything after it stays on its timestamp.
-diff --git a/Sources/AetherEngine/BackgroundTeardownSelection.swift b/Sources/AetherEngine/BackgroundTeardownSelection.swift
+diff --git b/Sources/AetherEngine/BackgroundTeardownSelection.swift a/Sources/AetherEngine/BackgroundTeardownSelection.swift
 index 64df8b1bf465df514646fb8cfdf4c076b2108dba..60b163987c00b3df5ab7fa7ac51e5d068416ecfc 100644
---- a/Sources/AetherEngine/BackgroundTeardownSelection.swift
-+++ b/Sources/AetherEngine/BackgroundTeardownSelection.swift
+--- b/Sources/AetherEngine/BackgroundTeardownSelection.swift
++++ a/Sources/AetherEngine/BackgroundTeardownSelection.swift
 @@ -32,11 +32,18 @@ extension AetherEngine {
          backgroundTeardownSelection = liveSelection(over: backgroundTeardownSelection)
      }
@@ -1778,10 +1778,10 @@ index 64df8b1bf465df514646fb8cfdf4c076b2108dba..60b163987c00b3df5ab7fa7ac51e5d06
          return liveSelection(over: parked)
      }
  
-diff --git a/Sources/AetherEngine/ClockHoldEvent.swift b/Sources/AetherEngine/ClockHoldEvent.swift
+diff --git b/Sources/AetherEngine/ClockHoldEvent.swift a/Sources/AetherEngine/ClockHoldEvent.swift
 index e8fa99facf0387befcdbf96e3e6b47a1bf137b38..341b017f2409147e413a0c0d0ecba0a6b68889ed 100644
---- a/Sources/AetherEngine/ClockHoldEvent.swift
-+++ b/Sources/AetherEngine/ClockHoldEvent.swift
+--- b/Sources/AetherEngine/ClockHoldEvent.swift
++++ a/Sources/AetherEngine/ClockHoldEvent.swift
 @@ -13,7 +13,8 @@ import Foundation
  /// - `.ready` and `.timedOut` carry how long the clock stood. The clock starts `0.25` s after either,
  ///   at the position it was held on.
@@ -1792,10 +1792,10 @@ index e8fa99facf0387befcdbf96e3e6b47a1bf137b38..341b017f2409147e413a0c0d0ecba0a6
  ///
  /// Events are published on the main actor, in emission order. `AetherEngine.isClockHeld` is the level.
  public enum ClockHoldEvent: Sendable, Equatable {
-diff --git a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
+diff --git b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
 index 73c9c2ec809e20793560de657a482c9744add3d6..5f501e566a2d1d747b465efbec7ba0eddf7d2201 100644
---- a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
-+++ b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
+--- b/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
++++ a/Sources/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
 @@ -263,9 +263,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
      /// engine-created ingest session (the dead reader's construction inputs are immutable, so the fresh
      /// one rejoins the same channel at its current live edge). Main-video role only: the companion
@@ -1810,11 +1810,11 @@ index 73c9c2ec809e20793560de657a482c9744add3d6..5f501e566a2d1d747b465efbec7ba0ed
                                          diagnosticContext: diagnosticContext,
                                          followsSessionHeaders: followsSessionHeaders)
          if let store = startLock.withLock({ _headerStore }) { fresh.adoptSessionHeaderStore(store) }
-diff --git a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
+diff --git b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..5cb5a1103b18ac94b20a925d90502bf3b2f8e372
 --- /dev/null
-+++ b/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
++++ a/Sources/AetherEngine/LiveAudioDelayRejoinContext.swift
 @@ -0,0 +1,12 @@
 +import Foundation
 +
@@ -1828,11 +1828,11 @@ index 0000000000000000000000000000000000000000..5cb5a1103b18ac94b20a925d90502bf3
 +    /// Scoped to the reload call, so ordinary loads keep their existing teardown behavior.
 +    @TaskLocal static var current: LiveAudioDelayRejoinContext?
 +}
-diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
+diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..faa69f72d8b42f9e90e07a3bb994a6401546f773
 --- /dev/null
-+++ b/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
++++ a/Sources/AetherEngine/Native/SoftwareAudioDelayEpochBoundary.swift
 @@ -0,0 +1,13 @@
 +/// Commits source changes only when their compressed records leave alignment queues. Observing a
 +/// future source epoch during read-ahead must never reset the decoder serving queued older media.
@@ -1847,11 +1847,11 @@ index 0000000000000000000000000000000000000000..faa69f72d8b42f9e90e07a3bb994a640
 +        return true
 +    }
 +}
-diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
+diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..56105f2c416cc838843d98e693a20460a85a8bb8
 --- /dev/null
-+++ b/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
++++ a/Sources/AetherEngine/Native/SoftwareAudioDelayPacketSource.swift
 @@ -0,0 +1,71 @@
 +import Foundation
 +import AetherLibavcodec
@@ -1924,11 +1924,11 @@ index 0000000000000000000000000000000000000000..56105f2c416cc838843d98e693a20460
 +                     lane: stream == video ? .video : (stream == audio ? .audio : .other), epoch: epoch)
 +    }
 +}
-diff --git a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
+diff --git b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..7ebcffbbd25c594057e0dc4140f0968879c09b67
 --- /dev/null
-+++ b/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
++++ a/Sources/AetherEngine/Native/SoftwareAudioDelayTimeline.swift
 @@ -0,0 +1,70 @@
 +import Foundation
 +
@@ -2000,10 +2000,10 @@ index 0000000000000000000000000000000000000000..7ebcffbbd25c594057e0dc4140f09688
 +        return presentation >= videoStart
 +    }
 +}
-diff --git a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
+diff --git b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
 index c83744e22180445443b700bf4172f44f160e19b7..a7ae9fd51f7a07d5bf98ec0d941aee845d13d504 100644
---- a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
-+++ b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
+--- b/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
++++ a/Sources/AetherEngine/Native/SoftwarePacketDiskFIFO.swift
 @@ -36,13 +36,23 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
          let hasFailure: Bool
      }
@@ -2079,10 +2079,10 @@ index c83744e22180445443b700bf4172f44f160e19b7..a7ae9fd51f7a07d5bf98ec0d941aee84
              while diskBytes > max(0, budget), oldestChunkID < headID, oldestChunkID < tailID {
                  let url = chunkURL(oldestChunkID)
                  var info = stat()
-diff --git a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
+diff --git b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
 index 455368bba744242d665c047a194d832e83eed168..6f1702d2e87a855ed7411ebbf2d35b26bcd6ede7 100644
---- a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
-+++ b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
+--- b/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
++++ a/Sources/AetherEngine/Native/SoftwarePacketReadAhead.swift
 @@ -59,6 +59,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
      private let video: Stream
      private let audio: Stream?
@@ -2155,10 +2155,10 @@ index 455368bba744242d665c047a194d832e83eed168..6f1702d2e87a855ed7411ebbf2d35b26
      /// Only bounded metadata work under condition; parser and media I/O have already finished.
      private func applyCacheTimingLocked() {
          guard !closed, !sourceRepositioning, !resetPending, let cacheTiming else { return }
-diff --git a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
+diff --git b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
 index c7a0e155d02d7536fe8b48bb5df87dd7f79677c3..157006f8098359b99b8f87b3cf9e5dd54d61f44d 100644
---- a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
-+++ b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
+--- b/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
++++ a/Sources/AetherEngine/Native/SoftwarePlaybackHost.swift
 @@ -126,7 +126,7 @@ final class SoftwarePlaybackHost {
      nonisolated static func makePacketStore(
          storage: SoftwarePacketCacheStorage, forwardSegments: Int?,
@@ -3143,11 +3143,11 @@ index c7a0e155d02d7536fe8b48bb5df87dd7f79677c3..157006f8098359b99b8f87b3cf9e5dd5
                      )
                      armClock(
                          aOut,
-diff --git a/Sources/AetherEngine/PlayerState.swift b/Sources/AetherEngine/PlayerState.swift
-index e591f82a0edb8468ed7b11fa1ae35b8ac74238cc..0cc27058dd11cd16c5f11f86d9af45b5dbab044e 100644
---- a/Sources/AetherEngine/PlayerState.swift
-+++ b/Sources/AetherEngine/PlayerState.swift
-@@ -1513,7 +1513,7 @@ public struct LoadOptions: Sendable, Equatable {
+diff --git b/Sources/AetherEngine/PlayerState.swift a/Sources/AetherEngine/PlayerState.swift
+index 5e02a61f55f9d1ba11ec1f48e2349d0103726fae..d2164ebfcaa9a175d144ca9320a614daf2355ed7 100644
+--- b/Sources/AetherEngine/PlayerState.swift
++++ a/Sources/AetherEngine/PlayerState.swift
+@@ -1533,7 +1533,7 @@ public struct LoadOptions: Sendable, Equatable {
          self.progressiveSegmentDelivery = progressiveSegmentDelivery
          self.autoplay = autoplay
          self.teletextPage = teletextPage
@@ -3156,10 +3156,10 @@ index e591f82a0edb8468ed7b11fa1ae35b8ac74238cc..0cc27058dd11cd16c5f11f86d9af45b5
          self.audioShaping = audioShaping.clamped
          self.normalizationGainDB = normalizationGainDB.flatMap {
              $0.isFinite ? NormalizationGainProcessor.clampedGainDB($0) : nil }
-diff --git a/Sources/AetherEngine/Video/HLSSegmentProducer.swift b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
+diff --git b/Sources/AetherEngine/Video/HLSSegmentProducer.swift a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
 index 260f71adb4146c4acce773132babbcbbea5cdd6a..710dce30c1d7e0269d6c95006b06e5de89eea2d3 100644
---- a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
-+++ b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
+--- b/Sources/AetherEngine/Video/HLSSegmentProducer.swift
++++ a/Sources/AetherEngine/Video/HLSSegmentProducer.swift
 @@ -1424,6 +1424,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
          case stopRequested
          case readError(code: Int32)
@@ -3798,10 +3798,10 @@ index 260f71adb4146c4acce773132babbcbbea5cdd6a..710dce30c1d7e0269d6c95006b06e5de
      }
  
      // MARK: - Look-behind finalize helpers
-diff --git a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
-index 1851a3338e63f981398dd8a26267f39fd0893810..b5c9d25be68151fb4623fb809bd7b80f4b6ee287 100644
---- a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
-+++ b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
+diff --git b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
+index 73cdaa8b54ac2262464a191f94e9c54629cdfe7f..305d4b1eb3b189dc765aca171c296c0ffc5a1458 100644
+--- b/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
++++ a/Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift
 @@ -87,7 +87,7 @@ extension HLSVideoEngine {
              return true
          case .sourceReplay, .eof, .readError, .keyframeStarvation:
@@ -3832,11 +3832,11 @@ index 1851a3338e63f981398dd8a26267f39fd0893810..b5c9d25be68151fb4623fb809bd7b80f
              // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
              return
          case .sourceReplay:
-diff --git a/Sources/AetherEngine/Video/HLSVideoEngine.swift b/Sources/AetherEngine/Video/HLSVideoEngine.swift
-index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae3415aa87 100644
---- a/Sources/AetherEngine/Video/HLSVideoEngine.swift
-+++ b/Sources/AetherEngine/Video/HLSVideoEngine.swift
-@@ -1411,6 +1411,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
+diff --git b/Sources/AetherEngine/Video/HLSVideoEngine.swift a/Sources/AetherEngine/Video/HLSVideoEngine.swift
+index 27db6b51273f205c1e268b8406635cc6c43342b6..a3fbc7871aa1c736c03562cd4abe11b228d814be 100644
+--- b/Sources/AetherEngine/Video/HLSVideoEngine.swift
++++ a/Sources/AetherEngine/Video/HLSVideoEngine.swift
+@@ -1435,6 +1435,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
      public var onSessionCacheStatusChanged: (@Sendable (SessionCacheStatus) -> Void)?
      /// #687: this session's entry in the process-wide ledger, released on `stop()`.
      private var retentionClaim: RetentionClaims.Claim?
@@ -3845,7 +3845,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
  
      /// Clamp for `forwardWindowSegments`: below 4 the window would undercut AVPlayer's own ~5-7-segment
      /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`). The 2700 ceiling (~3 h at 4 s
-@@ -2141,13 +2143,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -2165,13 +2167,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
          let retentionBudget = claim.bytes
          let segmentCache = SegmentCache(
              forwardWindow: forwardWindowSegments,
@@ -3862,7 +3862,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
          restartLock.lock()
          self.retentionBudgetBytes = retentionBudget
          self.sessionCacheVolumeSafetyLimitBytes = budget.volumeSafetyLimitBytes
-@@ -2612,6 +2615,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -2636,6 +2639,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
  
          // 6b. Run the stream-copy / FLAC-bridge / video-only cascade.
          let prod: HLSSegmentProducer
@@ -3891,7 +3891,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
          prod = try buildProducerWithAudioCascade(
              preferBridge: bridgePreferred,
              streamCopyAudio: streamCopyAudio,
-@@ -2622,8 +2647,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -2646,8 +2671,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
              audioHLSCodecs: &audioHLSCodecs,
              audioLanguage: audioLanguage
          )
@@ -3902,7 +3902,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
          // AE#458: only when the audio actually reached the variant. A cascade that fell through to
          // video-only must not advertise an audio rendition that is not in the segments, and must not
          // force the master for one either.
-@@ -4160,7 +4186,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -4184,7 +4210,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
          }
  
          let producerEpoch = nextProducerEpoch()
@@ -3913,7 +3913,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
              demuxer: dem,
              videoStreamIndex: videoStreamIndex,
              video: cfg,
-@@ -4190,7 +4218,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -4214,7 +4242,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
              packedSideAudioStartPts: packedSideAudioStartPts,
              packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
              bufferAheadSegments: forwardWindowSegments,
@@ -3922,7 +3922,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
              // AE#222: nil until a pump proved this source cuts its first segment before any audio packet
              // arrives; from then on every producer of the session muxes moov from this frame.
              audioMoovPrimeFrame: sessionAudioMoovPrimeFrame,
-@@ -4204,6 +4232,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -4228,6 +4256,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
              foldsDolbyVisionFEL: foldsDolbyVisionFEL,
              epoch: producerEpoch
          )
@@ -3935,7 +3935,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
          // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
          // below. The side readers read one gate for the whole session, so a restart must not leave
          // a gap where nobody claims the link.
-@@ -5697,8 +5731,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
+@@ -5721,8 +5755,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
          // seek fails fast instead of racing teardown.
          let seekStart = DispatchTime.now()
          // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
@@ -3949,7 +3949,7 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
              activeDem.seek(to: absoluteTargetSeconds)
          }
          // AE#782: after the seek, so a container whose seek reads (a TS bisection) spends none of it.
-@@ -5798,12 +5835,15 @@ extension HLSVideoEngine {
+@@ -5822,12 +5859,15 @@ extension HLSVideoEngine {
      func initialProducerSeek() -> (@Sendable (Demuxer) -> Void)? {
          let plan = segmentPlan
          guard initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count else { return nil }
@@ -3968,10 +3968,10 @@ index 6afbd1b9968e3af131de852689822c9bef447850..a5756d1ed15717ab2c300ad1cfc007ae
                  dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
              }
          }
-diff --git a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
+diff --git b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
 index ca7a154dd9f67ab1f7aebb144e8bcfcdb595c0e3..2a4b8824d76d168be5d7c38e4c8981228526124b 100644
---- a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
-+++ b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
+--- b/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
++++ a/Sources/AetherEngine/Video/MP4SegmentMuxer.swift
 @@ -272,6 +272,8 @@ final class MP4SegmentMuxer {
      private(set) var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
      private(set) var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
@@ -4001,10 +4001,10 @@ index ca7a154dd9f67ab1f7aebb144e8bcfcdb595c0e3..2a4b8824d76d168be5d7c38e4c898122
                  if let path = counter.currentPath, let admit = counter.admitStagingBytes {
                      let admission = admit(path, count)
                      guard admission == .admitted else {
-diff --git a/Sources/AetherEngine/Video/PacketRingBuffer.swift b/Sources/AetherEngine/Video/PacketRingBuffer.swift
+diff --git b/Sources/AetherEngine/Video/PacketRingBuffer.swift a/Sources/AetherEngine/Video/PacketRingBuffer.swift
 index bd895b0ad353619aac8ebce586483bc29ef874fa..111f2ee9ee972214997b76bf3abfdff20e29e481 100644
---- a/Sources/AetherEngine/Video/PacketRingBuffer.swift
-+++ b/Sources/AetherEngine/Video/PacketRingBuffer.swift
+--- b/Sources/AetherEngine/Video/PacketRingBuffer.swift
++++ a/Sources/AetherEngine/Video/PacketRingBuffer.swift
 @@ -21,6 +21,10 @@ final class PacketRingBuffer: @unchecked Sendable {
          let isKeyframe: Bool
          let isVideo: Bool
@@ -4117,10 +4117,10 @@ index bd895b0ad353619aac8ebce586483bc29ef874fa..111f2ee9ee972214997b76bf3abfdff2
      func seq(forKeyframeAtOrBefore target: Double) -> Int? {
          lock.lock()
          defer { lock.unlock() }
-diff --git a/Sources/AetherEngine/Video/SegmentCache.swift b/Sources/AetherEngine/Video/SegmentCache.swift
+diff --git b/Sources/AetherEngine/Video/SegmentCache.swift a/Sources/AetherEngine/Video/SegmentCache.swift
 index 3e6d6f8666cb4ee8222db34539a6dfc8aea7e7a0..4d034e2a46b327976556d204762937de2db93351 100644
---- a/Sources/AetherEngine/Video/SegmentCache.swift
-+++ b/Sources/AetherEngine/Video/SegmentCache.swift
+--- b/Sources/AetherEngine/Video/SegmentCache.swift
++++ a/Sources/AetherEngine/Video/SegmentCache.swift
 @@ -1449,6 +1449,59 @@ final class SegmentCache: @unchecked Sendable {
          return _totalBytes
      }
@@ -4181,11 +4181,11 @@ index 3e6d6f8666cb4ee8222db34539a6dfc8aea7e7a0..4d034e2a46b327976556d204762937de
      /// AE#443: mean on-disk size of a resident segment, which is what turns a window in seconds into a
      /// window in bytes (`LiveWindowSizing.affordableSegments`). nil while nothing is resident, so an
      /// empty cache states that it cannot answer rather than answering zero.
-diff --git a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
+diff --git b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..212cfd1a962f6492c9e0564f524bd651ed8b7a75
 --- /dev/null
-+++ b/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
++++ a/Tests/AetherEngineTests/AudioDelayCacheBudgetTests.swift
 @@ -0,0 +1,53 @@
 +import Foundation
 +import Testing
@@ -4240,11 +4240,11 @@ index 0000000000000000000000000000000000000000..212cfd1a962f6492c9e0564f524bd651
 +        }
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
+diff --git b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..94d4d61c8a3ba46c4496d2f345583d9e888a01c0
 --- /dev/null
-+++ b/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
++++ a/Tests/AetherEngineTests/AudioDelayDiscontinuityBudgetTests.swift
 @@ -0,0 +1,88 @@
 +import Testing
 +@testable import AetherEngine
@@ -4334,10 +4334,10 @@ index 0000000000000000000000000000000000000000..94d4d61c8a3ba46c4496d2f345583d9e
 +        }
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/AudioTailPaddingTests.swift b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
+diff --git b/Tests/AetherEngineTests/AudioTailPaddingTests.swift a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
 index 755074ef6b8c6f987bef90a69885e50b548f8ca2..0d027d288594306c2eae1518ef5d08560d4865e6 100644
---- a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
-+++ b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
+--- b/Tests/AetherEngineTests/AudioTailPaddingTests.swift
++++ a/Tests/AetherEngineTests/AudioTailPaddingTests.swift
 @@ -179,6 +179,56 @@ struct AudioTailPaddingTests {
          }
      }
@@ -4395,11 +4395,11 @@ index 755074ef6b8c6f987bef90a69885e50b548f8ca2..0d027d288594306c2eae1518ef5d0856
      private static func installEncoderExtradata(on par: UnsafeMutablePointer<AVCodecParameters>) throws {
          let codec = try #require(avcodec_find_encoder(par.pointee.codec_id))
          var encOpt = avcodec_alloc_context3(codec)
-diff --git a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
+diff --git b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..21557d7e140e9cc8745258c5f6e9d5aa6670b18a
 --- /dev/null
-+++ b/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
++++ a/Tests/AetherEngineTests/CompressedAudioDelayAlignmentTests.swift
 @@ -0,0 +1,209 @@
 +import Foundation
 +import Testing
@@ -4610,11 +4610,11 @@ index 0000000000000000000000000000000000000000..21557d7e140e9cc8745258c5f6e9d5aa
 +        try await job.outcome().get()
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
+diff --git b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..727b7571176a57bceaa954a582f8c1850682c3fd
 --- /dev/null
-+++ b/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
++++ a/Tests/AetherEngineTests/DirectLiveAudioDelayRoutingTests.swift
 @@ -0,0 +1,57 @@
 +import Foundation
 +import Testing
@@ -4673,11 +4673,11 @@ index 0000000000000000000000000000000000000000..727b7571176a57bceaa954a582f8c185
 +        }
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
+diff --git b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..498d3ca3bfeeeb666c585c0e3e5f0152ac338d77
 --- /dev/null
-+++ b/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
++++ a/Tests/AetherEngineTests/HEAACSilenceEncoderTests.swift
 @@ -0,0 +1,443 @@
 +import Foundation
 +import AVFoundation
@@ -5122,10 +5122,10 @@ index 0000000000000000000000000000000000000000..498d3ca3bfeeeb666c585c0e3e5f0152
 +    }
 +
 +}
-diff --git a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
+diff --git b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
 index cdb432bb898691511130e6c46c293de66306703a..9815ea9263c8323bc5182748a9aa73181f533e4c 100644
---- a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
-+++ b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
+--- b/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
++++ a/Tests/AetherEngineTests/Issue464AudioDelayTests.swift
 @@ -15,8 +15,8 @@ struct Issue464AudioDelayPolicyTests {
      func clamping() {
          #expect(AudioDelayPolicy.clamp(0.15) == 0.15)
@@ -5158,11 +5158,11 @@ index cdb432bb898691511130e6c46c293de66306703a..9815ea9263c8323bc5182748a9aa7318
      }
  
      @Test("every route says where its offset lands, and the two AVPlayer-owned ones say they cannot")
-diff --git a/Tests/AetherEngineTests/LiveAudioDelayTests.swift b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
+diff --git b/Tests/AetherEngineTests/LiveAudioDelayTests.swift a/Tests/AetherEngineTests/LiveAudioDelayTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..23ecb1c1cfb08e6d5d3d62bc291756a150e333b9
 --- /dev/null
-+++ b/Tests/AetherEngineTests/LiveAudioDelayTests.swift
++++ a/Tests/AetherEngineTests/LiveAudioDelayTests.swift
 @@ -0,0 +1,369 @@
 +import Foundation
 +import Testing
@@ -5533,11 +5533,11 @@ index 0000000000000000000000000000000000000000..23ecb1c1cfb08e6d5d3d62bc291756a1
 +        #expect(engine.nativeHost?.transportIntentIsPlaying == false)
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
+diff --git b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..292c9ecc61d5b91d6e7268b5f0b7f4a4ec7a87ec
 --- /dev/null
-+++ b/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
++++ a/Tests/AetherEngineTests/NativeLargeAudioDelayTests.swift
 @@ -0,0 +1,349 @@
 +import Foundation
 +import AVFoundation
@@ -5888,11 +5888,11 @@ index 0000000000000000000000000000000000000000..292c9ecc61d5b91d6e7268b5f0b7f4a4
 +        #expect(!AudioDelayPolicy.requiresRebuild(from: 2, to: -2))
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
+diff --git b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..67ff31e8f258f863095d4c72a4782d64d4393ed2
 --- /dev/null
-+++ b/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
++++ a/Tests/AetherEngineTests/SoftwareAudioDelayEpochTests.swift
 @@ -0,0 +1,152 @@
 +import Foundation
 +import Testing
@@ -6046,11 +6046,11 @@ index 0000000000000000000000000000000000000000..67ff31e8f258f863095d4c72a4782d64
 +    }
 +
 +}
-diff --git a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
+diff --git b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..86c70bfaf41bc451531223b48026ad644d32c38b
 --- /dev/null
-+++ b/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
++++ a/Tests/AetherEngineTests/SoftwareAudioDelayTimelineTests.swift
 @@ -0,0 +1,85 @@
 +import Testing
 +@testable import AetherEngine
@@ -6137,11 +6137,11 @@ index 0000000000000000000000000000000000000000..86c70bfaf41bc451531223b48026ad64
 +    }
 +
 +}
-diff --git a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
+diff --git b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..3a14e30c2c8ce6b1aa0652c259dc3960b344d310
 --- /dev/null
-+++ b/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
++++ a/Tests/AetherEngineTests/SoftwareLargeAudioDelayTests.swift
 @@ -0,0 +1,229 @@
 +import Foundation
 +import Testing
@@ -6372,10 +6372,10 @@ index 0000000000000000000000000000000000000000..3a14e30c2c8ce6b1aa0652c259dc3960
 +        }
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
+diff --git b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
 index 79fb1595588bd0b8f1e0c8559025d50eb46b4e38..dd8e735b694507ae353c224d2b9da5fd4d41ef61 100644
---- a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
-+++ b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
+--- b/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
++++ a/Tests/AetherEngineTests/SpatialAudioBridgeTests.swift
 @@ -194,6 +194,133 @@ struct SpatialAudioBridgeTests {
      #endif
  
@@ -6510,11 +6510,11 @@ index 79fb1595588bd0b8f1e0c8559025d50eb46b4e38..dd8e735b694507ae353c224d2b9da5fd
      /// The output comes from `BedRegression`, whose latency the bridge has to keep off the timeline:
      /// the stand-in decoders carry a bed, and the timestamps and the tail are those of the source.
      @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024")
-diff --git a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
+diff --git b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..772b6ddea3fe4cedd7fcc91053ac58c10206da64
 --- /dev/null
-+++ b/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
++++ a/Tests/AetherEngineTests/Support/ForwardOnlyMediaReader.swift
 @@ -0,0 +1,25 @@
 +import Foundation
 +@testable import AetherEngine
@@ -6541,11 +6541,11 @@ index 0000000000000000000000000000000000000000..772b6ddea3fe4cedd7fcc91053ac58c1
 +    /// Records ownership release without blocking teardown.
 +    func close() { closes.update { $0 += 1 } }
 +}
-diff --git a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
+diff --git b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..1683bce374d8ff578bc19822f922d90836048d33
 --- /dev/null
-+++ b/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
++++ a/Tests/AetherEngineTests/Support/IndexedAudioDelayFixture.swift
 @@ -0,0 +1,85 @@
 +import Foundation
 +import AetherLibavcodec
@@ -6632,11 +6632,11 @@ index 0000000000000000000000000000000000000000..1683bce374d8ff578bc19822f922d908
 +        return Double(repetitions - 1) * stride + videoEnd
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
+diff --git b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..11b0f6c05bf2d473b50392ec881b834d8ef1d92b
 --- /dev/null
-+++ b/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
++++ a/Tests/AetherEngineTests/Support/LongAudioDelayTransportStreamFixture.swift
 @@ -0,0 +1,53 @@
 +import Foundation
 +import AetherLibavcodec

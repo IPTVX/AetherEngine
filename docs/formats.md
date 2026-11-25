@@ -143,6 +143,10 @@ So an origin that turned AVPlayer away with a user-agent filter or a per-token c
 
 `LoadOptions.nativeRemoteHLSIngestFallback = false` turns off both recoveries (the live HEVC-in-MPEG-TS reroute and the refusal hand-off).
 
+**A session that never becomes playable** (#334). Some origins answer every request while AVFoundation builds no track from what they serve. AVPlayer then neither fails nor becomes ready. So the engine ends a bypass session after 45 s with no readiness, no failure and no reroute, and publishes `.noPlayableTrackWithinBudget`. Anything that happens before that (readiness, a failure, a reroute) stops the clock.
+
+**Lengthening that wait** (AE#1123). A server transcode can take most of a minute to produce its first segment: a Jellyfin 4K HDR conversion took 45 s during a library scan. A host that wants to give it longer, for example under its own start watchdog and its own message, sets `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds` (85 s, say) for that load and leaves it nil for direct streams. Values under 45 s are raised to 45 s, because the carriage check above needs that long to reroute. Values over an hour are capped at an hour.
+
 **Live `m3u8` on the loopback path** (#363). The raw live path reads bytes, not playlists. So for an `.m3u8` the engine builds the live ingest reader itself, and sends `LoadOptions.httpHeaders` with the playlist, every segment and every AES key. A tokenized IPTV origin checks exactly that on each request. Credential headers go only to the playlist's own origin: a segment or key on another host, or on http:// behind an https:// playlist, gets the other headers but not the token. A custom `IOReader` that hands a playlist to the raw live path gets the typed `hlsPlaylistOnRawLivePath` error, because it has no playlist URL to ingest from.
 
 **Non-live `m3u8` on the loopback path** (#154). The bundled FFmpeg has no network support, so it can never demux the playlist locally, and remote HLS is AVPlayer's job anyway. On the bypass, the engine lists the stream's external WebVTT renditions (the legible `AVMediaSelectionGroup`) as `subtitleTracks`. `selectSubtitleTrack(index:)` and `clearSubtitle()` drive AVPlayer's media selection, and AVPlayer draws the cues.
@@ -1601,7 +1605,13 @@ Hosts that render authored ASS styling themselves (positioning, speaker colours,
 
 - Cues carry the raw event line (override tags, style references, escapes intact).
 - The script header (`[Script Info]` + `[V4+ Styles]`) is surfaced.
-- `engine.fontAttachments` carries the container's embedded fonts (TTF / OTF) for the renderer's font directory. A host that does not use them sets `LoadOptions.skipsContainerAttachments`, which saves the open reading them: tens of megabytes on anime releases (AE#956).
+- `engine.fontAttachments` carries the container's embedded fonts (TTF / OTF) for the renderer's font directory. They arrive after the first frame (AE#1129), so observe `$fontAttachments` and rebuild the renderer's font set when it changes. A host that does not use them sets `LoadOptions.skipsContainerAttachments` and nothing reads them (AE#956).
+
+**Fonts under a modern MIME type no longer stretch the open (AE#1129).** MKVToolNix labels fonts `font/ttf`, `font/otf` or `font/sfnt` by default (on Windows since v58), and since v99 it rewrites the older names to these whenever it remuxes. libavformat's Matroska demuxer only knows the older names (`application/x-truetype-font`, `application/vnd.ms-opentype`), so it leaves such an attachment without a codec id. `find_stream_info` counts that as a stream it has not identified yet, and an attachment never sends a packet, so the analysis read on to its full 60 s window before the first frame. The demuxer now gives these attachments a placeholder codec id for the analysis and takes it away again afterwards. The fonts and `fontAttachments` are unchanged, and the `open timings` line counts the skipped attachments as `attachmentsParked`.
+
+Measured on a 970 MB MKV with 14 fonts and about 5 Mbit/s of video and audio, over a 68 Mbit/s link: the analysis went from 4.5 s and 36.7 MB to 0.22 s and 256 KB.
+
+**The fonts themselves are read after the first frame (AE#1129).** libavformat reads the whole Attachments element inside `avformat_open_input`, so before this the fonts' full transfer sat in front of the first frame: on the file above, 11.2 s of its 12.1 s start. Now the session's open skips them and a second reader fetches them once the first frame is up, which took that start to 1.0 s, with the fonts arriving at 16.4 s. Details and the cases that still read at open: [api › `readsContainerAttachmentsAtOpen`](api.md#readscontainerattachmentsatopen).
 
 `ASSScriptBuilder` reassembles raw event cues + header into a complete script for whole-file renderers such as swift-ass-renderer's `loadTrack(content:)`. It is hardened against real-world Matroska tracks: it synthesizes an `[Events]` section, strips NULs, and dedupes by content, since real files hardcode `ReadOrder: 0`.
 

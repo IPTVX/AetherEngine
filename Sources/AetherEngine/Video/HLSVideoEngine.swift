@@ -901,7 +901,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
             guard first else { return }
         }
         provider?.abortSequentialStartupWait()
+        restartLock.lock()
+        if vodSourceFailure == nil { vodSourceFailure = VODSourceFailure(code: code, reason: reason, kind: kind) }
+        restartLock.unlock()
         onVODSourceFailed?(code, reason, kind)
+    }
+
+    /// A terminal source failure, as `surfaceVODSourceFailure` reported it.
+    struct VODSourceFailure: Error, LocalizedError {
+        let code: Int32
+        let reason: String
+        let kind: PlaybackErrorKind
+        var errorDescription: String? { "\(reason) (code \(code))" }
+        /// What the host sees, whether the failure arrives through `onVODSourceFailed` or a thrown load.
+        var errorInfo: PlaybackErrorInfo {
+            PlaybackErrorInfo(kind: kind, message: "\(reason) (code \(code))", underlyingCode: Int(code))
+        }
+    }
+    private var vodSourceFailure: VODSourceFailure?
+
+    /// The first terminal failure this session surfaced. Retained because the first pumps can die
+    /// during `start()`, before loadNative installs this session, and `onVODSourceFailed` then has
+    /// nobody to tell: the load mounted a session that never wrote a segment and sat at 0:00.
+    var pendingVODSourceFailure: VODSourceFailure? {
+        restartLock.lock(); defer { restartLock.unlock() }
+        return vodSourceFailure
     }
     private let silentBridgeSurfaceLock = NSLock()
     private var silentBridgeFailureSurfaced = false

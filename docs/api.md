@@ -65,6 +65,7 @@ The event subjects below (`liveSourceReset`, `liveSourceReplayExhausted`, `liveR
 | What happened | `load()` | `state` |
 | --- | --- | --- |
 | The source could not be opened, probed, or routed | throws | `.error(message)` is published as well |
+| The native session reported a terminal source failure while starting (AE#1124) | throws | `.error(message)`; `errorInfo` carries that failure's kind (for example `.storageExhausted`), not `.sourceOpenFailed` |
 | A newer `load()` or a `stop()` superseded this one | throws `CancellationError` | belongs to the successor, untouched |
 | The Task awaiting it was cancelled while it ran (Sodalite#173) | throws `CancellationError` | `.idle`; the native host is kept for the next load, as with a newer `load()` |
 | AVPlayer refused the media during startup, and the engine rebuilt the session on the software path (AE#561) | keeps waiting, then returns (or throws what the rebuild threw) | whatever the rebuilt session reaches; `softwarePathEscalations` fires with `duringStartup` |
@@ -84,7 +85,7 @@ A load the ENGINE superseded does not throw it. When the software-path rebuild (
 
 Log the message inside `.error` verbatim, but do not classify on it. It comes from two places:
 
-- **The engine's own sentence.** It names the cause, not the symptom. Examples: `"AVFoundation built no track for it within 45s and the source's carriage could not be identified"`, `"Live source unavailable"`, or the Dolby Vision hardware refusal. A host timeout that fires first replaces it with the host's own sentence.
+- **The engine's own sentence.** It names the cause, not the symptom. Examples: `"AVFoundation built no track for it within 45s and the source's carriage could not be identified"` (the number follows `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds`), `"Live source unavailable"`, or the Dolby Vision hardware refusal. A host timeout that fires first replaces it with the host's own sentence.
 - **Forwarded from the failure underneath.** On the native paths this is `AVPlayerItem.error.localizedDescription` verbatim. AVFoundation localizes it into the device language. The `NSError` domain and code survive only if the localized text happens to contain them.
 
 `$errorInfo` publishes a `PlaybackErrorInfo` beside the state. Its fields:
@@ -125,6 +126,8 @@ Kinds that need their own handling:
 - **`.sourceCertificateRejected`**: the transport was refused over certificate trust; `underlyingCode` is the `NSURLErrorDomain` code. See [Certificate refusals](#certificate-refusals-sourcecertificaterejected).
 - **`.audioBridgeProducedNoOutput`** means demote to another player, not stop. The source's audio had to be transcoded into fMP4 (MP3, MP2, DTS, TrueHD, Vorbis, PCM) and produced no encoded audio at all. The mp4 muxer derives its sample entry from a written packet, so it could not build one (AE#396). The source is neither gone nor unreadable: a second player that decodes the track itself plays the file. See also [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered).
 - **`.storageExhausted`** is neither a source nor an audio failure. The volume holding the loopback segment cache (the temporary directory) filled up, so no segment could be written (`underlyingCode` is `-28`, `AVERROR(ENOSPC)`). The source, its audio and every other player are fine. The same load succeeds once space is freed. It also fires when a write would break `sessionCacheHardLimitBytes` or `sessionCacheFreeReserveBytes` ([Whole-session segment storage admission](#whole-session-segment-storage-admission)), with the same `-28`, even though the volume itself may still have room.
+  - Before the first segment is stored it arrives at once, without a muxer rebuild: every rebuild would fail the same way and restart at 0:00, losing the resume position. Later in a session the rebuilds run first, since a brief dip below the free reserve can clear.
+  - A track switch or reload that rebuilds the session onto a full volume reports `.storageExhausted` too, not `.audioTrackSwitchFailed`. Switching again would fail the same way.
 - **`.sourceFabricatesRanges`** asks for a different load, not a retry. Load the source again with `sequentialOrigin` and `declaredDurationSeconds` (see [`sequentialOrigin`](#sequentialorigin)). The origin answered a byte range with other bytes (AE#958): a `206` named the requested offset, but the body did not hold the bytes the reader already had there. An IPTV timeshift archive answering on its own chunk boundary does this. Nothing past byte 0 can be placed.
 - **`.liveSourceUnavailable`**, **`.hlsFormatUnsupported`**, **`.hlsIngestFailed`**, **`.customSourceProbeFailed`**: see the sections below.
 
@@ -2402,7 +2405,7 @@ Every playback, probe and restart open logs one `[Demuxer] open timings (<reader
 
 An open that ran the stream analysis appends how it ended, after the budget:
 
-`; probe stop=<resolved|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->`
+`; probe stop=<resolved|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->, attachmentsParked=<n>`
 
 - `stop` is the first cause that applies, in this order:
   - a close (`stopped`)
@@ -2415,6 +2418,7 @@ An open that ran the stream analysis appends how it ended, after the budget:
 - `unresolved` counts the audio and video streams still missing their size, or their sample rate and channels.
 - `pmtMissing` counts the MPEG-TS programs whose PMT never arrived, and `headerWait` says when the engine released the wait for one (see [A PAT program that never sends its PMT](formats.md#raw-live-mpeg-ts-and-the-live-join)).
 - `probeBytes` is what the analysis read from the source, `closeToReturn` how long it took to end after a close.
+- `attachmentsParked` counts the attached files without a codec id that the analysis skipped, mostly fonts labelled `font/ttf` or `font/otf` (see [Authored ASS styling](formats.md#authored-ass-styling), AE#1129). A slow open of a font-heavy MKV that shows `0` here has another cause.
 
 A failed analysis adds `; find_stream_info failed (<code>)` after those fields. The line carries no URL, header or payload.
 
@@ -2568,7 +2572,8 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `sequentialOrigin` | false | Declare an origin that fakes its range answers: one long-lived unranged GET, no ranged probes, a non-seekable byte source (pb). See [`sequentialOrigin`](#sequentialorigin). |
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required together with `sequentialOrigin` on VOD, where the tail read is gone. |
 | `probesize`, `maxAnalyzeDuration` | nil | Caller-bounded open-time probe budget (defaults 50 MB / 60 s). `probesize` is in bytes, `maxAnalyzeDuration` in **microseconds** (60 s is `60_000_000`). See the note below. |
-| `skipsContainerAttachments` | false | Open a Matroska source without reading its attached files (AE#956). See [`skipsContainerAttachments`](#skipscontainerattachments). |
+| `skipsContainerAttachments` | false | Never read a Matroska source's attached files (AE#956). See [`skipsContainerAttachments`](#skipscontainerattachments). |
+| `readsContainerAttachmentsAtOpen` | false | Read a Matroska source's attached files while it opens, before the first frame, instead of after it (AE#1129). See [`readsContainerAttachmentsAtOpen`](#readscontainerattachmentsatopen). |
 
 **`probesize`, `maxAnalyzeDuration`.** They fail **open** as long as some stream resolves: a budget that is too tight loads, with late-resolving tracks silently missing. If you tighten them, check that the tracks you need are there. A budget within which no stream resolves throws. Do not pass `0` for `maxAnalyzeDuration`; FFmpeg maps it to a shorter heuristic.
 
@@ -2615,6 +2620,7 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | `liveBlockingReload` | nil (auto) | LL-HLS blocking-reload override for loopback live sessions. Auto decides from the observed upstream cadence, which is what keeps a bursty relay out of a `-15410` loop. |
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Built for `isLive: true`; a remote HLS VOD URL reaches this route anyway (AE#154). The clock here is item time; see `clock.$sourceTime` (AE#616). |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 recovery after a 401/403 refusal on the bypass. Setting it false turns both off. |
+| `nativeRemoteHLSReadinessBudgetSeconds` | nil (45 s) | How long a `nativeRemoteHLS` session may show no readiness, no failure and no reroute before it ends with `.noPlayableTrackWithinBudget` (#334). Raise it for a server transcode that is slow to start (AE#1123). Kept between 45 s and an hour. A tuning field. |
 | `hostRetriesExhaustedLiveReplay` | `false` | The host owns the retry after a verified live replay exhausts the in-engine reopen: the engine publishes `liveSourceReplayExhausted` and holds production until `retryLiveSourceRecovery()`. `false` publishes `liveSourceReset` for the same exhaustion. |
 
 1. **`dvrWindowSeconds`.** The disk budget bounds what is actually kept: a quarter of the free space, at most 2 GiB unless `liveDVRByteBudget` lifts it on the software route. So a long window on a high-bitrate channel, or on a small volume, holds less than it asks for. With several engines running, each one's quarter comes from the free space the others have not claimed yet, so a tile added on a tight volume holds less history than the first one (AE#687).
@@ -2785,14 +2791,27 @@ Declares an origin that fakes its range answers: one long-lived unranged GET, no
 
 #### `skipsContainerAttachments`
 
-Matroska carries the fonts of its ASS subtitles as attachments, tens of megabytes on anime releases. The demuxer reads all of them while the file opens, before the first packet. Over a slow origin that is most of the startup time.
+Matroska carries the fonts of its ASS subtitles as attachments, tens of megabytes on anime releases. By default the engine reads them after the first frame on a second reader (see [`readsContainerAttachmentsAtOpen`](#readscontainerattachmentsatopen)). With this option on, it does not read them at all.
 
-- With this on, the open skips them (FFmpegBuild's `skip_attachments` matroska option). `fontAttachments` stays empty, and a Matroska cover image is not reported in `metadata`. Tracks, their indices and packets are unchanged.
+- `fontAttachments` stays empty, and a Matroska cover image is not reported in `metadata`. Tracks, their indices and packets are unchanged.
 - It suits a host that renders text subtitles itself, or does without the embedded fonts. A host that renders ASS with them (see [formats.md › Authored ASS styling](formats.md#authored-ass-styling)) leaves it off.
 - Other containers are unaffected.
-- Only the session's first open reads attachments either way. The side readers (embedded subtitles, scrub stills, I-frames, the Atmos and Dolby Vision passes) and the reopens of the same source always skip them.
 - Correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()`.
 - `AetherEngine.probe(...)` honours it too (AE#1029). Without it, a probe of a Matroska file pays for the whole attachment set, so a probe under a `ProbeLimits.maxInputBytes` smaller than the fonts stops with `ProbeError.inputLimit` instead of answering from the header. With it, `SourceProbe.metadata` has no Matroska cover image.
+
+#### `readsContainerAttachmentsAtOpen`
+
+Off by default. The session's own open then passes over a Matroska source's attached files, and a second reader fetches them once the first frame is up (AE#1129). The fonts used to sit in front of the first frame: 94 MB of them took the first frame from about 1 s to 12 s over a 68 Mbit/s link.
+
+- **`fontAttachments` and a Matroska cover arrive after `load()` returns.** Both are `@Published`, so observe `$fontAttachments` (and `$metadata` for the cover) instead of reading them once at load. A host that keeps the fonts in a per-title cache can render with that cache at once and refresh when the list lands.
+- **The second reader shares the link with playback.** It starts once the first frame is up and playback holds 15 s ahead, or everything is buffered (it waits at most 10 s for that after the first frame, and up to 30 s for the first frame itself; a source without a picture skips that part). It reads the attachments in one pass, so they take longer than at open: 16.4 s instead of 11.5 s for the 94 MB above. Playback did not stall meanwhile.
+- **It runs on every Matroska source,** because only an open can tell whether a file has attachments. On a file without them it costs two requests and about 390 KB (the head and a 64 KB tail read), 92 ms in the measurement above.
+- **It follows the session's requests.** It uses the session's header store, so a token rotated through `updateRequestHeaders(_:)` reaches it, and it does not start on an origin that has dropped to one request at a time since the load (`[Attachments] skipped: ...`).
+- **Turn this on** for a host that reads `fontAttachments` once at load and cannot follow the publisher. The read then happens at open, as before, and the list is complete when `load()` returns.
+- **The engine reads at open by itself where a second reader is not possible:** live sources, a custom reader without an independent cursor, `sequentialOrigin`, `heldSourceConnection`, and an origin already limited to one request at a time. The log says why with `[Attachments] read at open: <reason>`.
+- The side read logs `[Attachments] side read: <n> font(s), <bytes> B, cover=<yes|no>, <ms> ms`, or that it failed. A failure leaves `fontAttachments` empty and never fails the session.
+- No other reader reads attachments: the embedded subtitle readers, scrub stills, I-frames, the Atmos and Dolby Vision passes and every reopen of the source skip them.
+- Ignored when `skipsContainerAttachments` is on. Correctable through `reloadAtCurrentPosition(applying:)` on a URL source.
 
 #### `liveEdgeCushionSeconds`
 

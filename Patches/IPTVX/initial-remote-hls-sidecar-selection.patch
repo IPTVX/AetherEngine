@@ -1,8 +1,8 @@
-diff --git a/Sources/AetherEngine/AetherEngine+Loading.swift b/Sources/AetherEngine/AetherEngine+Loading.swift
-index e0b10dd0c1a2e3d9a98e1e7c33649cacc288509d..1de9553666e13b77b427d0411e81f4cf42a6013f 100644
---- a/Sources/AetherEngine/AetherEngine+Loading.swift
-+++ b/Sources/AetherEngine/AetherEngine+Loading.swift
-@@ -703,6 +703,10 @@ extension AetherEngine {
+diff --git b/Sources/AetherEngine/AetherEngine+Loading.swift a/Sources/AetherEngine/AetherEngine+Loading.swift
+index 2e15004516e170d8e2f5f8f1ffd23c4fa8edb4a9..c2ea78af3c717f4c05f258bb3f78732c7a85339f 100644
+--- b/Sources/AetherEngine/AetherEngine+Loading.swift
++++ a/Sources/AetherEngine/AetherEngine+Loading.swift
+@@ -706,6 +706,10 @@ extension AetherEngine {
          // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
          // Selection routes back through `selectSubtitleTrack(index:)` / `clearSubtitle()`.
          publishRemoteHLSSubtitleTracks(host: host)
@@ -13,12 +13,12 @@ index e0b10dd0c1a2e3d9a98e1e7c33649cacc288509d..1de9553666e13b77b427d0411e81f4cf
  
          // VOD path triggers play() at the tail of load(); this lean path early-returns, so self-start here. AVKit drives match-content; automaticallyWaitsToMinimizeStalling handles play-before-ready. Without this call the item reaches readyToPlay but timeControlStatus stays .paused.
          // State stays .loading; flips to .playing only when timeControlStatus sink sees AVPlayer rendering.
-diff --git a/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift b/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift
+diff --git b/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift a/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..be973712ca46066d918727b26f81b21dff724d2c
+index 0000000000000000000000000000000000000000..9bd75d6b032213ed73db687dc0e1b642f1b006e5
 --- /dev/null
-+++ b/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift
-@@ -0,0 +1,100 @@
++++ a/Tests/AetherEngineTests/Issue984SlowSidecarIntegrationTests.swift
+@@ -0,0 +1,116 @@
 +import AVFoundation
 +import Foundation
 +import Testing
@@ -70,9 +70,16 @@ index 0000000000000000000000000000000000000000..be973712ca46066d918727b26f81b21d
 +            autoplay: true
 +        )
 +        options.initialSubtitleTrackID = selectedAtLoad ? trackID : nil
++        // The initial pick also exercises a native resume through the 7.75 served variant.
++        // This TS fixture has no EXT-X-MAP, so the fMP4-only warm correctly stays inactive.
++        let resumePosition: Double? = selectedAtLoad ? 40 : nil
 +
 +        // Act
-+        try await engine.load(url: try #require(URL(string: origin.baseURL + "/master.m3u8")), options: options)
++        try await engine.load(
++            url: try #require(URL(string: origin.baseURL + "/master.m3u8")),
++            startPosition: resumePosition,
++            options: options
++        )
 +        let host = try #require(engine.nativeHost)
 +        let item = try #require(host.avPlayer.currentItem)
 +        item.preferredForwardBufferDuration = 1
@@ -82,6 +89,10 @@ index 0000000000000000000000000000000000000000..be973712ca46066d918727b26f81b21d
 +        }
 +        try #require(ready && item.status == .readyToPlay,
 +                     "Native loopback HLS must become ready while its selected sidecar is held; error=\(String(describing: engine.errorInfo))")
++        if let resumePosition {
++            #expect(host.avPlayer.currentTime().seconds >= resumePosition - 0.5)
++            #expect(host.avPlayer.currentTime().seconds < resumePosition + 5)
++        }
 +        if !selectedAtLoad { engine.selectSubtitleTrack(index: trackID) }
 +        #expect(engine.activeSubtitleTrackIndex == trackID)
 +        try await waitFor { responseGate.entered }
@@ -107,6 +118,11 @@ index 0000000000000000000000000000000000000000..be973712ca46066d918727b26f81b21d
 +        let mediaRequests = origin.requests.filter { $0.path.hasSuffix(".ts") }
 +        #expect(!mediaRequests.isEmpty)
 +        #expect(mediaRequests.allSatisfy { $0.headers["authorization"] == headers["Authorization"] })
++        #expect(mediaRequests.allSatisfy { $0.headers["user-agent"] == headers["User-Agent"] })
++        if selectedAtLoad {
++            #expect(mediaRequests.first?.path == "/segment1.ts",
++                    "Native TS playback must begin with the segment containing the resume position")
++        }
 +
 +        // Act — only a completed sidecar may now be handed to AVPlayer.
 +        responseGate.open()
@@ -119,10 +135,10 @@ index 0000000000000000000000000000000000000000..be973712ca46066d918727b26f81b21d
 +        #expect(item.currentMediaSelection.selectedMediaOption(in: legible)?.displayName == "Delayed English")
 +    }
 +}
-diff --git a/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift b/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
+diff --git b/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift a/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
 index 8d1a0b82576332908576aa5d9fefb1727793b1c7..9de03e9da49d9b8d1e5cd5c9e3912f5587022ff8 100644
---- a/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
-+++ b/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
+--- b/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
++++ a/Tests/AetherEngineTests/Support/RangeFilesOrigin.swift
 @@ -26,6 +26,8 @@ final class RangeFilesOrigin: @unchecked Sendable {
      private var _stopped = false
      private var _ignoresRange = false

@@ -49,9 +49,16 @@ struct Issue984SlowSidecarIntegrationTests {
             autoplay: true
         )
         options.initialSubtitleTrackID = selectedAtLoad ? trackID : nil
+        // The initial pick also exercises a native resume through the 7.75 served variant.
+        // This TS fixture has no EXT-X-MAP, so the fMP4-only warm correctly stays inactive.
+        let resumePosition: Double? = selectedAtLoad ? 40 : nil
 
         // Act
-        try await engine.load(url: try #require(URL(string: origin.baseURL + "/master.m3u8")), options: options)
+        try await engine.load(
+            url: try #require(URL(string: origin.baseURL + "/master.m3u8")),
+            startPosition: resumePosition,
+            options: options
+        )
         let host = try #require(engine.nativeHost)
         let item = try #require(host.avPlayer.currentItem)
         item.preferredForwardBufferDuration = 1
@@ -61,6 +68,10 @@ struct Issue984SlowSidecarIntegrationTests {
         }
         try #require(ready && item.status == .readyToPlay,
                      "Native loopback HLS must become ready while its selected sidecar is held; error=\(String(describing: engine.errorInfo))")
+        if let resumePosition {
+            #expect(host.avPlayer.currentTime().seconds >= resumePosition - 0.5)
+            #expect(host.avPlayer.currentTime().seconds < resumePosition + 5)
+        }
         if !selectedAtLoad { engine.selectSubtitleTrack(index: trackID) }
         #expect(engine.activeSubtitleTrackIndex == trackID)
         try await waitFor { responseGate.entered }
@@ -86,6 +97,11 @@ struct Issue984SlowSidecarIntegrationTests {
         let mediaRequests = origin.requests.filter { $0.path.hasSuffix(".ts") }
         #expect(!mediaRequests.isEmpty)
         #expect(mediaRequests.allSatisfy { $0.headers["authorization"] == headers["Authorization"] })
+        #expect(mediaRequests.allSatisfy { $0.headers["user-agent"] == headers["User-Agent"] })
+        if selectedAtLoad {
+            #expect(mediaRequests.first?.path == "/segment1.ts",
+                    "Native TS playback must begin with the segment containing the resume position")
+        }
 
         // Act — only a completed sidecar may now be handed to AVPlayer.
         responseGate.open()

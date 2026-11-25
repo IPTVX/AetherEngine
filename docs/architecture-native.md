@@ -345,6 +345,16 @@ So a VOD serve still running at 2 s sends the response headers early: a `200` wi
 - `ItemDeathReviveGate` caps this at 3 attempts per dead spot. Playback progress, or a user seek away, restores the budget.
 - The fresh item resumes only if the host's play intent says the viewer was playing. A paused title whose item dies (a tvOS screensaver taking the display is one way) is reloaded and stays paused.
 
+### Where a producer revive aims
+
+When a VOD pump dies (a read error, a refused credential renewed by the host, a muxer failure, the AE#222 audio moov prime), the engine rebuilds the producer at one spot. `consumerRecoveryTarget()` picks it, in this order:
+
+1. A seek the viewer asked for that never landed.
+2. The load's start position, while no frame has rendered yet. AVPlayer was mounted there and asks for a segment near it (AE#1126).
+3. AVPlayer's rendered position.
+
+Rule 2 is what keeps a resume. Before the first frame the rendered position is still 0, so a revive during startup used to restart the producer at seg0 while AVPlayer waited for a segment near the resume point. A sequential origin is the exception: its first producer reads from byte 0 anyway, so there is no start position to keep.
+
 ### End-of-item recovery
 
 When an item ends, native recovery first records the highest published clock value and how fresh it is, then awaits AVFoundation's off-main reading. A slow reading therefore cannot invalidate that proof of the end and replay an audio tail that already finished.
@@ -561,6 +571,12 @@ The native pipeline above is the **loopback** route: the engine demuxes, remuxes
 The `Native/RemoteHLS*` types cover what is left for the engine: media selection (`RemoteHLSMediaSelection`), the readiness deadline, the subtitle cue clock and the carriage watchdog (`RemoteHLSIngestFallback`), which notices when AVPlayer cannot play the stream's carriage and falls back to ingest.
 
 - **Local proxy, only when needed.** The engine puts its local server in front of the origin's master playlist for two reasons only (`RemoteHLSSubtitleProxy`). It can declare host sidecar subtitles as renditions in a master of its own (#316). It can relay the media through a URLSession the engine owns, so the host's TLS trust answer applies (`HLSOriginRelay`, AE#495). The two compose.
+- **The proxy serves the variant it fetched.** To learn the program's length, the proxy already reads the master's first variant playlist. With no relay in front, its master points AVPlayer at that copy (`/origin_variant.m3u8`, every URI made absolute) instead of the origin's, so AVPlayer does not fetch it again. On a Jellyfin transcode one variant fetch takes 0.8 to 1.8 s (AE#1122). A variant whose answer set a cookie stays at the origin: the proxy's session keeps that cookie, and AVPlayer would then ask for the segments without it.
+- **A resume asks for the resume segment first (AE#1122).** With a start position, AVPlayer requests the fMP4 init before the segment it starts in. A Jellyfin transcode builds that init from a job at position 0, then kills the job for the segment request and starts again at the resume point: two ffmpeg starts in a row. `RemoteHLSResumeWarm` turns the order around. The first request for the served variant waits until the origin has answered a GET for the resume segment (capped at 8 s), and only then goes out, so AVPlayer finds the init and the segment on disk.
+  - The warm sends the User-Agent of that variant request. Jellyfin names the job after the User-Agent too, so a warm with URLSession's own agent started a second job that AVPlayer never used. On AirPlay the variant request comes from the receiver, which is also the client that then asks for the segments.
+  - It only runs where it can help: a finished playlist with `EXT-X-MAP`, a single variant, a start past the first segment, and a segment that is not a byte range of a static file.
+  - It needs the proxy, so today it only runs on a session that declares text sidecars. Without the proxy there is no variant request to hold.
+  - AVPlayer on macOS waited out a variant held for 8 s and played (measured with the segment held at the origin). On tvOS that is not measured yet.
 - **No media bytes.** The engine sees none here. Recording and prewarm do not apply, a starved connection reads as `.rebuffering` rather than `.stalled`, and the audio tap fetches its own copy of the segments (`AudioTapHLSReader`).
 
 ### HLS ingest into the loopback

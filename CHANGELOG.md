@@ -48,6 +48,74 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.75.0] - 2026-11-24
+
+### Added
+
+- **A host can give a slow remote-HLS start longer than 45 s (AE#1123).** The bypass ended a session
+  that showed nothing for 45 s with `.noPlayableTrackWithinBudget` (#334). A server transcode can need
+  that long for its first segment (a Jellyfin 4K HDR conversion took 45 s during a library scan), and
+  then the engine's error reached the viewer before the host's own start watchdog could fire.
+  `LoadOptions.nativeRemoteHLSReadinessBudgetSeconds` sets the wait per load. nil keeps 45 s, shorter
+  values are raised to 45 s (the carriage reroute needs that long), longer ones are capped at an hour.
+  `aetherctl play --readiness-budget` drives it. Requested by golfista.
+
+### Changed
+
+- **Matroska fonts are read after the first frame (AE#1129).** libavformat reads a file's attachments
+  while it opens, so the fonts of an ASS release sat in front of the first frame: 94 MB of them took the
+  start from 1.0 s to 12.1 s over a 68 Mbit/s link. The session's open now passes over them, and a second
+  reader fetches them once the first frame is up and playback has a 15 s cushion (they landed at 16.4 s,
+  playback did not stall).
+  `fontAttachments` is now `@Published` and fills after `load()` returns, and a Matroska cover reaches
+  `metadata` the same way. **A host that reads `fontAttachments` once at load has to observe
+  `$fontAttachments` instead**, or set the new `LoadOptions.readsContainerAttachmentsAtOpen` to keep the
+  old read at open. Live sources, a custom reader without an independent cursor, `sequentialOrigin`,
+  `heldSourceConnection` and an origin limited to one request keep reading at open by themselves.
+  `aetherctl play --attachments-at-open` drives the old path and prints when the fonts land.
+  Reported by zacaronii.
+
+- **AV1 software decoding uses dav1d 1.5.5 (FFmpegBuild 3.19.1).** It brings new AArch64 assembly for the
+  CDEF filters, `emu_edge` and 8-bit `ipred_filter`, faster film grain and palette decoding, and fixes in
+  error paths (a failed T.35 metadata allocation, tile state reallocation or frame task creation). The
+  dav1d API is unchanged.
+
+### Fixed
+
+- **Matroska fonts labelled `font/ttf` or `font/otf` no longer add up to 60 s of reading to the open
+  (AE#1129).** libavformat does not know these MIME types (MKVToolNix writes them by default), so it left
+  the fonts without a codec id, and the stream analysis kept reading until its 60 s window was full
+  while it waited for them to identify. On a 970 MB release with 14 fonts, over a 68 Mbit/s link,
+  that was 36.7 MB and 4.5 s before the first frame; it is now 256 KB and 0.22 s. The fonts themselves
+  are unchanged, and the `open timings` line counts the skipped ones as `attachmentsParked`. Reported
+  by zacaronii.
+
+- **A revive during startup keeps the resume position (AE#1126).** A VOD producer that died before the
+  first frame (a read error, a renewed credential, a muxer failure, the audio moov prime) was rebuilt at
+  the player's rendered position, which is 0 before anything renders. AVPlayer was mounted at the start
+  position and asked for a segment there, while the producer cut from the beginning of the file. The
+  revive now aims at the load's start position until the first frame. Reported by robertontheair.
+
+- **A full disk at startup ends the load with `.storageExhausted` instead of a hang at 0:00 (AE#1124).** A VOD
+  failure reported while the native session was still starting was dropped, because the session was
+  not mounted yet. The load then mounted it anyway, and AVPlayer waited forever with no error. Before
+  that, a full segment volume was revived twice at the player's position, which is 0:00 before the
+  first segment, so a resume lost its position. Now a full volume before the first stored segment ends
+  the session at once, and a failure reported during startup makes `load()` throw and publish its kind. A
+  track switch that rebuilds onto a full volume reports `.storageExhausted` too, not
+  `.audioTrackSwitchFailed`.
+
+- **A resumed server transcode on `nativeRemoteHLS` starts the transcode once (AE#1122).** AVPlayer
+  asks for the fMP4 init before the segment it resumes in. Jellyfin builds that init from a job at
+  position 0, then restarts the job at the resume point for the segment, and the init alone sat right
+  at AVPlayer's 3 s map timeout (`-12889 'No response for map'`). On a session with sidecar subtitles
+  the engine now asks for the resume segment first, with the player's own User-Agent, and hands AVPlayer
+  the variant playlist only after that. It also serves AVPlayer the variant it had already fetched, so
+  the origin sees one variant fetch instead of two (not when that variant answer set a cookie).
+  golfista measured the double start on Jellyfin 12.4 (init 2.9 to 3.75 s, then the segment 3.5 to
+  4.1 s). On my Jellyfin 12.2 test server the init and the resume segment came off disk in 0.04 s
+  on every run after the fix. Reported and measured by golfista.
+
 ## [7.74.0] - 2026-11-24
 
 ### Added

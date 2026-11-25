@@ -66,6 +66,107 @@ Pre-correction baseline: upstream `7.51.0`, IPTVX fork commit
 Delivery: `7.51.0-iptvx`, recreated at the user's explicit request to include this
 correction. The intermediate `7.51.0-iptvx.1` tag was removed.
 
+### 7.75.0 integration — 7.75.0-iptvx
+
+Integrate the complete upstream lightweight `7.75.0` tag at
+`1257b90d759f3bc3f0026f167b19db9eb6d5e201`, verified live against upstream:
+all 19 commits and 38 changed paths after `7.74.0`. The `7.75.0-iptvx` release
+retains a two-parent merge: published fork
+`8b6c1f93dfa419281145daeec92b983fea6bb2c4` first and complete upstream
+`1257b90d759f3bc3f0026f167b19db9eb6d5e201` second. Publication uses the dedicated
+`ibo/codex/aether-7-75-0` branch and a new annotated fork tag; `main` is not updated.
+
+FFmpegBuild remains exact `3.19.1-iptvx` at
+`bb4b01912dfe72d0e4d8f6d647fc86d5c66f14a7`; the published binary already contains
+this release's dav1d 1.5.5. Preserve the other three dependency pins unchanged.
+Keep iOS/tvOS16 and macOS14 deployment floors, availability fallbacks and weak
+MetalFX linkage. No new binary rebuild or raised deployment requirement is part
+of this engine upgrade.
+
+Port decisions:
+
+- Preserve the complete #1122 warm/served-variant implementation and review
+  revisions. The player's request gates the warm so its actual User-Agent joins
+  the host headers; the resume segment is requested before the served variant.
+  A variant that sets a cookie remains at the origin without this warm/cache
+  shortcut. Preserve cancellation, one warm per gate and the bounded release.
+- Preserve #1123's optional per-load native-HLS readiness budget: nil retains
+  45 seconds, lower requests clamp to 45 seconds and higher ones cap at one hour.
+- Preserve all #1124 startup/storage failure-kind handling and #1126's resume
+  aim until the first rendered frame. Pending seek intent still outranks the
+  startup anchor; sequential sources keep their own origin semantics.
+- Preserve all #1129 deferred Matroska attachment revisions, including closing
+  a fork on budget skip, cancellation/token fencing, unnamed/font MIME handling,
+  and `@Published fontAttachments`. The library keeps upstream defaults. A host
+  that consumes fonts synchronously or forbids an extra reader can explicitly
+  set `readsContainerAttachmentsAtOpen`; `skipsContainerAttachments` still wins.
+  Host adoption is an application decision, not a new automatic reader policy
+  added by this fork. Live, sequential, held, serial-budget and unforkable custom
+  sources retain the upstream at-open fallback.
+- The reload-option classification retains both new upstream fields and private
+  `preferAudioDescriptions`. Preserve signed large audio delay, source ownership,
+  Now Playing ownership and host display cadence. All four corrections stay active.
+  The initial-sidecar preference remains after proxy/item mounting and native
+  discovery, before activation/play; no unfinished rendition reaches AVPlayer.
+
+Independent reconstruction starts from the published 7.74 fork archive, removes
+its four snapshots and performs a full per-file three-way merge against upstream
+7.74 and 7.75. Unchanged binary resources are compared as bytes. The only source
+baseline conflict is the reload-option list; it keeps both the attachment key and
+private audio-description key, independently of the correction stack. The new
+custom-reader cursor/closure regression in `AttachmentReadPlanTests` is a generic
+#1129 test copied explicitly into that independent baseline, not hidden in a fork
+correction. No scratch commits are created.
+
+Fresh snapshots are authored by peeling the four corrections from the final
+candidate, newest first. The fourth snapshot also extends the real slow-sidecar
+case to a 40-second native resume with media request ordering and main-media User-Agent
+assertions. Full ordered apply, check and repeated apply reproduce all 1,553
+tracked source/test paths byte for byte with no extra files. The final stack
+checker and all 12 Git/Python maintenance regressions pass.
+
+- `live-audio-delay-without-dvr.patch` SHA-256 `234f023e9b12301f1d0f1ad36ef972f670abe0edfd2cd784ec1ab04ecceb6783`.
+- `audio-now-playing-ownership.patch` SHA-256 `18f15f3f431b6f6465874f22824e3fe34bae04adb415d8202982af1b2199bb58`.
+- `host-display-cadence.patch` SHA-256 `145c03fe862856c040099ee42804178603cc1dff10a9b2c796182fa2a356f0a7`.
+- `initial-remote-hls-sidecar-selection.patch` SHA-256 `b726669cc82be31e7ec9b5f0971cbc6e4598cc53182f9c3c45c14d64c24dfc20`.
+
+Fresh 7.75 Mac validation: 118 selected tests in 17 actual suites pass, with zero
+failures and zero skips (Swift Testing runtime 255.815 seconds), through FlowDeck
+and the published remote FFmpeg dependency. The entire 18-test cancellation suite,
+seven software delay methods / seventeen cases and ten native delay methods
+(twenty-nine parameter cases plus one non-parameter case) pass. Native cases observe
+decoded frames; signed DVR landing, audio switching and shaping retain their
+existing assertions.
+
+Both real sixty-second sidecar cases pass. The initial choice now resumes the
+actual AVPlayer at 40 seconds through the served variant, checks the first media
+request and preserves main-media User-Agent/Authorization; the mid-play case stays
+at the head. This fixture is MPEG-TS without EXT-X-MAP, so it deliberately does not
+trigger the fMP4-only warm. The separate new #1122 suite uses real loopback HTTP to
+prove fMP4 warm-before-variant order, player-agent substitution, host authentication,
+one warm per gate, bounded release and the Set-Cookie origin fallback. It does not
+measure real Jellyfin transcode job counts.
+
+The new attachment probe, plan and deferred-read suites pass: at-open/skip/deferred
+behavior, async publication, Stop fencing and genuine independent-cursor/closure.
+Startup storage failure-kind and resume/revive aim suites pass. Mac logs and the
+result bundle are retained in `scratchpad/iptvx-7.75.0/mac-contracts*`. The initial
+command included a legacy file-based MPEG-TS selector which selected zero tests;
+only the 17 executed suites are counted above. The three actual MPEG-TS suite names
+are validated in a separate focused followup: all 18 tests across
+`MissingPMTReleaseDecisionTests`, `ProbeStopReportTests` and
+`MissingPMTLiveOpenTests` pass with zero failures and zero skips (32.032 seconds
+runtime). The seven paced cases run a real loopback HTTP origin through Demuxer:
+one second of burst followed by the fixture's approximately real-time byte pace,
+with null-TS padding. They verify probe/startup PMT release, late audio/keyframes
+and cancellation. They do not run the software playback clock, an 80%-of-real-time
+origin or #1121 rebuffering; none of those behaviors is inferred from this result.
+
+The 7.74 records remain historical and do not establish this release's runtime
+behavior. Physical playback, HDMI/display transitions and real provider transcode
+job counts remain separate from source proof, loopback HTTP and simulator/Mac
+test evidence.
+
 ### 7.74.0 integration — 7.74.0-iptvx
 
 Integrate the complete upstream lightweight `7.74.0` tag at
